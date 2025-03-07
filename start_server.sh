@@ -36,45 +36,57 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# Install Python 3.10 and required system dependencies
-echo "Installing Python 3.10 and system dependencies..."
-sudo apt-get update
-sudo apt-get install -y software-properties-common
-sudo add-apt-repository -y ppa:deadsnakes/ppa
-sudo apt-get update
-sudo apt-get install -y python3.10 python3.10-venv python3.10-dev
-sudo apt-get install -y libsndfile1-dev ffmpeg portaudio19-dev python3-pyaudio
-sudo apt-get install -y build-essential libssl-dev libffi-dev
+# Function to install system dependencies
+install_system_dependencies() {
+    echo "Installing system dependencies..."
+    sudo apt-get update
+    sudo apt-get install -y \
+        python3-pip \
+        python3-venv \
+        python3-dev \
+        libsndfile1-dev \
+        ffmpeg \
+        portaudio19-dev \
+        python3-pyaudio \
+        build-essential \
+        libssl-dev \
+        libffi-dev
+}
+
+# Check if system dependencies are installed
+if ! command -v ffmpeg &> /dev/null || ! command -v python3 &> /dev/null; then
+    echo "Some system dependencies are missing. Installing them now..."
+    install_system_dependencies
+fi
 
 # Create virtual environment if it doesn't exist
 if [ ! -d "$VENV_DIR" ]; then
-  echo "Creating virtual environment with Python 3.10..."
-  python3.10 -m venv "$VENV_DIR"
+    echo "Creating virtual environment..."
+    python3 -m venv "$VENV_DIR"
 fi
 
 # Activate virtual environment
 echo "Activating virtual environment..."
 source "$VENV_DIR/bin/activate"
 
-# Upgrade pip and install wheel
-echo "Upgrading pip and installing wheel..."
-python -m pip install --upgrade pip
-pip install wheel
+# Upgrade pip to latest version
+echo "Upgrading pip..."
+pip install --upgrade pip
 
-# Install dependencies
-echo "Installing dependencies..."
-pip install -r requirements.txt
+# Install dependencies with increased timeout
+echo "Installing Python dependencies..."
+pip install --default-timeout=100 -r requirements.txt
 
 # Create models directory if it doesn't exist
 if [ ! -d "models" ]; then
-  echo "Creating models directory..."
-  mkdir -p models
+    echo "Creating models directory..."
+    mkdir -p models
 fi
 
 # Run the server
 echo "Starting Sonarity server on port $PORT"
 if [ "$DEBUG" = true ]; then
-  python server.py --port "$PORT" --debug
+    python server.py --port "$PORT" --debug
 else
-  python server.py --port "$PORT"
+    python server.py --port "$PORT"
 fi 
