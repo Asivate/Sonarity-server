@@ -1,5 +1,6 @@
 # Core server dependencies
 Flask==2.0.1
+Werkzeug==2.0.3
 Flask-SocketIO==5.1.1
 python-socketio==5.4.0
 python-engineio==4.2.1
@@ -15,10 +16,10 @@ sounddevice==0.4.6
 PyAudio==0.2.13
 
 # Deep learning frameworks
-tensorflow-cpu==2.10.0
+tensorflow-cpu==2.12.0
 torch==1.13.1
 transformers==4.28.1
-torchaudio==0.13.1
+torchaudio==0.13
 huggingface-hub==0.16.4
 
 # Added for sentiment analysis and speech recognition
@@ -35,7 +36,7 @@ pandas==1.5.3
 Pillow==9.5.0
 
 # For compatibility and logging
-protobuf==3.19.6
+protobuf==3.20.3
 six==1.16.0
 PyYAML==6.0
 
