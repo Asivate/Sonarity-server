@@ -7,6 +7,7 @@ set -e
 PORT=5000
 DEBUG=false
 VENV_DIR="venv"
+PYTHON_VERSION="3.8.16"
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
@@ -39,43 +40,120 @@ done
 # Function to install system dependencies
 install_system_dependencies() {
     echo "Installing system dependencies..."
+    
+    # First, remove any existing Python 3.8 installation
+    if [ -d "/usr/local/lib/python3.8" ]; then
+        echo "Removing existing Python 3.8 installation..."
+        sudo rm -rf /usr/local/lib/python3.8
+        sudo rm -f /usr/local/bin/python3.8
+        sudo rm -f /usr/local/bin/pip3.8
+    fi
+
+    # Update package list
+    echo "Updating package list..."
     sudo apt-get update
+
+    # Install build dependencies
+    echo "Installing build dependencies..."
     sudo apt-get install -y \
-        python3-pip \
-        python3-venv \
-        python3-dev \
-        libsndfile1-dev \
+        build-essential \
+        zlib1g-dev \
+        libncurses5-dev \
+        libgdbm-dev \
+        libnss3-dev \
+        libssl-dev \
+        libreadline-dev \
+        libffi-dev \
+        libsqlite3-dev \
+        wget \
+        libbz2-dev \
         ffmpeg \
         portaudio19-dev \
-        python3-pyaudio \
-        build-essential \
-        libssl-dev \
-        libffi-dev
+        libsndfile1-dev
+
+    # Download Python source
+    echo "Downloading Python ${PYTHON_VERSION}..."
+    cd /tmp
+    wget https://www.python.org/ftp/python/${PYTHON_VERSION}/Python-${PYTHON_VERSION}.tar.xz
+    tar -xf Python-${PYTHON_VERSION}.tar.xz
+    cd Python-${PYTHON_VERSION}
+
+    # Configure and build Python
+    echo "Configuring Python build..."
+    ./configure \
+        --enable-optimizations \
+        --prefix=/usr/local \
+        --with-ssl \
+        --with-openssl=/usr \
+        --with-system-ffi \
+        LDFLAGS="-Wl,-rpath=/usr/local/lib"
+
+    # Build Python (using 4 cores)
+    echo "Building Python (this may take a while)..."
+    make -j 4
+
+    # Install Python
+    echo "Installing Python..."
+    sudo make altinstall
+
+    # Cleanup
+    cd /tmp
+    rm -rf Python-${PYTHON_VERSION}*
+
+    # Create symlinks
+    echo "Creating symlinks..."
+    sudo ln -sf /usr/local/bin/python3.8 /usr/local/bin/python3
+    sudo ln -sf /usr/local/bin/pip3.8 /usr/local/bin/pip3
+
+    # Install pip
+    echo "Installing pip..."
+    curl https://bootstrap.pypa.io/get-pip.py -o get-pip.py
+    /usr/local/bin/python3.8 get-pip.py --no-warn-script-location
+    rm get-pip.py
+
+    # Verify installation
+    echo "Verifying Python installation..."
+    /usr/local/bin/python3.8 --version
+    /usr/local/bin/python3.8 -c "import ssl; print('SSL support available')"
 }
 
-# Check if system dependencies are installed
-if ! command -v ffmpeg &> /dev/null || ! command -v python3 &> /dev/null; then
-    echo "Some system dependencies are missing. Installing them now..."
+# Check if Python 3.8 is installed with SSL support
+if ! command -v python3.8 &> /dev/null || ! python3.8 -c "import ssl" &> /dev/null; then
+    echo "Python 3.8 with SSL support not found. Installing from source..."
     install_system_dependencies
 fi
 
-# Create virtual environment if it doesn't exist
-if [ ! -d "$VENV_DIR" ]; then
-    echo "Creating virtual environment..."
-    python3 -m venv "$VENV_DIR"
+# Remove existing virtual environment if it exists
+if [ -d "$VENV_DIR" ]; then
+    echo "Removing existing virtual environment..."
+    rm -rf "$VENV_DIR"
 fi
+
+# Create new virtual environment with Python 3.8
+echo "Creating virtual environment with Python 3.8..."
+/usr/local/bin/python3.8 -m venv "$VENV_DIR"
 
 # Activate virtual environment
 echo "Activating virtual environment..."
 source "$VENV_DIR/bin/activate"
 
+# Verify Python version and SSL support
+echo "Verifying Python installation..."
+python -c "import ssl; print('SSL support available')" || {
+    echo "SSL support not available. Installation failed."
+    exit 1
+}
+
+CURRENT_PYTHON_VERSION=$(python --version)
+echo "Using Python version: $CURRENT_PYTHON_VERSION"
+
 # Upgrade pip to latest version
 echo "Upgrading pip..."
-pip install --upgrade pip
+python -m pip install --upgrade pip setuptools wheel
 
 # Install dependencies with increased timeout
 echo "Installing Python dependencies..."
-pip install --default-timeout=100 -r requirements.txt
+python -m pip install --default-timeout=100 -r requirements.txt
 
 # Create models directory if it doesn't exist
 if [ ! -d "models" ]; then
