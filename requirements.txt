@@ -4,7 +4,8 @@ Werkzeug==2.0.3
 Flask-SocketIO==5.1.1
 python-socketio==5.4.0
 python-engineio==4.2.1
-eventlet==0.33.0
+eventlet==0.30.2
+dnspython==2.2.1
 gunicorn==20.1.0
 
 # Audio processing
@@ -17,9 +18,9 @@ PyAudio==0.2.13
 
 # Deep learning frameworks
 tensorflow-cpu==2.12.0
-torch==1.13.0
+torch==1.13.0+cpu -f https://download.pytorch.org/whl/cpu/torch_stable.html
 transformers==4.28.1
-torchaudio==0.13
+torchaudio==0.13.0+cpu -f https://download.pytorch.org/whl/cpu/torch_stable.html
 huggingface-hub==0.16.4
 
 # Added for sentiment analysis and speech recognition
