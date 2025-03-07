@@ -36,15 +36,30 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# Install Python 3.10 and required system dependencies
+echo "Installing Python 3.10 and system dependencies..."
+sudo apt-get update
+sudo apt-get install -y software-properties-common
+sudo add-apt-repository -y ppa:deadsnakes/ppa
+sudo apt-get update
+sudo apt-get install -y python3.10 python3.10-venv python3.10-dev
+sudo apt-get install -y libsndfile1-dev ffmpeg portaudio19-dev python3-pyaudio
+sudo apt-get install -y build-essential libssl-dev libffi-dev
+
 # Create virtual environment if it doesn't exist
 if [ ! -d "$VENV_DIR" ]; then
-  echo "Creating virtual environment..."
-  python3 -m venv "$VENV_DIR"
+  echo "Creating virtual environment with Python 3.10..."
+  python3.10 -m venv "$VENV_DIR"
 fi
 
 # Activate virtual environment
 echo "Activating virtual environment..."
 source "$VENV_DIR/bin/activate"
+
+# Upgrade pip and install wheel
+echo "Upgrading pip and installing wheel..."
+python -m pip install --upgrade pip
+pip install wheel
 
 # Install dependencies
 echo "Installing dependencies..."
