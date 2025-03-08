@@ -34,10 +34,14 @@ import ast_model
 # Import our sentiment analysis modules
 from sentiment_analyzer import analyze_sentiment
 from speech_to_text import transcribe_audio, SpeechToText
+from google_speech import transcribe_with_google, GoogleSpeechToText
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+# Speech recognition settings
+USE_GOOGLE_SPEECH = False  # Set to True to use Google Cloud Speech-to-Text instead of Whisper
 
 # Add the current directory to the path so we can import our modules
 os.path.dirname(os.path.abspath(__file__))
@@ -144,8 +148,21 @@ EMOTION_GROUPS = {
     "Unpleasant": ["sadness", "fear", "anger", "disgust", "disappointment", "embarrassment", "grief", "remorse", "annoyance", "disapproval"]
 }
 
-# Initialize the SpeechToText processor (singleton)
+# Dictionary to store our models
+models = {
+    "tensorflow": None,
+    "ast": None,
+    "feature_extractor": None
+}
+
+# Initialize speech recognition systems
 speech_processor = SpeechToText()
+google_speech_processor = None  # Will be lazy-loaded when needed
+
+# Load models
+def load_models():
+    global models
+    # ... existing code ...
 
 # Add a comprehensive debug function
 def debug_predictions(predictions, label_list):
@@ -164,13 +181,6 @@ MODEL_URL = "https://www.dropbox.com/s/cq1d7uqg0l28211/example_model.hdf5?dl=1"
 MODEL_PATH = "models/example_model.hdf5"
 print("=====")
 print("Setting up sound recognition models...")
-
-# Dictionary to store our models
-models = {
-    "tensorflow": None,
-    "ast": None,
-    "feature_extractor": None
-}
 
 # Flag to determine which model to use
 USE_AST_MODEL = False  # Set to True to use the AST model, False to use the TensorFlow model
@@ -851,8 +861,15 @@ def process_speech_with_sentiment(audio_data):
     
     logger.info("Transcribing speech to text...")
     
-    # Transcribe audio using our optimized speech-to-text processor
-    transcription = speech_processor.transcribe(concatenated_audio, RATE)
+    # Transcribe audio using the selected speech-to-text processor
+    if USE_GOOGLE_SPEECH:
+        # Use Google Cloud Speech-to-Text
+        transcription = transcribe_with_google(concatenated_audio, RATE)
+        logger.info(f"Used Google Cloud Speech-to-Text for transcription")
+    else:
+        # Use Whisper (default)
+        transcription = speech_processor.transcribe(concatenated_audio, RATE)
+        logger.info(f"Used Whisper for transcription")
     
     # Check for valid transcription with sufficient content
     if not transcription:
@@ -910,14 +927,42 @@ def status():
     ip_addresses = get_ip_addresses()
     
     # Return the status information
-    return {
+    return jsonify({
         'status': 'running',
         'tensorflow_model_loaded': models["tensorflow"] is not None,
         'ast_model_loaded': models["ast"] is not None,
         'using_ast_model': USE_AST_MODEL,
+        'speech_recognition': 'Google Cloud' if USE_GOOGLE_SPEECH else 'Whisper',
         'sentiment_analysis_enabled': True,
-        'ip_addresses': ip_addresses
-    }
+        'ip_addresses': ip_addresses,
+        'uptime': time.time() - start_time,
+        'version': '1.2.0',
+        'active_clients': len(active_clients)
+    })
+
+@app.route('/api/toggle-speech-recognition', methods=['POST'])
+def toggle_speech_recognition():
+    """Toggle between Whisper and Google Cloud Speech-to-Text"""
+    global USE_GOOGLE_SPEECH
+    data = request.get_json()
+    
+    if data and 'use_google_speech' in data:
+        USE_GOOGLE_SPEECH = data['use_google_speech']
+        logger.info(f"Speech recognition system changed to: {'Google Cloud' if USE_GOOGLE_SPEECH else 'Whisper'}")
+        return jsonify({
+            "success": True,
+            "message": f"Speech recognition system set to {'Google Cloud' if USE_GOOGLE_SPEECH else 'Whisper'}",
+            "use_google_speech": USE_GOOGLE_SPEECH
+        })
+    else:
+        # Toggle the current value if no specific value provided
+        USE_GOOGLE_SPEECH = not USE_GOOGLE_SPEECH
+        logger.info(f"Speech recognition system toggled to: {'Google Cloud' if USE_GOOGLE_SPEECH else 'Whisper'}")
+        return jsonify({
+            "success": True,
+            "message": f"Speech recognition system toggled to {'Google Cloud' if USE_GOOGLE_SPEECH else 'Whisper'}",
+            "use_google_speech": USE_GOOGLE_SPEECH
+        })
 
 @socketio.on('send_message')
 def handle_source(json_data):
@@ -976,7 +1021,16 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Sonarity Audio Analysis Server')
     parser.add_argument('--port', type=int, default=8080, help='Port to run the server on (default: 8080)')
     parser.add_argument('--debug', action='store_true', help='Run in debug mode')
+    parser.add_argument('--use-google-speech', action='store_true', help='Use Google Cloud Speech-to-Text instead of Whisper')
     args = parser.parse_args()
+    
+    # Update speech recognition setting based on command line argument
+    if args.use_google_speech:
+        USE_GOOGLE_SPEECH = True
+        logger.info("Using Google Cloud Speech-to-Text for speech recognition")
+    else:
+        USE_GOOGLE_SPEECH = False
+        logger.info("Using Whisper for speech recognition")
     
     # Get all available IP addresses
     ip_addresses = get_ip_addresses()

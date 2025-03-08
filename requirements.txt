@@ -44,4 +44,5 @@ PyYAML==6.0
 # Added dependencies for better compatibility
 setuptools>=65.5.1
 wheel>=0.38.0
-typing-extensions==4.5.0 
+typing-extensions==4.5.0
+google-cloud-speech>=2.19.0 

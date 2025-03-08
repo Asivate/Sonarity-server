@@ -8,6 +8,7 @@ PORT=8080
 DEBUG=false
 VENV_DIR="venv"
 PYTHON_VERSION="3.8.16"
+USE_GOOGLE_SPEECH=false
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
@@ -20,13 +21,18 @@ while [[ $# -gt 0 ]]; do
       DEBUG=true
       shift
       ;;
+    --use-google-speech)
+      USE_GOOGLE_SPEECH=true
+      shift
+      ;;
     --help)
-      echo "Usage: ./start_server.sh [--port=PORT] [--debug]"
+      echo "Usage: ./start_server.sh [--port=PORT] [--debug] [--use-google-speech]"
       echo ""
       echo "Options:"
-      echo "  --port=PORT    Specify the port to run the server on (default: 8080)"
-      echo "  --debug        Run in debug mode"
-      echo "  --help         Show this help message"
+      echo "  --port=PORT         Specify the port to run the server on (default: 8080)"
+      echo "  --debug             Run in debug mode"
+      echo "  --use-google-speech Use Google Cloud Speech-to-Text instead of Whisper"
+      echo "  --help              Show this help message"
       exit 0
       ;;
     *)
@@ -161,10 +167,28 @@ if [ ! -d "models" ]; then
     mkdir -p models
 fi
 
+# Check if Google Cloud credentials file exists
+if [ "$USE_GOOGLE_SPEECH" = true ]; then
+  if [ ! -f "asivate-452914-3c56106e7a07.json" ]; then
+    echo "Error: Google Cloud credentials file 'asivate-452914-3c56106e7a07.json' not found."
+    echo "Please place the credentials file in the server directory."
+    exit 1
+  fi
+  echo "Using Google Cloud Speech-to-Text for speech recognition"
+fi
+
 # Run the server
 echo "Starting Sonarity server on port $PORT"
 if [ "$DEBUG" = true ]; then
+  if [ "$USE_GOOGLE_SPEECH" = true ]; then
+    python server.py --port "$PORT" --debug --use-google-speech
+  else
     python server.py --port "$PORT" --debug
+  fi
 else
+  if [ "$USE_GOOGLE_SPEECH" = true ]; then
+    python server.py --port "$PORT" --use-google-speech
+  else
     python server.py --port "$PORT"
+  fi
 fi 
