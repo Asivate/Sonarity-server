@@ -974,7 +974,7 @@ def handle_disconnect():
 if __name__ == '__main__':
     # Parse command-line arguments for port configuration
     parser = argparse.ArgumentParser(description='Sonarity Audio Analysis Server')
-    parser.add_argument('--port', type=int, default=5000, help='Port to run the server on (default: 5000)')
+    parser.add_argument('--port', type=int, default=8080, help='Port to run the server on (default: 8080)')
     parser.add_argument('--debug', action='store_true', help='Run in debug mode')
     args = parser.parse_args()
     
@@ -991,11 +991,17 @@ if __name__ == '__main__':
             print(f"{i+1}. http://{ip}:{args.port}")
             print(f"   WebSocket: ws://{ip}:{args.port}")
         
+        # Add external IP information
+        print("\nExternal access: http://35.226.202.115:%d" % args.port)
+        print("External WebSocket: ws://35.226.202.115:%d" % args.port)
+        
         print("\nPreferred connection address: http://%s:%d" % (ip_addresses[0], args.port))
         print("Preferred WebSocket address: ws://%s:%d" % (ip_addresses[0], args.port))
     else:
         print("Could not determine IP address. Make sure you're connected to a network.")
         print(f"Try connecting to your server's IP address on port {args.port}")
+        print("\nExternal access: http://35.226.202.115:%d" % args.port)
+        print("External WebSocket: ws://35.226.202.115:%d" % args.port)
     
     print("="*60 + "\n")
     

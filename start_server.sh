@@ -4,7 +4,7 @@
 set -e
 
 # Configuration
-PORT=5000
+PORT=8080
 DEBUG=false
 VENV_DIR="venv"
 PYTHON_VERSION="3.8.16"
@@ -24,7 +24,7 @@ while [[ $# -gt 0 ]]; do
       echo "Usage: ./start_server.sh [--port=PORT] [--debug]"
       echo ""
       echo "Options:"
-      echo "  --port=PORT    Specify the port to run the server on (default: 5000)"
+      echo "  --port=PORT    Specify the port to run the server on (default: 8080)"
       echo "  --debug        Run in debug mode"
       echo "  --help         Show this help message"
       exit 0

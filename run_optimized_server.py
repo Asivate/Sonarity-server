@@ -69,12 +69,14 @@ def print_server_info():
     print(" ✓ Optimized Whisper model with appropriate parameters")
     print(" ✓ Enhanced sentiment analysis with emotion categories")
     print("\nAccess the web interface at:")
-    print(" → http://localhost:5000 (local)")
+    print(" → http://localhost:8080 (local)")
     try:
         import socket
         hostname = socket.gethostname()
         local_ip = socket.gethostbyname(hostname)
-        print(f" → http://{local_ip}:5000 (network)")
+        print(f" → http://{local_ip}:8080 (internal network)")
+        # Add external IP information
+        print(f" → http://35.226.202.115:8080 (external - Internet)")
     except:
         pass
     print("\nPress Ctrl+C to stop the server")
@@ -91,7 +93,7 @@ def run_server():
         
         # Start the server
         print_server_info()
-        socketio.run(app, debug=False, host='0.0.0.0', port=5000)
+        socketio.run(app, debug=False, host='0.0.0.0', port=8080)
         
     except Exception as e:
         logger.error(f"Error starting server: {e}")

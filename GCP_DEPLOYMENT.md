@@ -26,7 +26,7 @@ Create a firewall rule to allow connections to your server port:
 7. Source filter: IP ranges
 8. Source IP ranges: `0.0.0.0/0` (or restrict as needed)
 9. Protocols and ports: Select "Specified protocols and ports"
-   - TCP: `5000` (or your custom port)
+   - TCP: `8080` (or your custom port)
 10. Click "Create"
 
 ## 3. Connect to Your VM
@@ -65,7 +65,7 @@ chmod +x start_server.sh
 ./start_server.sh
 ```
 
-The server will be available at `http://<your-vm-external-ip>:5000`
+The server will be available at `http://<your-vm-external-ip>:8080`
 
 ## 7. Setting Up as a Systemd Service (Optional)
 
@@ -131,7 +131,7 @@ server {
     server_name your-domain.com;
 
     location / {
-        proxy_pass http://localhost:5000;
+        proxy_pass http://localhost:8080;
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection 'upgrade';
@@ -152,7 +152,7 @@ sudo systemctl restart nginx
 
 - View logs: `sudo journalctl -u sonarity`
 - Monitor the process: `ps aux | grep python`
-- Check ports in use: `sudo netstat -tuln | grep 5000`
+- Check ports in use: `sudo netstat -tuln | grep 8080`
 
 ## Troubleshooting
 

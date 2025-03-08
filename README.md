@@ -53,8 +53,8 @@ A Flask-based server application for audio analysis and recognition, designed to
 
 ## Usage
 
-- The server will be available at: `http://<server-ip>:5000`
-- WebSocket endpoint: `ws://<server-ip>:5000`
+- The server will be available at: `http://<server-ip>:8080`
+- WebSocket endpoint: `ws://<server-ip>:8080`
 
 ## Note
 
