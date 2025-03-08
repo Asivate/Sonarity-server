@@ -45,21 +45,25 @@ def load_ast_model(model_name="MIT/ast-finetuned-audioset-10-10-0.4593", **kwarg
         
         # Check for optimization parameters
         attn_implementation = kwargs.get("attn_implementation", None)
-        torch_dtype = kwargs.get("torch_dtype", None)
+        
+        # Force float32 for compatibility
+        print("Setting model precision to float32 for maximum compatibility")
+        if "torch_dtype" in kwargs:
+            del kwargs["torch_dtype"]  # Remove any torch_dtype setting
         
         # Print optimization settings
         if attn_implementation:
             print(f"Using attention implementation: {attn_implementation}")
-        if torch_dtype:
-            print(f"Using model precision: {torch_dtype}")
         
-        # Explicitly set torch_dtype to float32 for maximum compatibility
-        if "torch_dtype" not in kwargs:
-            print("Setting model precision to float32 for maximum compatibility")
-            kwargs["torch_dtype"] = torch.float32
+        # Load model - explicitly use float32 regardless of what was passed in kwargs
+        model = AutoModelForAudioClassification.from_pretrained(model_name, torch_dtype=torch.float32, **kwargs)
         
-        # Load model with optimizations
-        model = AutoModelForAudioClassification.from_pretrained(model_name, **kwargs)
+        # Explicitly convert any half-precision parameters to float32
+        for param in model.parameters():
+            if param.dtype == torch.float16:
+                param.data = param.data.to(torch.float32)
+        
+        print("Verified all model parameters are using float32 precision")
         
         # Put model in evaluation mode and move to CPU (or GPU if available)
         model.eval()
@@ -332,6 +336,9 @@ def predict_sound(audio_data, sample_rate, model, feature_extractor, threshold=0
         if np.abs(audio_data).max() > 1.0:
             audio_data = audio_data / np.abs(audio_data).max()
         
+        # Force float32 precision for audio data
+        audio_data = audio_data.astype(np.float32)
+        
         # Calculate RMS and dB for silence detection
         rms = np.sqrt(np.mean(audio_data**2))
         db_level = 20 * np.log10(rms) if rms > 0 else -100
@@ -347,53 +354,80 @@ def predict_sound(audio_data, sample_rate, model, feature_extractor, threshold=0
                 "raw_predictions": None  # No raw predictions for silence
             }
         
-        # Use the preprocess function to prepare input
-        inputs = preprocess_audio_for_ast(audio_data, sample_rate, feature_extractor)
+        # Debug information about model parameter dtypes
+        param_dtypes = {}
+        for name, param in model.named_parameters():
+            if param.dtype not in param_dtypes:
+                param_dtypes[param.dtype] = 0
+            param_dtypes[param.dtype] += 1
         
-        # Get the model's device
-        device = next(model.parameters()).device
+        print("Model parameter dtypes:", param_dtypes)
         
-        # Get the model's data type
-        model_dtype = next(model.parameters()).dtype
-        print(f"Model is using dtype: {model_dtype}")
+        try:
+            # Use the preprocess function to prepare audio input
+            print("Extracting audio features...")
+            inputs = preprocess_audio_for_ast(audio_data, sample_rate, feature_extractor)
+            
+            # Get the model's device and check model dtype
+            device = next(model.parameters()).device
+            model_dtype = next(model.parameters()).dtype
+            print(f"Model is using device: {device}, dtype: {model_dtype}")
+            
+            # Debug info about input tensor dtypes before conversion
+            for key, tensor in inputs.items():
+                print(f"Input tensor '{key}' dtype: {tensor.dtype}, device: {tensor.device}")
+            
+            # Force all inputs to explicit float32 and move to model's device
+            print("Converting all inputs to float32...")
+            for key in inputs:
+                # First move to CPU/GPU device, then convert dtype
+                inputs[key] = inputs[key].to(device)
+                # Make sure data is in float32 format
+                if inputs[key].dtype != torch.float32:
+                    inputs[key] = inputs[key].to(dtype=torch.float32)
+            
+            # Verify inputs after conversion
+            for key, tensor in inputs.items():
+                print(f"After conversion: '{key}' dtype: {tensor.dtype}, device: {tensor.device}")
+            
+            print(f"Feature extraction completed. Running inference...")
+            
+            # Run inference with no gradient tracking for efficiency
+            with torch.no_grad():
+                # Run the model with the prepared inputs
+                outputs = model(**inputs)
+                logits = outputs.logits
+                
+                # Apply softmax to get probabilities
+                probs = torch.nn.functional.softmax(logits, dim=-1)
+                
+                # Get the model's id2label mapping
+                id2label = model.config.id2label
+                
+                # Convert to numpy for easier processing
+                probs_np = probs[0].cpu().numpy()
+                
+                # Store the raw predictions for aggregation
+                raw_predictions = probs_np.copy()
+                
+                # Process the predictions
+                result = process_predictions(probs_np, id2label, threshold, top_k)
+                
+                # Add the raw predictions to the result
+                result["raw_predictions"] = raw_predictions
+                
+                elapsed_time = time.time() - start_time
+                print(f"AST prediction completed in {elapsed_time:.2f} seconds")
+                
+                return result
+                
+        except Exception as inner_e:
+            print(f"Error during AST processing: {inner_e}")
+            traceback.print_exc()
+            raise inner_e
         
-        # Move inputs to the model's device and convert to model's dtype
-        inputs = {k: v.to(device).to(model_dtype) for k, v in inputs.items()}
-        
-        print(f"Feature extraction completed. Running inference...")
-        
-        # Run inference with no gradient tracking for efficiency
-        with torch.no_grad():
-            # Run the model with the prepared inputs
-            outputs = model(**inputs)
-            logits = outputs.logits
-            
-            # Apply softmax to get probabilities
-            probs = torch.nn.functional.softmax(logits, dim=-1)
-            
-            # Get the model's id2label mapping
-            id2label = model.config.id2label
-            
-            # Convert to numpy for easier processing
-            probs_np = probs[0].cpu().numpy()
-            
-            # Store the raw predictions for aggregation
-            raw_predictions = probs_np.copy()
-            
-            # Process the predictions
-            result = process_predictions(probs_np, id2label, threshold, top_k)
-            
-            # Add the raw predictions to the result
-            result["raw_predictions"] = raw_predictions
-            
-            elapsed_time = time.time() - start_time
-            print(f"AST prediction completed in {elapsed_time:.2f} seconds")
-            
-            return result
-    
     except Exception as e:
         print(f"Error in predict_sound: {e}")
-        import traceback
         traceback.print_exc()
         return {
             "error": str(e),

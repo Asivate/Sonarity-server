@@ -236,31 +236,26 @@ def load_models():
     try:
         print("Loading AST model...")
         with ast_lock:
-            # Use SDPA (Scaled Dot Product Attention) for better performance on CPU
-            # Define the best AST model for our use case
-            ast_model_name = "MIT/ast-finetuned-audioset-10-10-0.4593"
+            # AST model loading settings
+            ast_kwargs = {
+                "torch_dtype": torch.float32  # Always use float32 for maximum compatibility
+            }
             
-            # Check if torch version supports SDPA
-            ast_kwargs = {}
+            # Use SDPA if available for better performance
             if torch.__version__ >= '2.1.1':
                 ast_kwargs["attn_implementation"] = "sdpa"
                 print("Using Scaled Dot Product Attention (SDPA) for faster inference")
             
-            # Load in a CPU-optimized way - lower precision for faster inference
-            # but only if adequate hardware support exists
-            supports_float16 = False  # Default to False to avoid compatibility issues
+            print("Using standard precision (float32) for maximum compatibility")
             
-            if supports_float16:
-                print("CPU supports float16 - using half precision for faster inference")
-                ast_kwargs["torch_dtype"] = torch.float16
-            else:
-                print("Using standard precision (float32) for maximum compatibility")
-            
-            # Load model with optimizations
+            # Load model with explicit float32 precision
+            model_name = "MIT/ast-finetuned-audioset-10-10-0.4593"
             models["ast"], models["feature_extractor"] = ast_model.load_ast_model(
-                model_name=ast_model_name,
+                model_name=model_name,
+                torch_dtype=torch.float32,
                 **ast_kwargs
             )
+            
             # Initialize class labels for aggregation
             ast_model.initialize_class_labels(models["ast"])
             print("AST model loaded successfully")
@@ -366,19 +361,17 @@ try:
     
     # Load in a CPU-optimized way - lower precision for faster inference
     # but only if adequate hardware support exists
-    supports_float16 = False  # Default to False to avoid compatibility issues
-    
-    if supports_float16:
-        print("CPU supports float16 - using half precision for faster inference")
-        ast_kwargs["torch_dtype"] = torch.float16
-    else:
-        print("Using standard precision (float32) for maximum compatibility")
+    # Always use float32 for maximum compatibility
+    ast_kwargs = {
+        "torch_dtype": torch.float32  # Always use float32 for maximum compatibility
+    }
     
     # Load model with optimizations
     with ast_lock:
         # Load the AST model with optimizations
         models["ast"], models["feature_extractor"] = ast_model.load_ast_model(
             model_name=ast_model_name,
+            torch_dtype=torch.float32,  # Explicitly specify the data type
             **ast_kwargs
         )
         # Initialize class labels for aggregation
