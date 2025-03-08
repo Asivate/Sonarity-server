@@ -27,6 +27,7 @@ import threading
 import queue
 from transformers import pipeline
 import logging
+import atexit
 
 # Import our AST model implementation
 import ast_model
@@ -633,10 +634,68 @@ def handle_source(json_data):
             'db': str(db) if 'db' in locals() else '-100'
         })
 
+# Global variable to track speech confidence
+speech_confidence = 0.0
 
+# Helper function to calculate dB level
+def calculate_db_level(audio_data):
+    rms = np.sqrt(np.mean(audio_data**2))
+    return dbFS(rms)
+
+# Queue for asynchronous speech processing
+speech_queue = queue.Queue(maxsize=10)  # Limit queue size to prevent memory issues
+speech_processing_thread = None
+speech_processing_active = True
+
+# Function to process speech in a separate thread
+def speech_processing_worker():
+    global speech_processing_active
+    
+    logging.info("Starting speech processing worker thread")
+    
+    while speech_processing_active:
+        try:
+            # Get audio data from the queue with a timeout
+            # This allows the thread to check speech_processing_active periodically
+            try:
+                audio_data = speech_queue.get(timeout=1.0)
+            except queue.Empty:
+                continue
+                
+            # Process the speech data
+            process_speech_with_sentiment(audio_data)
+            
+            # Mark the task as done
+            speech_queue.task_done()
+            
+        except Exception as e:
+            logging.error(f"Error in speech processing worker: {str(e)}")
+            traceback.print_exc()
+    
+    logging.info("Speech processing worker thread stopped")
+
+# Start the speech processing thread
+def start_speech_processing_thread():
+    global speech_processing_thread, speech_processing_active
+    
+    if speech_processing_thread is None or not speech_processing_thread.is_alive():
+        speech_processing_active = True
+        speech_processing_thread = threading.Thread(target=speech_processing_worker)
+        speech_processing_thread.daemon = True  # Thread will exit when main program exits
+        speech_processing_thread.start()
+        logging.info("Speech processing thread started")
+
+# Stop the speech processing thread
+def stop_speech_processing_thread():
+    global speech_processing_active
+    
+    speech_processing_active = False
+    logging.info("Speech processing thread stopping...")
+
+# Modified function to handle audio data
 @socketio.on('audio_data')
 def handle_audio(data):
-    global speech_audio_buffer, sound_audio_buffer, speech_buffer_lock, sound_buffer_lock
+    global speech_audio_buffer, sound_audio_buffer, speech_buffer_lock, sound_buffer_lock, speech_confidence
     
     # Ensure buffers are initialized
     if 'speech_audio_buffer' not in globals() or speech_audio_buffer is None:
@@ -695,8 +754,7 @@ def handle_audio(data):
     
     # Compute RMS and convert to dB
     print('Successfully convert to NP rep', np_wav)
-    rms = np.sqrt(np.mean(np_wav**2))
-    db = dbFS(rms)
+    db = calculate_db_level(np_wav)
     print('Db...', db)
     
     # Check for silence (extremely quiet)
@@ -730,12 +788,13 @@ def handle_audio(data):
                     print("===== AST MODEL RAW PREDICTIONS =====")
                     for pred in ast_predictions["top_predictions"][:5]:  # Show top 5 for brevity
                         print(f"  {pred['label']}: {pred['confidence']:.6f}")
-                    
+
                     # Check if this is likely speech by finding speech confidence
                     is_likely_speech = False
                     for pred in ast_predictions["top_predictions"]:
                         if pred["label"] == "Speech" and pred["confidence"] > SPEECH_PREDICTION_THRES * 0.7:
                             is_likely_speech = True
+                            speech_confidence = pred["confidence"]
                             print("Likely speech detection - using speech-focused processing")
                             break
                     
@@ -746,6 +805,10 @@ def handle_audio(data):
                             speech_audio_buffer.append(np_wav)
                             if len(speech_audio_buffer) > MAX_SPEECH_BUFFER_SIZE:
                                 speech_audio_buffer = speech_audio_buffer[-MAX_SPEECH_BUFFER_SIZE:]
+                        
+                        # Add to speech queue for asynchronous processing if confidence is high enough
+                        if speech_confidence > SPEECH_PREDICTION_THRES and not speech_queue.full():
+                            speech_queue.put(np_wav)
                     else:
                         # Add to general sound buffer
                         with sound_buffer_lock:
@@ -816,29 +879,19 @@ def handle_audio(data):
                         if top_label == "finger-snap":
                             class_threshold = FINGER_SNAP_THRES
                         
-                        # Check for speech detection and handle sentiment analysis
-                        if human_label == "Speech" and top_confidence > SPEECH_SENTIMENT_THRES:
-                            # Process speech with sentiment analysis
-                            print("Speech detected. Processing sentiment...")
-                            sentiment_result = process_speech_with_sentiment(np_wav)
-                            
-                            if sentiment_result:
-                                # Emit with sentiment information - fixed to match actual structure
-                                label = f"Speech {sentiment_result['sentiment']['category']}"
-                                socketio.emit('audio_label', {
-                                    'label': label,
-                                    'accuracy': str(sentiment_result['sentiment']['confidence']),
-                                    'db': str(db),
-                                    'emoji': sentiment_result['sentiment']['emoji'],
-                                    'transcription': sentiment_result['text'],
-                                    'emotion': sentiment_result['sentiment']['original_emotion'],
-                                    'sentiment_score': str(sentiment_result['sentiment']['confidence'])
-                                })
-                                print(f"EMITTING SPEECH WITH SENTIMENT: {label} with emoji {sentiment_result['sentiment']['emoji']}")
-                                return
+                        # For speech, we'll handle it asynchronously, so don't process it here
+                        # Just emit the detection for immediate feedback
+                        if human_label == "Speech" and top_confidence > SPEECH_PREDICTION_THRES:
+                            socketio.emit('audio_label', {
+                                'label': 'Speech',
+                                'accuracy': str(top_confidence),
+                                'db': str(db)
+                            })
+                            print(f"EMITTING SPEECH DETECTION: Speech ({top_confidence:.6f})")
+                            # Don't return - let the async processing handle sentiment
                         
                         # Emit the prediction if confidence is above class-specific threshold
-                        if top_confidence > class_threshold:
+                        elif top_confidence > class_threshold:
                             socketio.emit('audio_label', {
                                 'label': human_label,
                                 'accuracy': str(top_confidence),
@@ -881,278 +934,85 @@ def handle_audio(data):
             'db': str(db)
         })
 
-# Helper function to process with TensorFlow model
-def process_with_tensorflow_model(np_wav, db):
-    global speech_audio_buffer, sound_audio_buffer, speech_buffer_lock, sound_buffer_lock, speech_predictions, sound_predictions
-    
-    # Check if silence (very low volume)
-    if db < SILENCE_THRES:
-        print("Audio volume too low - likely silence")
-        socketio.emit('audio_label', {'label': 'Error Processing', 'accuracy': 0.0, 'db': db})
-        return
-    
-    try:
-        with tf_lock:
-            # Process the audio data to get the right input format
-            print(f"Original np_wav shape: {np_wav.shape}, size: {np_wav.size}")
-            
-            # VGGish requires at least 0.975 seconds of audio at 16kHz (15600 samples)
-            # If our audio is shorter, we need to pad it
-            min_samples_needed = 16000  # 1 second at 16kHz
-            
-            if np_wav.size < min_samples_needed:
-                # Pad the audio with zeros to reach the minimum length
-                padding_needed = min_samples_needed - np_wav.size
-                np_wav = np.pad(np_wav, (0, padding_needed), 'constant')
-                print(f"Padded audio data to size: {np_wav.size} samples (1 second)")
-            
-            # Convert to VGGish input features using the proper preprocessing
-            try:
-                # Use waveform_to_examples to convert the raw audio to the correct spectrogram format
-                input_features = waveform_to_examples(np_wav, RATE)
-                
-                # This should give us properly formatted features for the model
-                if input_features.shape[0] == 0:
-                    print("Error: No features extracted from audio")
-                    return None
-                
-                # If we got multiple frames, just use the first one
-                if len(input_features.shape) == 3:
-                    input_features = input_features[0]
-                    print(f"Using first frame from multiple frames: {input_features.shape}")
-                
-                # Reshape for TensorFlow model - add the channel dimension
-                np_data = np.reshape(input_features, (1, 96, 64, 1))
-                print(f"Processed audio data shape: {np_data.shape}")
-            except Exception as e:
-                print(f"Error during audio preprocessing: {str(e)}")
-                traceback.print_exc()
-                return None
-            
-            print("Making prediction with TensorFlow model...")
-            
-            with tf_graph.as_default():
-                with tf_session.as_default():
-                    predictions = models["tensorflow"].predict(np_data)
-            
-            # Debug all predictions before applying threshold
-            if np.ndim(predictions) > 0 and len(predictions) > 0:
-                debug_predictions(predictions[0], homesounds.everything)
-                
-                # Check if this is likely speech by finding the speech prediction confidence
-                is_likely_speech = False
-                speech_confidence = 0.0
-                
-                # Find speech prediction confidence and general sound prediction confidence
-                for label, index in homesounds.labels.items():
-                    if label == "speech" and index < len(predictions[0]):
-                        speech_confidence = predictions[0][index]
-                        print(f"Speech confidence: {speech_confidence:.4f}")
-                        
-                        if speech_confidence > SPEECH_PREDICTION_THRES * 0.7:  # 70% of speech threshold
-                            is_likely_speech = True
-                            print("Likely speech detection - using speech-focused processing")
-                
-                # Add current audio to the appropriate buffer
-                if is_likely_speech:
-                    # Add to speech buffer for potential speech processing
-                    with speech_buffer_lock:
-                        speech_audio_buffer.append(np_wav)
-                        if len(speech_audio_buffer) > MAX_SPEECH_BUFFER_SIZE:
-                            speech_audio_buffer = speech_audio_buffer[-MAX_SPEECH_BUFFER_SIZE:]
-                else:
-                    # Add to general sound buffer
-                    with sound_buffer_lock:
-                        sound_audio_buffer.append(np_wav)
-                        if len(sound_audio_buffer) > MAX_SOUND_BUFFER_SIZE:
-                            sound_audio_buffer = sound_audio_buffer[-MAX_SOUND_BUFFER_SIZE:]
-                
-                # Aggregate predictions using the appropriate track
-                aggregated_predictions = aggregate_predictions(predictions[0], homesounds.everything, is_speech_focused=is_likely_speech)
-                
-                # Debug the aggregated predictions
-                logger.info(f"Aggregated predictions ({'speech-focused' if is_likely_speech else 'sound-focused'}):")
-                debug_predictions(aggregated_predictions, homesounds.everything)
-                
-                # Find top prediction from active context
-                pred_max = -1
-                pred_max_val = 0
-                pred_label = None
-                for l in active_context:
-                    i = homesounds.labels.get(l, -1)
-                    if i >= 0 and i < len(aggregated_predictions) and aggregated_predictions[i] > pred_max_val:
-                        pred_max = i
-                        pred_max_val = aggregated_predictions[i]
-                        pred_label = l  # Store the label for threshold lookup
-                
-                if pred_max != -1:
-                    # Get the appropriate threshold for this sound class
-                    class_threshold = CLASS_THRESHOLDS.get(pred_label, PREDICTION_THRES)
-                    
-                    # Check if prediction exceeds its class-specific threshold
-                    if pred_max_val > class_threshold:
-                        for label, index in homesounds.labels.items():
-                            if index == pred_max:
-                                human_label = homesounds.to_human_labels.get(label, label)
-                                print(f"Top prediction: {human_label} ({pred_max_val:.4f}), threshold: {class_threshold:.4f}")
-                                
-                                # Check for speech detection with TensorFlow model
-                                if human_label == "Speech" and pred_max_val > SPEECH_SENTIMENT_THRES:
-                                    # Process speech with sentiment analysis
-                                    print("Speech detected with TensorFlow model. Processing sentiment...")
-                                    sentiment_result = process_speech_with_sentiment(np_wav)
-                                    
-                                    if sentiment_result:
-                                        # Emit with sentiment information - fixed to match actual structure
-                                        label = f"Speech {sentiment_result['sentiment']['category']}"
-                                        socketio.emit('audio_label', {
-                                            'label': label,
-                                            'accuracy': str(sentiment_result['sentiment']['confidence']),
-                                            'db': str(db),
-                                            'emoji': sentiment_result['sentiment']['emoji'],
-                                            'transcription': sentiment_result['text'],
-                                            'emotion': sentiment_result['sentiment']['original_emotion'],
-                                            'sentiment_score': str(sentiment_result['sentiment']['confidence'])
-                                        })
-                                        print(f"EMITTING SPEECH WITH SENTIMENT: {label} with emoji {sentiment_result['sentiment']['emoji']}")
-                                        return
-                                
-                                # Normal sound emission (non-speech or sentiment analysis failed)
-                                socketio.emit('audio_label', {
-                                    'label': human_label,
-                                    'accuracy': str(pred_max_val),
-                                    'db': str(db)
-                                })
-                                break
-                    else:
-                        print(f"Prediction {pred_label} ({pred_max_val:.4f}) below its threshold {class_threshold:.4f}")
-                        socketio.emit('audio_label', {
-                            'label': 'Unrecognized Sound',
-                            'accuracy': '0.2',
-                            'db': str(db)
-                        })
-                else:
-                    print(f"No prediction found")
-                    socketio.emit('audio_label', {
-                        'label': 'Unrecognized Sound',
-                        'accuracy': '0.2',
-                        'db': str(db)
-                    })
-            else:
-                print("Invalid prediction format")
-                socketio.emit('audio_label', {
-                    'label': 'Error Processing',
-                    'accuracy': '0.0',
-                    'db': str(db)
-                })
-    except Exception as e:
-        print(f"Error in TensorFlow processing: {str(e)}")
-        traceback.print_exc()
-        socketio.emit('audio_label', {
-            'label': 'Error Processing',
-            'accuracy': '0.0',
-            'db': str(db)
-        })
-
 # Keep track of recent audio buffers for better speech transcription
 recent_audio_buffer = []
 MAX_BUFFER_SIZE = 5  # Keep last 5 chunks
 
 # Helper function to process speech detection with sentiment analysis
 def process_speech_with_sentiment(audio_data):
-    """
-    Process speech audio, transcribe it and analyze sentiment.
-    
-    Args:
-        audio_data: Raw audio data
-        
-    Returns:
-        Dictionary with transcription and sentiment
-    """
     global speech_audio_buffer, speech_buffer_lock
     
     try:
+        # Settings for speech processing
+        MIN_WORD_COUNT = 2   # Minimum number of meaningful words for valid transcription
+        MIN_CONFIDENCE = 0.7  # Minimum confidence level for speech detection
+        
         # Add audio to speech buffer with locking to ensure thread safety
         with speech_buffer_lock:
             # Append current audio data to speech buffer
             speech_audio_buffer.append(audio_data)
-        
-        # Keep only the most recent chunks for speech
-        if len(speech_audio_buffer) > MAX_SPEECH_BUFFER_SIZE:
-            speech_audio_buffer = speech_audio_buffer[-MAX_SPEECH_BUFFER_SIZE:]
-        
-        # For better transcription, use concatenated audio from multiple chunks if available
-        if len(speech_audio_buffer) > 1:
-            # Use up to MAX_SPEECH_BUFFER_SIZE chunks for more context
-            num_chunks = min(MAX_SPEECH_BUFFER_SIZE, len(speech_audio_buffer))
-            logger.info(f"Using concatenated audio from {num_chunks} chunks for better transcription")
             
-            # Concatenate audio chunks
-            concatenated_audio = np.concatenate(speech_audio_buffer[-num_chunks:])
+            # Limit buffer size to prevent memory issues
+            if len(speech_audio_buffer) > MAX_SPEECH_BUFFER_SIZE:
+                speech_audio_buffer.pop(0)
+            
+            # Create a copy of the buffer for processing
+            audio_buffer_copy = speech_audio_buffer.copy()
+        
+        # Log the buffer size being used
+        logging.info(f"Using concatenated audio from {len(audio_buffer_copy)} chunks for better transcription")
+        
+        # Concatenate audio data for better transcription
+        if len(audio_buffer_copy) > 0:
+            concatenated_audio = np.concatenate(audio_buffer_copy)
         else:
-            concatenated_audio = audio_data
+            logging.warning("Empty audio buffer for speech processing")
+            return None
         
-        # Ensure minimum audio length for better transcription
-        min_samples = RATE * 3.0  # At least 3.0 seconds
-        if len(concatenated_audio) < min_samples:
-            pad_size = int(min_samples) - len(concatenated_audio)
-            # Use reflect padding to extend short audio naturally
-            concatenated_audio = np.pad(concatenated_audio, (0, pad_size), mode='reflect')
-            logger.info(f"Padded audio data to size: {len(concatenated_audio)} samples ({len(concatenated_audio)/RATE:.1f} seconds)")
+        # Transcribe speech to text
+        logging.info("Transcribing speech to text...")
+        transcription = transcribe_speech(concatenated_audio)
         
-        # Calculate the RMS value of the audio to gauge its "loudness"
-        rms = np.sqrt(np.mean(np.square(concatenated_audio)))
-        if rms < 0.01:  # If the audio is very quiet, skip transcription
-            logger.info(f"Audio too quiet (RMS: {rms:.4f}), skipping transcription")
-            return {
-                "text": "",
-                "sentiment": {
-                    "category": "neutral", 
-                    "confidence": 0.0,
-                    "emoji": "😐",
-                    "original_emotion": "neutral"
-                }
-            }
-        
-        logger.info("Transcribing speech to text...")
-        
-        # Transcribe audio using the selected speech-to-text processor
-        if USE_GOOGLE_SPEECH:
-            # Use Google Cloud Speech-to-Text
-            transcription = transcribe_with_google(concatenated_audio, RATE)
-            logger.info(f"Used Google Cloud Speech-to-Text for transcription")
-        else:
-            # Use Whisper (default)
-            transcription = speech_processor.transcribe(concatenated_audio, RATE)
-            logger.info(f"Used Whisper for transcription")
-        
-        # Check for valid transcription with sufficient content
         if not transcription:
-            logger.info("No valid transcription found")
+            logging.warning("No transcription result")
             return None
         
-        # Filter out short or meaningless transcriptions
-        common_words = ["the", "a", "an", "and", "but", "or", "if", "then", "so", "to", "of", "for", "in", "on", "at"]
-        meaningful_words = [word for word in transcription.lower().split() if word not in common_words]
+        # Extract meaningful words (filter out filler words)
+        filler_words = {'um', 'uh', 'ah', 'like', 'so', 'well', 'you know', 'I mean'}
+        words = transcription.lower().split()
+        meaningful_words = [word for word in words if word not in filler_words]
         
+        # Check if we have enough meaningful words
         if len(meaningful_words) < MIN_WORD_COUNT:
-            logger.info(f"Transcription has too few meaningful words: '{transcription}'")
+            logging.info(f"Not enough meaningful words: {len(meaningful_words)} < {MIN_WORD_COUNT}")
+            # Even if we don't have enough words, still emit the speech detection
+            socketio.emit('audio_label', {
+                'label': 'Speech', 
+                'accuracy': 0.9, 
+                'transcription': transcription,
+                'sentiment': 'neutral'  # Default sentiment
+            })
             return None
         
-        logger.info(f"Transcription: {transcription}")
-        
-        # Analyze sentiment
+        # Perform sentiment analysis
         sentiment = analyze_sentiment(transcription)
         
-        if sentiment:
-            result = {
-                "text": transcription,
-                "sentiment": sentiment
-            }
-            logger.info(f"Sentiment analysis result: Speech {sentiment['category']} with emoji {sentiment['emoji']}")
-            return result
+        # Create result dictionary
+        result = {
+            'transcription': transcription,
+            'sentiment': sentiment
+        }
         
-        return None
+        # Emit the result to the client
+        socketio.emit('audio_label', {
+            'label': 'Speech', 
+            'accuracy': 0.9, 
+            'transcription': transcription,
+            'sentiment': sentiment
+        })
+        
+        return result
+        
     except Exception as e:
         print(f"Error in process_speech_with_sentiment: {str(e)}")
         traceback.print_exc()
@@ -1360,6 +1220,58 @@ def aggregate_predictions(new_prediction, label_list, is_speech_focused=False):
             else:
                 # Just return the single prediction if we don't have history yet
                 return new_prediction
+
+# Start the speech processing thread when the server starts
+@app.before_first_request
+def before_first_request():
+    start_speech_processing_thread()
+
+# Ensure the speech processing thread is stopped when the server shuts down
+@atexit.register
+def cleanup():
+    stop_speech_processing_thread()
+
+# Helper function to transcribe speech
+def transcribe_speech(audio_data):
+    """
+    Transcribe speech audio data using the configured speech recognition service.
+    
+    Args:
+        audio_data: Raw audio data as numpy array
+        
+    Returns:
+        Transcription text or None if transcription failed
+    """
+    try:
+        # Ensure minimum audio length for better transcription
+        min_samples = RATE * 3.0  # At least 3.0 seconds
+        if len(audio_data) < min_samples:
+            pad_size = int(min_samples) - len(audio_data)
+            # Use reflect padding to extend short audio naturally
+            audio_data = np.pad(audio_data, (0, pad_size), mode='reflect')
+            logging.info(f"Padded audio data to size: {len(audio_data)} samples ({len(audio_data)/RATE:.1f} seconds)")
+        
+        # Calculate the RMS value of the audio to gauge its "loudness"
+        rms = np.sqrt(np.mean(np.square(audio_data)))
+        if rms < 0.01:  # If the audio is very quiet, skip transcription
+            logging.info(f"Audio too quiet (RMS: {rms:.4f}), skipping transcription")
+            return None
+        
+        # Use Google Cloud Speech-to-Text if configured
+        if USE_GOOGLE_SPEECH:
+            # Use Google Cloud Speech-to-Text
+            transcription = transcribe_with_google(audio_data, RATE)
+            logging.info(f"Used Google Cloud Speech-to-Text for transcription")
+        else:
+            # Use Whisper (default)
+            transcription = speech_processor.transcribe(audio_data, RATE)
+            logging.info(f"Used Whisper for transcription")
+        
+        return transcription
+    except Exception as e:
+        logging.error(f"Error in transcribe_speech: {str(e)}")
+        traceback.print_exc()
+        return None
 
 if __name__ == '__main__':
     # Parse command-line arguments for port configuration
