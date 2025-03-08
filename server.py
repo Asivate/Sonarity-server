@@ -89,6 +89,11 @@ tf_session = tf.compat.v1.Session(graph=tf_graph)
 ast_lock = Lock()
 speech_lock = Lock() # Lock for speech processing
 
+# Prediction aggregation system - store recent predictions to improve accuracy
+MAX_PREDICTIONS_HISTORY = 3  # Number of recent predictions to keep
+recent_predictions = []  # Store recent prediction probabilities for each sound category
+prediction_lock = Lock()  # Lock for thread-safe access to prediction history
+
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'soundwatch_secret!'
 socketio = SocketIO(app, async_mode=async_mode)
@@ -162,8 +167,54 @@ google_speech_processor = None  # Will be lazy-loaded when needed
 
 # Load models
 def load_models():
+    """Load all required models for sound recognition and speech processing."""
     global models
-    # ... existing code ...
+    
+    # Initialize models dictionary
+    models = {
+        "tensorflow": None,
+        "ast": None,
+        "feature_extractor": None,
+        "sentiment_analyzer": None,
+        "speech_processor": None
+    }
+    
+    # Load TensorFlow model
+    try:
+        print("Loading TensorFlow model...")
+        with tf_lock:
+            with tf_graph.as_default():
+                with tf_session.as_default():
+                    # Load the TensorFlow model
+                    model_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models", "soundwatch_model.h5")
+                    if os.path.exists(model_path):
+                        models["tensorflow"] = keras.models.load_model(model_path)
+                        print(f"TensorFlow model loaded from {model_path}")
+                    else:
+                        print(f"TensorFlow model not found at {model_path}, downloading...")
+                        # Download the model from a URL
+                        model_url = "https://storage.googleapis.com/soundwatch-models/soundwatch_model.h5"
+                        model_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models", "soundwatch_model.h5")
+                        os.makedirs(os.path.dirname(model_path), exist_ok=True)
+                        wget.download(model_url, model_path)
+                        print(f"\nTensorFlow model downloaded to {model_path}")
+                        models["tensorflow"] = keras.models.load_model(model_path)
+    except Exception as e:
+        print(f"Error loading TensorFlow model: {e}")
+        traceback.print_exc()
+    
+    # Load AST model
+    try:
+        print("Loading AST model...")
+        with ast_lock:
+            # Load the AST model
+            models["ast"], models["feature_extractor"] = ast_model.load_ast_model()
+            # Initialize class labels for aggregation
+            ast_model.initialize_class_labels(models["ast"])
+            print("AST model loaded successfully")
+    except Exception as e:
+        print(f"Error loading AST model: {e}")
+        traceback.print_exc()
 
 # Add a comprehensive debug function
 def debug_predictions(predictions, label_list):
@@ -317,7 +368,7 @@ def handle_source(json_data):
                     print(f"Processing with AST model, data shape: {np_data.shape}")
                     
                     # Run prediction using the AST model
-                    predictions = ast_model.predict_sound(
+                    ast_predictions = ast_model.predict_sound(
                         np_data, 
                         RATE, 
                         models["ast"], 
@@ -327,12 +378,31 @@ def handle_source(json_data):
                     
                     # Debug all raw predictions from AST model
                     print("===== AST MODEL RAW PREDICTIONS =====")
-                    for pred in predictions["top_predictions"][:5]:  # Show top 5 for brevity
+                    for pred in ast_predictions["top_predictions"][:5]:  # Show top 5 for brevity
                         print(f"  {pred['label']}: {pred['confidence']:.6f}")
+                    
+                    # Get the raw prediction array for aggregation
+                    raw_predictions = ast_predictions["raw_predictions"]
+                    
+                    # Aggregate predictions from multiple overlapping segments
+                    if raw_predictions is not None and len(raw_predictions) > 0:
+                        aggregated_predictions = aggregate_predictions(raw_predictions, ast_model.class_labels)
+                        
+                        # Update the predictions with aggregated values
+                        ast_predictions = ast_model.process_predictions(
+                            aggregated_predictions, 
+                            ast_model.class_labels,
+                            threshold=PREDICTION_THRES
+                        )
+                        
+                        # Debug the aggregated predictions
+                        print("===== AGGREGATED AST MODEL PREDICTIONS =====")
+                        for pred in ast_predictions["top_predictions"][:5]:  # Show top 5 for brevity
+                            print(f"  {pred['label']}: {pred['confidence']:.6f}")
                     
                     # Special check for finger snapping
                     finger_snap_detected = False
-                    for pred in predictions["top_predictions"]:
+                    for pred in ast_predictions["top_predictions"]:
                         if (pred["label"] == "Finger snapping" or pred["label"] == "Snap") and pred["confidence"] > FINGER_SNAP_THRES:
                             finger_snap_detected = True
                             print(f"Finger snap detected with confidence: {pred['confidence']:.6f}")
@@ -345,7 +415,7 @@ def handle_source(json_data):
                             # Don't return here - continue processing other possible sounds
                     
                     # Get the mapped predictions
-                    mapped_preds = predictions["mapped_predictions"]
+                    mapped_preds = ast_predictions["mapped_predictions"]
                     
                     if mapped_preds:
                         # Take the top mapped prediction
@@ -366,6 +436,27 @@ def handle_source(json_data):
                             human_label = "Finger Snap"  # Ensure nice formatting
                         
                         print(f"Top AST prediction: {human_label} ({top_confidence:.6f})")
+                        
+                        # Check for speech detection and handle sentiment analysis
+                        if human_label == "Speech" and top_confidence > SPEECH_SENTIMENT_THRES:
+                            # Process speech with sentiment analysis
+                            print("Speech detected. Processing sentiment...")
+                            sentiment_result = process_speech_with_sentiment(np_wav)
+                            
+                            if sentiment_result:
+                                # Emit with sentiment information - fixed to match actual structure
+                                label = f"Speech {sentiment_result['sentiment']['category']}"
+                                socketio.emit('audio_label', {
+                                    'label': label,
+                                    'accuracy': str(sentiment_result['sentiment']['confidence']),
+                                    'db': str(db),
+                                    'emoji': sentiment_result['sentiment']['emoji'],
+                                    'transcription': sentiment_result['text'],
+                                    'emotion': sentiment_result['sentiment']['original_emotion'],
+                                    'sentiment_score': str(sentiment_result['sentiment']['confidence'])
+                                })
+                                print(f"EMITTING SPEECH WITH SENTIMENT: {label} with emoji {sentiment_result['sentiment']['emoji']}")
+                                return
                         
                         # Emit the prediction if confidence is above threshold or it's a finger snap
                         if top_confidence > PREDICTION_THRES or (top_label == "finger-snap" and top_confidence > FINGER_SNAP_THRES):
@@ -407,20 +498,30 @@ def handle_source(json_data):
                     
                     # Run prediction on sound
                     print("Making prediction with TensorFlow model...")
-                    predictions = models["tensorflow"].predict(np_data)
+                    with tf_graph.as_default():
+                        with tf_session.as_default():
+                            predictions = models["tensorflow"].predict(np_data)
                     
-                    # Debug all predictions
+                    # Debug all predictions before applying threshold
                     if np.ndim(predictions) > 0 and len(predictions) > 0:
                         debug_predictions(predictions[0], homesounds.everything)
+                        
+                        # Aggregate predictions from multiple overlapping segments
+                        aggregated_predictions = aggregate_predictions(predictions[0], homesounds.everything)
+                        
+                        # Debug the aggregated predictions
+                        logger.info("Aggregated predictions:")
+                        debug_predictions(aggregated_predictions, homesounds.everything)
                         
                         # Find top prediction from active context
                         pred_max = -1
                         pred_max_val = 0
+                        pred_label = None
                         for l in active_context:
                             i = homesounds.labels.get(l, -1)
-                            if i >= 0 and i < len(predictions[0]) and predictions[0][i] > pred_max_val:
+                            if i >= 0 and i < len(aggregated_predictions) and aggregated_predictions[i] > pred_max_val:
                                 pred_max = i
-                                pred_max_val = predictions[0][i]
+                                pred_max_val = aggregated_predictions[i]
                         
                         if pred_max != -1 and pred_max_val > PREDICTION_THRES:
                             for label, index in homesounds.labels.items():
@@ -585,6 +686,25 @@ def handle_audio(data):
                     for pred in ast_predictions["top_predictions"][:5]:  # Show top 5 for brevity
                         print(f"  {pred['label']}: {pred['confidence']:.6f}")
                     
+                    # Get the raw prediction array for aggregation
+                    raw_predictions = ast_predictions["raw_predictions"]
+                    
+                    # Aggregate predictions from multiple overlapping segments
+                    if raw_predictions is not None and len(raw_predictions) > 0:
+                        aggregated_predictions = aggregate_predictions(raw_predictions, ast_model.class_labels)
+                        
+                        # Update the predictions with aggregated values
+                        ast_predictions = ast_model.process_predictions(
+                            aggregated_predictions, 
+                            ast_model.class_labels,
+                            threshold=PREDICTION_THRES
+                        )
+                        
+                        # Debug the aggregated predictions
+                        print("===== AGGREGATED AST MODEL PREDICTIONS =====")
+                        for pred in ast_predictions["top_predictions"][:5]:  # Show top 5 for brevity
+                            print(f"  {pred['label']}: {pred['confidence']:.6f}")
+                    
                     # Special check for finger snapping
                     finger_snap_detected = False
                     for pred in ast_predictions["top_predictions"]:
@@ -737,15 +857,22 @@ def process_with_tensorflow_model(np_wav, db):
             if np.ndim(predictions) > 0 and len(predictions) > 0:
                 debug_predictions(predictions[0], homesounds.everything)
                 
+                # Aggregate predictions from multiple overlapping segments
+                aggregated_predictions = aggregate_predictions(predictions[0], homesounds.everything)
+                
+                # Debug the aggregated predictions
+                logger.info("Aggregated predictions:")
+                debug_predictions(aggregated_predictions, homesounds.everything)
+                
                 # Find top prediction from active context
                 pred_max = -1
                 pred_max_val = 0
                 pred_label = None
                 for l in active_context:
                     i = homesounds.labels.get(l, -1)
-                    if i >= 0 and i < len(predictions[0]) and predictions[0][i] > pred_max_val:
+                    if i >= 0 and i < len(aggregated_predictions) and aggregated_predictions[i] > pred_max_val:
                         pred_max = i
-                        pred_max_val = predictions[0][i]
+                        pred_max_val = aggregated_predictions[i]
                 
                 if pred_max != -1 and pred_max_val > PREDICTION_THRES:
                     for label, index in homesounds.labels.items():
@@ -830,7 +957,7 @@ def process_speech_with_sentiment(audio_data):
         Dictionary with transcription and sentiment
     """
     # Settings for improved speech processing
-    MAX_BUFFER_SIZE = 5  # Number of audio chunks to keep in buffer
+    MAX_BUFFER_SIZE = 8  # Number of audio chunks to keep in buffer (increased from 5)
     MIN_WORD_COUNT = 3   # Minimum number of meaningful words for valid transcription
     MIN_CONFIDENCE = 0.7  # Minimum confidence level for speech detection
     
@@ -847,8 +974,8 @@ def process_speech_with_sentiment(audio_data):
     
     # For better transcription, use concatenated audio from multiple chunks if available
     if len(process_speech_with_sentiment.recent_audio_buffer) > 1:
-        # Use up to 5 chunks instead of 3 for more context
-        num_chunks = min(5, len(process_speech_with_sentiment.recent_audio_buffer))
+        # Use up to 8 chunks instead of 5 for more context
+        num_chunks = min(8, len(process_speech_with_sentiment.recent_audio_buffer))
         logger.info(f"Using concatenated audio from {num_chunks} chunks for better transcription")
         
         # Concatenate audio chunks
@@ -856,8 +983,8 @@ def process_speech_with_sentiment(audio_data):
     else:
         concatenated_audio = audio_data
     
-    # Ensure minimum audio length for better transcription - increase from 1.5 to 2.0 seconds
-    min_samples = RATE * 2.0  # At least 2.0 seconds (was 1.5)
+    # Ensure minimum audio length for better transcription - increase from 2.0 to 3.0 seconds
+    min_samples = RATE * 3.0  # At least 3.0 seconds (was 2.0)
     if len(concatenated_audio) < min_samples:
         pad_size = int(min_samples) - len(concatenated_audio)
         # Use reflect padding to extend short audio naturally
@@ -1030,6 +1157,57 @@ def handle_disconnect():
     """
     print(f"Client disconnected: {request.sid}")
 
+# Helper function to aggregate predictions from multiple overlapping segments
+def aggregate_predictions(new_prediction, label_list):
+    """
+    Aggregate predictions from multiple overlapping segments to improve accuracy.
+    
+    Args:
+        new_prediction: The new prediction probabilities
+        label_list: List of sound labels
+        
+    Returns:
+        Aggregated prediction with highest confidence
+    """
+    global recent_predictions
+    
+    with prediction_lock:
+        # Add the new prediction to our history
+        recent_predictions.append(new_prediction)
+        
+        # Keep only the most recent predictions
+        if len(recent_predictions) > MAX_PREDICTIONS_HISTORY:
+            recent_predictions = recent_predictions[-MAX_PREDICTIONS_HISTORY:]
+        
+        # If we have multiple predictions, average them
+        if len(recent_predictions) > 1:
+            # Average the predictions
+            aggregated = np.zeros_like(new_prediction)
+            for pred in recent_predictions:
+                aggregated += pred
+            aggregated /= len(recent_predictions)
+            
+            # Debug the aggregation
+            logger.info(f"Aggregating {len(recent_predictions)} predictions")
+            
+            # Compare original vs aggregated for top predictions
+            orig_top_idx = np.argmax(new_prediction)
+            agg_top_idx = np.argmax(aggregated)
+            
+            if orig_top_idx != agg_top_idx:
+                # The top prediction changed after aggregation
+                orig_label = label_list[orig_top_idx] if orig_top_idx < len(label_list) else "unknown"
+                agg_label = label_list[agg_top_idx] if agg_top_idx < len(label_list) else "unknown"
+                logger.info(f"Aggregation changed top prediction: {orig_label} ({new_prediction[orig_top_idx]:.4f}) -> {agg_label} ({aggregated[agg_top_idx]:.4f})")
+            else:
+                # Same top prediction, but confidence may have changed
+                label = label_list[orig_top_idx] if orig_top_idx < len(label_list) else "unknown"
+                logger.info(f"Aggregation kept same top prediction: {label}, confidence: {new_prediction[orig_top_idx]:.4f} -> {aggregated[orig_top_idx]:.4f}")
+            
+            return aggregated
+        else:
+            # Just return the single prediction if we don't have history yet
+            return new_prediction
 
 if __name__ == '__main__':
     # Parse command-line arguments for port configuration
