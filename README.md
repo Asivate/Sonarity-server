@@ -44,6 +44,64 @@ To use Google Cloud Speech-to-Text:
 - **Whisper AI**: Works offline, doesn't require internet connection, no usage limits
 - **Google Cloud Speech-to-Text**: Higher accuracy, better handling of accents, real-time streaming capability, better noise handling
 
+## Using Google Cloud Credentials
+
+There are two ways to provide Google Cloud credentials for Speech-to-Text functionality:
+
+### Method 1: Credentials File (Traditional)
+
+Place your Google Cloud service account key file in one of these locations:
+- In the server directory: `asivate-452914-5c12101797af.json`
+- In your home directory (Linux): `/home/hirwa0250/asivate-452914-5c12101797af.json`
+
+The server will automatically find and use this file.
+
+### Method 2: Environment Variables (Recommended)
+
+For better security, use the `GOOGLE_APPLICATION_CREDENTIALS` environment variable to specify the path to your credentials file:
+
+#### On Linux (Debian/Ubuntu):
+
+```bash
+# Set the environment variable
+export GOOGLE_APPLICATION_CREDENTIALS="/home/hirwa0250/asivate-452914-5c12101797af.json"
+
+# Start the server with Google Speech
+python3 server.py --use-google-speech
+```
+
+#### On Linux using the provided script:
+
+```bash
+# Make the script executable (first time only)
+chmod +x start_with_credentials.sh
+
+# Run with default credentials location and Google Speech enabled
+./start_with_credentials.sh -g
+
+# Or specify a custom credentials path
+./start_with_credentials.sh -c /path/to/your/credentials.json -g
+```
+
+#### On Windows (PowerShell):
+
+```powershell
+# Set the environment variable
+$env:GOOGLE_APPLICATION_CREDENTIALS="C:\path\to\your\credentials.json"
+
+# Start the server with Google Speech
+python server.py --use-google-speech
+```
+
+#### On Windows using the provided script:
+
+```powershell
+# Run the script with your credentials file path
+.\start_with_credentials.ps1 -CredentialsPath "C:\path\to\your\credentials.json" -UseGoogleSpeech
+```
+
+This approach keeps your credentials more secure and easier to update without modifying code.
+
 ## Setup
 
 ### Prerequisites

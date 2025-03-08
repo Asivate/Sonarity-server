@@ -84,16 +84,35 @@ class GoogleSpeechToText:
         Initialize the Google Cloud Speech-to-Text client.
         """
         try:
-            # Set up Google Cloud credentials
-            credentials_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 
-                                           "asivate-452914-3c56106e7a07.json")
-            
-            if not os.path.exists(credentials_path):
-                logger.error(f"Google Cloud credentials file not found at: {credentials_path}")
-                raise FileNotFoundError(f"Google Cloud credentials file not found")
-            
-            # Set environment variable for authentication
-            os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = credentials_path
+            # Check if environment variable is already set
+            if "GOOGLE_APPLICATION_CREDENTIALS" in os.environ and os.path.exists(os.environ["GOOGLE_APPLICATION_CREDENTIALS"]):
+                logger.info(f"Using Google Cloud credentials from environment variable: {os.environ['GOOGLE_APPLICATION_CREDENTIALS']}")
+            else:
+                # Try to find credentials in these locations
+                possible_locations = [
+                    # Check server directory first
+                    os.path.join(os.path.dirname(os.path.abspath(__file__)), "asivate-452914-5c12101797af.json"),
+                    # Check home directory on Linux
+                    "/home/hirwa0250/asivate-452914-5c12101797af.json",
+                    # Check parent directory of server (for Sonarity-server structure)
+                    os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "asivate-452914-5c12101797af.json")
+                ]
+                
+                # Find the first existing file
+                credentials_path = None
+                for path in possible_locations:
+                    if os.path.exists(path):
+                        credentials_path = path
+                        break
+                
+                if not credentials_path:
+                    logger.error(f"Google Cloud credentials file not found in any of these locations: {possible_locations}")
+                    logger.error("Please set GOOGLE_APPLICATION_CREDENTIALS environment variable or place credentials file in one of the above locations")
+                    raise FileNotFoundError(f"Google Cloud credentials file not found")
+                
+                # Set environment variable for authentication
+                os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = credentials_path
+                logger.info(f"Using Google Cloud credentials from file: {credentials_path}")
             
             # Initialize the client
             self.client = speech.SpeechClient()
