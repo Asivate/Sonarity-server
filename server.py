@@ -183,7 +183,8 @@ print("=====")
 print("Setting up sound recognition models...")
 
 # Flag to determine which model to use
-USE_AST_MODEL = False  # Set to True to use the AST model, False to use the TensorFlow model
+USE_AST_MODEL = os.environ.get('USE_AST_MODEL', '0') == '1'  # Check environment variable, default to False
+print(f"AST model {'enabled' if USE_AST_MODEL else 'disabled'} based on environment settings")
 
 # Load the AST model
 try:

@@ -83,9 +83,12 @@ def main():
     # Build the command to start the server
     cmd = ["python3" if platform.system() != "Windows" else "python", "server.py"]
     
-    # Add model flag if AST is selected
+    # For the AST model, we use an environment variable instead of a command line flag
+    # since the server.py doesn't have an --use-ast command line option
+    env = os.environ.copy()
     if settings["Sound Recognition Model"] == "AST":
-        cmd.append("--use-ast")
+        env["USE_AST_MODEL"] = "1"
+        print("Using AST model (via environment variable)")
     
     # Add speech recognition flag if Google is selected
     if settings["Speech Recognition System"] == "Google Cloud":
@@ -100,9 +103,9 @@ def main():
     print("=" * 80)
     print(f"\nExecuting: {' '.join(cmd)}\n")
     
-    # Start the server
+    # Start the server with the updated environment
     try:
-        subprocess.run(cmd)
+        subprocess.run(cmd, env=env)
     except KeyboardInterrupt:
         print("\nServer stopped by user.")
     except Exception as e:

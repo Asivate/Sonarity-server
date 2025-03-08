@@ -30,6 +30,33 @@ chmod +x start_interactive.sh
 python3 interactive_start.py
 ```
 
+### Sound Recognition Models
+
+The server supports two sound recognition models:
+
+1. **TensorFlow Model** (Default): The traditional model used for general sound recognition
+2. **AST (Audio Spectrogram Transformer)**: A newer model that may perform better for some specific sounds
+
+#### Using the AST Model
+
+To use the AST model:
+
+1. Set the `USE_AST_MODEL` environment variable to `1`:
+   ```bash
+   # On Linux
+   export USE_AST_MODEL=1
+   python3 server.py
+   
+   # On Windows PowerShell
+   $env:USE_AST_MODEL=1
+   python server.py
+   ```
+
+2. Or use the interactive startup script which will set this for you:
+   ```bash
+   ./start_interactive.sh
+   ```
+
 ### Speech Recognition Options
 
 The server now supports two speech recognition systems:
