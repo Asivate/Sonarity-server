@@ -123,11 +123,22 @@ class GoogleSpeechToText:
                 encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
                 sample_rate_hertz=16000,
                 language_code="en-US",
-                model="default",
+                # Use video model which is better for shorter utterances
+                model="video",
                 use_enhanced=True,
                 profanity_filter=False,
                 enable_automatic_punctuation=True,
-                max_alternatives=1
+                # Increase alternatives to get better results
+                max_alternatives=3,
+                # Enable speech adaptation to improve recognition of specific contexts
+                speech_contexts=[speech.SpeechContext(
+                    phrases=["okay", "not okay", "I am", "help", "emergency", "alert"],
+                    boost=15.0
+                )],
+                # Enable word-level confidence
+                enable_word_confidence=True,
+                # Enable word time offsets for timing
+                enable_word_time_offsets=True
             )
             
             # Create a streaming config as well
@@ -201,11 +212,17 @@ class GoogleSpeechToText:
                     encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
                     sample_rate_hertz=sample_rate,
                     language_code="en-US",
-                    model="default",
+                    model="video",
                     use_enhanced=True,
                     profanity_filter=False,
                     enable_automatic_punctuation=True,
-                    max_alternatives=1
+                    max_alternatives=3,
+                    speech_contexts=[speech.SpeechContext(
+                        phrases=["okay", "not okay", "I am", "help", "emergency", "alert"],
+                        boost=15.0
+                    )],
+                    enable_word_confidence=True,
+                    enable_word_time_offsets=True
                 )
             
             # Detect speech using Google Cloud Speech-to-Text

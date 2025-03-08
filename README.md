@@ -11,6 +11,25 @@ A Flask-based server application for audio analysis and recognition, designed to
 
 ## New Features
 
+### Interactive Startup
+
+The server now includes an interactive startup option that lets you choose:
+- Which sound recognition model to use (TensorFlow or AST)
+- Which speech recognition system to use (Whisper or Google Cloud)
+- Port number
+- Debug mode
+
+To use the interactive startup:
+
+```bash
+# On Linux/macOS
+chmod +x start_interactive.sh
+./start_interactive.sh
+
+# Or directly with Python
+python3 interactive_start.py
+```
+
 ### Speech Recognition Options
 
 The server now supports two speech recognition systems:
@@ -152,3 +171,11 @@ This approach keeps your credentials more secure and easier to update without mo
 ## Note
 
 The models folder is excluded from version control and will be downloaded at runtime as needed.
+
+### Improved Speech Recognition
+
+The speech recognition has been improved:
+- Captures more context by using more audio chunks (5 instead of 3)
+- Uses longer minimum audio duration (1.5 seconds instead of 0.5)
+- Google Speech-to-Text now uses the "video" model which handles shorter utterances better
+- Added speech adaptation for common phrases

@@ -842,8 +842,8 @@ def process_speech_with_sentiment(audio_data):
     
     # For better transcription, use concatenated audio from multiple chunks if available
     if len(process_speech_with_sentiment.recent_audio_buffer) > 1:
-        # Use the last 3 chunks (or fewer if not available)
-        num_chunks = min(3, len(process_speech_with_sentiment.recent_audio_buffer))
+        # Use up to 5 chunks instead of 3 for more context
+        num_chunks = min(5, len(process_speech_with_sentiment.recent_audio_buffer))
         logger.info(f"Using concatenated audio from {num_chunks} chunks for better transcription")
         
         # Concatenate audio chunks
@@ -851,8 +851,8 @@ def process_speech_with_sentiment(audio_data):
     else:
         concatenated_audio = audio_data
     
-    # Ensure minimum audio length for better transcription
-    min_samples = RATE * 0.5  # At least 0.5 seconds
+    # Ensure minimum audio length for better transcription - increase from 0.5 to 1.5 seconds
+    min_samples = RATE * 1.5  # At least 1.5 seconds (was 0.5)
     if len(concatenated_audio) < min_samples:
         pad_size = int(min_samples) - len(concatenated_audio)
         # Use reflect padding to extend short audio naturally
