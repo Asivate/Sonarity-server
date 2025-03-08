@@ -9,21 +9,36 @@ import time
 # Suppress transformers warnings
 warnings.filterwarnings("ignore", category=UserWarning)
 
-def load_ast_model(model_name="MIT/ast-finetuned-audioset-10-10-0.4593"):
+def load_ast_model(model_name="MIT/ast-finetuned-audioset-10-10-0.4593", **kwargs):
     """
     Load the Audio Spectrogram Transformer model and feature extractor from Hugging Face
     
     Args:
         model_name (str): The name of the model on Hugging Face
+        **kwargs: Additional arguments to pass to the from_pretrained method
+            - attn_implementation: "eager" or "sdpa" for Scaled Dot Product Attention
+            - torch_dtype: torch.float32, torch.float16 or torch.bfloat16
         
     Returns:
         tuple: (model, feature_extractor)
     """
     print(f"Loading AST model: {model_name}")
     try:
-        # Load feature extractor and model
+        # Load feature extractor
         feature_extractor = AutoFeatureExtractor.from_pretrained(model_name)
-        model = AutoModelForAudioClassification.from_pretrained(model_name)
+        
+        # Check for optimization parameters
+        attn_implementation = kwargs.get("attn_implementation", None)
+        torch_dtype = kwargs.get("torch_dtype", None)
+        
+        # Print optimization settings
+        if attn_implementation:
+            print(f"Using attention implementation: {attn_implementation}")
+        if torch_dtype:
+            print(f"Using model precision: {torch_dtype}")
+        
+        # Load model with optimizations
+        model = AutoModelForAudioClassification.from_pretrained(model_name, **kwargs)
         
         # Put model in evaluation mode and move to CPU (or GPU if available)
         model.eval()
@@ -232,6 +247,37 @@ def map_ast_labels_to_homesounds():
     
     return ast_to_homesounds
 
+def preprocess_audio_for_ast(audio_data, sample_rate, feature_extractor):
+    """
+    Preprocess audio data specifically for AST model
+    
+    Args:
+        audio_data (np.ndarray): Raw audio samples
+        sample_rate (int): Sample rate of the audio
+        feature_extractor: The feature extractor for AST
+        
+    Returns:
+        torch.Tensor: Processed input for AST model
+    """
+    # Ensure the audio data is the right shape and type
+    if len(audio_data.shape) > 1:
+        # If multi-channel, convert to mono by averaging
+        audio_data = np.mean(audio_data, axis=1)
+    
+    # Normalize audio data
+    if np.abs(audio_data).max() > 1.0:
+        audio_data = audio_data / np.abs(audio_data).max()
+    
+    # Extract features using the feature extractor
+    inputs = feature_extractor(
+        audio_data, 
+        sampling_rate=sample_rate, 
+        return_tensors="pt",
+        padding=True
+    )
+    
+    return inputs
+
 def predict_sound(audio_data, sample_rate, model, feature_extractor, threshold=0.05, top_k=5):
     """
     Process audio input and return predictions
@@ -274,22 +320,20 @@ def predict_sound(audio_data, sample_rate, model, feature_extractor, threshold=0
                 "raw_predictions": None  # No raw predictions for silence
             }
         
-        # Extract features
-        inputs = feature_extractor(
-            audio_data, 
-            sampling_rate=sample_rate, 
-            return_tensors="pt",
-            padding=True
-        )
+        # Use the preprocess function to prepare input
+        inputs = preprocess_audio_for_ast(audio_data, sample_rate, feature_extractor)
         
-        # Move inputs to the same device as the model
+        # Get the model's device
         device = next(model.parameters()).device
+        
+        # Move inputs to the model's device
         inputs = {k: v.to(device) for k, v in inputs.items()}
         
         print(f"Feature extraction completed. Running inference...")
         
-        # Run inference
+        # Run inference with no gradient tracking for efficiency
         with torch.no_grad():
+            # Run the model with the prepared inputs
             outputs = model(**inputs)
             logits = outputs.logits
             
@@ -312,7 +356,7 @@ def predict_sound(audio_data, sample_rate, model, feature_extractor, threshold=0
             result["raw_predictions"] = raw_predictions
             
             elapsed_time = time.time() - start_time
-            print(f"Prediction completed in {elapsed_time:.2f} seconds")
+            print(f"AST prediction completed in {elapsed_time:.2f} seconds")
             
             return result
     

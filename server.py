@@ -40,6 +40,48 @@ from google_speech import transcribe_with_google, GoogleSpeechToText
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+# Memory optimization settings
+MEMORY_OPTIMIZATION_LEVEL = os.environ.get('MEMORY_OPTIMIZATION', '1')  # 0=None, 1=Moderate, 2=Aggressive
+if MEMORY_OPTIMIZATION_LEVEL == '1':
+    logger.info("Using moderate memory optimization")
+    # Set PyTorch to release memory aggressively
+    torch.set_num_threads(4)  # Limit threads for CPU usage
+    # Setting empty_cache frequency
+    EMPTY_CACHE_FREQ = 10  # Empty cache every 10 predictions
+elif MEMORY_OPTIMIZATION_LEVEL == '2':
+    logger.info("Using aggressive memory optimization")
+    # More aggressive memory management
+    torch.set_num_threads(2)  # More strict thread limiting
+    # Release memory more frequently
+    EMPTY_CACHE_FREQ = 5  # Empty cache every 5 predictions
+else:
+    logger.info("No memory optimization")
+    EMPTY_CACHE_FREQ = 0  # Never automatically empty cache
+
+# Global counter for memory cleanup
+prediction_counter = 0
+
+# Function to clean up memory periodically
+def cleanup_memory():
+    """Clean up unused memory to prevent memory leaks"""
+    global prediction_counter
+    
+    prediction_counter += 1
+    
+    # Skip if memory optimization is disabled
+    if EMPTY_CACHE_FREQ == 0:
+        return
+    
+    # Clean up memory periodically
+    if prediction_counter % EMPTY_CACHE_FREQ == 0:
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        else:
+            # For CPU, trigger Python garbage collection
+            import gc
+            gc.collect()
+        logger.info(f"Memory cleanup performed (cycle {prediction_counter})")
+
 # Speech recognition settings
 USE_GOOGLE_SPEECH = False  # Set to True to use Google Cloud Speech-to-Text instead of Whisper
 
@@ -171,7 +213,7 @@ google_speech_processor = None  # Will be lazy-loaded when needed
 # Load models
 def load_models():
     """Load all required models for sound recognition and speech processing."""
-    global models
+    global models, USE_AST_MODEL
     
     # Initialize models dictionary
     models = {
@@ -182,41 +224,107 @@ def load_models():
         "speech_processor": None
     }
     
-    # Load TensorFlow model
-    try:
-        print("Loading TensorFlow model...")
-        with tf_lock:
-            with tf_graph.as_default():
-                with tf_session.as_default():
-                    # Load the TensorFlow model
-                    model_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models", "soundwatch_model.h5")
-                    if os.path.exists(model_path):
-                        models["tensorflow"] = keras.models.load_model(model_path)
-                        print(f"TensorFlow model loaded from {model_path}")
-                    else:
-                        print(f"TensorFlow model not found at {model_path}, downloading...")
-                        # Download the model from a URL
-                        model_url = "https://storage.googleapis.com/soundwatch-models/soundwatch_model.h5"
-                        model_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models", "soundwatch_model.h5")
-                        os.makedirs(os.path.dirname(model_path), exist_ok=True)
-                        wget.download(model_url, model_path)
-                        print(f"\nTensorFlow model downloaded to {model_path}")
-                        models["tensorflow"] = keras.models.load_model(model_path)
-    except Exception as e:
-        print(f"Error loading TensorFlow model: {e}")
-        traceback.print_exc()
+    # Flag to determine which model to use
+    USE_AST_MODEL = os.environ.get('USE_AST_MODEL', '1') == '1'  # Default to enabled
+    print(f"AST model {'enabled' if USE_AST_MODEL else 'disabled'} based on environment settings")
     
-    # Load AST model
+    # TensorFlow model settings
+    MODEL_URL = "https://www.dropbox.com/s/cq1d7uqg0l28211/example_model.hdf5?dl=1"
+    MODEL_PATH = "models/example_model.hdf5"
+    
+    # Load AST model first
     try:
         print("Loading AST model...")
         with ast_lock:
-            # Load the AST model
-            models["ast"], models["feature_extractor"] = ast_model.load_ast_model()
+            # Use SDPA (Scaled Dot Product Attention) for better performance on CPU
+            # Define the best AST model for our use case
+            ast_model_name = "MIT/ast-finetuned-audioset-10-10-0.4593"
+            
+            # Check if torch version supports SDPA
+            ast_kwargs = {}
+            if torch.__version__ >= '2.1.1':
+                ast_kwargs["attn_implementation"] = "sdpa"
+                print("Using Scaled Dot Product Attention (SDPA) for faster inference")
+            
+            # Load in a CPU-optimized way - lower precision for faster inference
+            # but only if adequate hardware support exists
+            if torch.backends.cpu.supports_float16():
+                print("CPU supports float16 - using half precision for faster inference")
+                ast_kwargs["torch_dtype"] = torch.float16
+            else:
+                print("CPU does not support float16 - using default precision (slower)")
+            
+            # Load model with optimizations
+            models["ast"], models["feature_extractor"] = ast_model.load_ast_model(
+                model_name=ast_model_name,
+                **ast_kwargs
+            )
             # Initialize class labels for aggregation
             ast_model.initialize_class_labels(models["ast"])
             print("AST model loaded successfully")
     except Exception as e:
         print(f"Error loading AST model: {e}")
+        traceback.print_exc()
+        USE_AST_MODEL = False  # Fall back to TensorFlow model if AST fails to load
+
+    # Optionally load TensorFlow model (as fallback or if USE_AST_MODEL is False)
+    model_filename = os.path.abspath(MODEL_PATH)
+    if not USE_AST_MODEL or True:  # We'll load it anyway as backup
+        print("Loading TensorFlow model as backup...")
+        os.makedirs(os.path.dirname(model_filename), exist_ok=True)
+        
+        homesounds_model = Path(model_filename)
+        if (not homesounds_model.is_file()):
+            print("Downloading example_model.hdf5 [867MB]: ")
+            wget.download(MODEL_URL, MODEL_PATH)
+        
+        print("Using TensorFlow model: %s" % (model_filename))
+        
+        try:
+            # Try to load the model with the new API
+            with tf_graph.as_default():
+                with tf_session.as_default():
+                    models["tensorflow"] = keras.models.load_model(model_filename)
+                    # Make a dummy prediction to ensure the predict function is initialized
+                    # This is critical for TensorFlow 1.x compatibility
+                    print("Initializing TensorFlow model with a dummy prediction...")
+                    dummy_input = np.zeros((1, 96, 64, 1))
+                    _ = models["tensorflow"].predict(dummy_input)
+                    print("Model prediction function initialized successfully")
+            print("TensorFlow model loaded successfully")
+            if not USE_AST_MODEL:
+                print("TensorFlow model will be used as primary model")
+                models["tensorflow"].summary()
+        except Exception as e:
+            print(f"Error loading TensorFlow model with standard method: {e}")
+            # Fallback for older model formats
+            try:
+                with tf_graph.as_default():
+                    with tf_session.as_default():
+                        models["tensorflow"] = tf.keras.models.load_model(model_filename, compile=False)
+                        # Make a dummy prediction to ensure the predict function is initialized
+                        # This is critical for TensorFlow 1.x compatibility
+                        print("Initializing TensorFlow model with a dummy prediction...")
+                        dummy_input = np.zeros((1, 96, 64, 1))
+                        _ = models["tensorflow"].predict(dummy_input)
+                        print("Model prediction function initialized successfully")
+                print("TensorFlow model loaded with compile=False option")
+            except Exception as e2:
+                print(f"Error with fallback method: {e2}")
+                if not USE_AST_MODEL:
+                    raise Exception("Could not load TensorFlow model with any method, and AST model is not enabled")
+
+    print(f"Using {'AST' if USE_AST_MODEL else 'TensorFlow'} model as primary model")
+
+    # Load the Whisper speech recognition model if needed
+    try:
+        if not USE_GOOGLE_SPEECH:
+            print("Loading Whisper model for speech recognition...")
+            speech_processor = SpeechToText()
+            print("Whisper model loaded successfully")
+            models["speech_processor"] = speech_processor
+    except Exception as e:
+        print(f"Error loading Whisper model: {e}")
         traceback.print_exc()
 
 # Add a comprehensive debug function
@@ -238,18 +346,43 @@ print("=====")
 print("Setting up sound recognition models...")
 
 # Flag to determine which model to use
-USE_AST_MODEL = os.environ.get('USE_AST_MODEL', '0') == '1'  # Check environment variable, default to False
+USE_AST_MODEL = os.environ.get('USE_AST_MODEL', '1') == '1'  # Default to enabled
 print(f"AST model {'enabled' if USE_AST_MODEL else 'disabled'} based on environment settings")
 
 # Load the AST model
 try:
     print("Loading AST model...")
-    ast_model_instance, feature_extractor = ast_model.load_ast_model()
-    models["ast"] = ast_model_instance
-    models["feature_extractor"] = feature_extractor
-    print("AST model loaded successfully")
+    # Use SDPA (Scaled Dot Product Attention) for better performance on CPU
+    # Define the best AST model for our use case
+    ast_model_name = "MIT/ast-finetuned-audioset-10-10-0.4593"
+    
+    # Check if torch version supports SDPA
+    ast_kwargs = {}
+    if torch.__version__ >= '2.1.1':
+        ast_kwargs["attn_implementation"] = "sdpa"
+        print("Using Scaled Dot Product Attention (SDPA) for faster inference")
+    
+    # Load in a CPU-optimized way - lower precision for faster inference
+    # but only if adequate hardware support exists
+    if torch.backends.cpu.supports_float16():
+        print("CPU supports float16 - using half precision for faster inference")
+        ast_kwargs["torch_dtype"] = torch.float16
+    else:
+        print("CPU does not support float16 - using default precision (slower)")
+    
+    # Load model with optimizations
+    with ast_lock:
+        # Load the AST model with optimizations
+        models["ast"], models["feature_extractor"] = ast_model.load_ast_model(
+            model_name=ast_model_name,
+            **ast_kwargs
+        )
+        # Initialize class labels for aggregation
+        ast_model.initialize_class_labels(models["ast"])
+        print("AST model loaded successfully")
 except Exception as e:
     print(f"Error loading AST model: {e}")
+    traceback.print_exc()
     USE_AST_MODEL = False  # Fall back to TensorFlow model if AST fails to load
 
 # Optionally load TensorFlow model (as fallback or if USE_AST_MODEL is False)
@@ -427,7 +560,9 @@ def handle_source(json_data):
                                 'db': str(db)
                             })
                             print(f"EMITTING: Finger Snap ({pred['confidence']:.6f})")
-                            # Don't return here - continue processing other possible sounds
+                            # Run memory cleanup after prediction
+                            cleanup_memory()
+                            return
                     
                     # Get the mapped predictions
                     mapped_preds = ast_predictions["mapped_predictions"]
@@ -471,6 +606,8 @@ def handle_source(json_data):
                                     'sentiment_score': str(sentiment_result['sentiment']['confidence'])
                                 })
                                 print(f"EMITTING SPEECH WITH SENTIMENT: {label} with emoji {sentiment_result['sentiment']['emoji']}")
+                                # Run memory cleanup after prediction
+                                cleanup_memory()
                                 return
                         
                         # Emit the prediction if confidence is above threshold or it's a finger snap
@@ -573,6 +710,8 @@ def handle_source(json_data):
                                             'accuracy': '0.2',
                                             'db': str(db)
                                         })
+                                        # Cleanup memory
+                                        cleanup_memory()
                                         return
                                     
                                     # Check for speech detection with TensorFlow model
@@ -594,6 +733,8 @@ def handle_source(json_data):
                                                 'sentiment_score': str(sentiment_result['sentiment']['confidence'])
                                             })
                                             print(f"EMITTING SPEECH WITH SENTIMENT: {label} with emoji {sentiment_result['sentiment']['emoji']}")
+                                            # Cleanup memory
+                                            cleanup_memory()
                                             return
                                     # Normal sound emission (non-speech or sentiment analysis failed)
                                     socketio.emit('audio_label', {
@@ -601,6 +742,8 @@ def handle_source(json_data):
                                         'accuracy': str(pred_max_val),
                                         'db': str(db)
                                     })
+                                    # Cleanup memory
+                                    cleanup_memory()
                                     break
                         else:
                             print(f"No prediction above threshold: {pred_max_val:.4f}")
@@ -765,7 +908,9 @@ def handle_audio(data):
                                 'db': str(db)
                             })
                             print(f"EMITTING: Finger Snap ({pred['confidence']:.6f})")
-                            # Don't return here - continue processing other possible sounds
+                            # Run memory cleanup after prediction
+                            cleanup_memory()
+                            return
                     
                     # Get the mapped predictions
                     mapped_preds = ast_predictions["mapped_predictions"]
@@ -809,6 +954,8 @@ def handle_audio(data):
                                     'sentiment_score': str(sentiment_result['sentiment']['confidence'])
                                 })
                                 print(f"EMITTING SPEECH WITH SENTIMENT: {label} with emoji {sentiment_result['sentiment']['emoji']}")
+                                # Run memory cleanup after prediction
+                                cleanup_memory()
                                 return
                         
                         # Emit the prediction if confidence is above threshold or it's a finger snap
@@ -838,14 +985,21 @@ def handle_audio(data):
                                 'db': str(db)
                             })
                             print(f"Emitting Unrecognized Sound (db: {-db})")
+                
+                # Run memory cleanup after prediction
+                cleanup_memory()
             except Exception as e:
                 print(f"Error processing with AST model: {str(e)}")
                 traceback.print_exc()
                 # Try to fall back to TensorFlow model
                 process_with_tensorflow_model(np_wav, db)
+                # Run memory cleanup even after error
+                cleanup_memory()
         else:
             # Process using TensorFlow model
             process_with_tensorflow_model(np_wav, db)
+            # Run memory cleanup after prediction
+            cleanup_memory()
     else:
         # Sound too quiet to process but not silent
         print(f"Sound level ({-db} dB) below threshold ({DBLEVEL_THRES} dB)")
@@ -957,6 +1111,8 @@ def process_with_tensorflow_model(np_wav, db):
                                     'accuracy': '0.2',
                                     'db': str(db)
                                 })
+                                # Cleanup memory
+                                cleanup_memory()
                                 return
                             
                             # Check for speech detection with TensorFlow model
@@ -978,6 +1134,8 @@ def process_with_tensorflow_model(np_wav, db):
                                         'sentiment_score': str(sentiment_result['sentiment']['confidence'])
                                     })
                                     print(f"EMITTING SPEECH WITH SENTIMENT: {label} with emoji {sentiment_result['sentiment']['emoji']}")
+                                    # Cleanup memory
+                                    cleanup_memory()
                                     return
                             
                             # Normal sound emission (non-speech or sentiment analysis failed)
@@ -986,6 +1144,8 @@ def process_with_tensorflow_model(np_wav, db):
                                 'accuracy': str(pred_max_val),
                                 'db': str(db)
                             })
+                            # Cleanup memory
+                            cleanup_memory()
                             break
                 else:
                     print(f"No prediction above threshold: {pred_max_val:.4f}")
@@ -1009,6 +1169,8 @@ def process_with_tensorflow_model(np_wav, db):
             'accuracy': '0.0',
             'db': str(db)
         })
+        # Cleanup memory even on error
+        cleanup_memory()
 
 # Keep track of recent audio buffers for better speech transcription
 recent_audio_buffer = []
@@ -1310,6 +1472,11 @@ if __name__ == '__main__':
     else:
         USE_GOOGLE_SPEECH = False
         logger.info("Using Whisper for speech recognition")
+    
+    # Initialize and load all models
+    print("=====")
+    print("Setting up sound recognition models...")
+    load_models()
     
     # Get all available IP addresses
     ip_addresses = get_ip_addresses()

@@ -57,6 +57,21 @@ To use the AST model:
    ./start_interactive.sh
    ```
 
+3. Or use the toggle script to switch between models:
+   ```bash
+   # On Linux/macOS
+   python3 toggle_ast.py on  # Enable AST model
+   python3 toggle_ast.py off  # Disable AST model
+   
+   # On Windows
+   python toggle_ast.py on  # Enable AST model
+   python toggle_ast.py off  # Disable AST model
+   
+   # Without arguments it will toggle between enabled/disabled
+   python toggle_ast.py  # Toggle the current setting
+   ```
+   The toggle script will update the environment variable and offer to restart the server with the new settings.
+
 ### Speech Recognition Options
 
 The server now supports two speech recognition systems:
