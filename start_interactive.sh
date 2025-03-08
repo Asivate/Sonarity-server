@@ -1,6 +1,7 @@
 #!/bin/bash
 # Interactive startup script for SoundWatch Server
 # This script sets up the environment and runs the interactive Python script
+# Server will always run on port 8080
 
 # Change to the directory containing this script
 cd "$(dirname "$0")"
@@ -13,6 +14,9 @@ fi
 
 # Make sure the interactive script is executable
 chmod +x interactive_start.py
+
+# Display information about the server port
+echo -e "\e[36mSoundWatch Server will run on port 8080\e[0m"
 
 # Run the interactive startup script
 python3 interactive_start.py

@@ -52,11 +52,11 @@ def confirm_settings(settings):
 def main():
     print_header()
     
-    # Initial settings
+    # Initial settings - always use port 8080 and no debug mode
     settings = {
         "Sound Recognition Model": "TensorFlow (default)",
         "Speech Recognition System": "Whisper (default)",
-        "Server Port": 5000,
+        "Server Port": 8080,
         "Debug Mode": "Disabled"
     }
     
@@ -76,20 +76,6 @@ def main():
     )
     settings["Speech Recognition System"] = "Whisper" if speech_choice == 1 else "Google Cloud"
     
-    # Get port number
-    print("\nWhich port would you like the server to run on?")
-    print("  (Default is 5000, press Enter to use default)")
-    port_input = input("Port: ").strip()
-    if port_input and port_input.isdigit() and 1024 <= int(port_input) <= 65535:
-        settings["Server Port"] = int(port_input)
-    
-    # Debug mode
-    debug_choice = get_choice(
-        "Would you like to enable debug mode?",
-        ["No (default)", "Yes"]
-    )
-    settings["Debug Mode"] = "Enabled" if debug_choice == 2 else "Disabled"
-    
     # Show summary and confirm
     if not confirm_settings(settings):
         return main()  # Restart if user wants to change settings
@@ -105,13 +91,8 @@ def main():
     if settings["Speech Recognition System"] == "Google Cloud":
         cmd.append("--use-google-speech")
     
-    # Add port if custom
-    if settings["Server Port"] != 5000:
-        cmd.append(f"--port={settings['Server Port']}")
-    
-    # Add debug flag if enabled
-    if settings["Debug Mode"] == "Enabled":
-        cmd.append("--debug")
+    # Always use port 8080
+    cmd.append("--port=8080")
     
     # Show the command
     print("\n" + "=" * 80)

@@ -16,8 +16,8 @@ A Flask-based server application for audio analysis and recognition, designed to
 The server now includes an interactive startup option that lets you choose:
 - Which sound recognition model to use (TensorFlow or AST)
 - Which speech recognition system to use (Whisper or Google Cloud)
-- Port number
-- Debug mode
+
+The server will always use port 8080 by default.
 
 To use the interactive startup:
 
