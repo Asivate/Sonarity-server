@@ -9,6 +9,22 @@ import time
 # Suppress transformers warnings
 warnings.filterwarnings("ignore", category=UserWarning)
 
+def check_float16_support():
+    """Check if the system supports float16 operations in a backward-compatible way."""
+    try:
+        # Try the new way (newer PyTorch versions)
+        if hasattr(torch.backends, 'cpu') and hasattr(torch.backends.cpu, 'supports_float16'):
+            return torch.backends.cpu.supports_float16()
+        # Try the old way or fallback
+        else:
+            # Simple test of float16 functionality
+            test_tensor = torch.tensor([1.0], dtype=torch.float16)
+            result = test_tensor + test_tensor
+            return True
+    except Exception as e:
+        print(f"Error checking float16 support: {e}")
+        return False
+
 def load_ast_model(model_name="MIT/ast-finetuned-audioset-10-10-0.4593", **kwargs):
     """
     Load the Audio Spectrogram Transformer model and feature extractor from Hugging Face
@@ -36,6 +52,11 @@ def load_ast_model(model_name="MIT/ast-finetuned-audioset-10-10-0.4593", **kwarg
             print(f"Using attention implementation: {attn_implementation}")
         if torch_dtype:
             print(f"Using model precision: {torch_dtype}")
+        
+        # Check if we can use float16 precision
+        if not torch_dtype and check_float16_support():
+            print("CPU supports float16 - using half precision for faster inference")
+            kwargs["torch_dtype"] = torch.float16
         
         # Load model with optimizations
         model = AutoModelForAudioClassification.from_pretrained(model_name, **kwargs)

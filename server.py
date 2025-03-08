@@ -248,11 +248,13 @@ def load_models():
             
             # Load in a CPU-optimized way - lower precision for faster inference
             # but only if adequate hardware support exists
-            if torch.backends.cpu.supports_float16():
+            supports_float16 = ast_model.check_float16_support()
+            
+            if supports_float16:
                 print("CPU supports float16 - using half precision for faster inference")
                 ast_kwargs["torch_dtype"] = torch.float16
             else:
-                print("CPU does not support float16 - using default precision (slower)")
+                print("CPU does not support float16 or check failed - using default precision (slower)")
             
             # Load model with optimizations
             models["ast"], models["feature_extractor"] = ast_model.load_ast_model(
@@ -364,11 +366,13 @@ try:
     
     # Load in a CPU-optimized way - lower precision for faster inference
     # but only if adequate hardware support exists
-    if torch.backends.cpu.supports_float16():
+    supports_float16 = ast_model.check_float16_support()
+    
+    if supports_float16:
         print("CPU supports float16 - using half precision for faster inference")
         ast_kwargs["torch_dtype"] = torch.float16
     else:
-        print("CPU does not support float16 - using default precision (slower)")
+        print("CPU does not support float16 or check failed - using default precision (slower)")
     
     # Load model with optimizations
     with ast_lock:
@@ -1137,7 +1141,6 @@ def process_with_tensorflow_model(np_wav, db):
                                     # Cleanup memory
                                     cleanup_memory()
                                     return
-                            
                             # Normal sound emission (non-speech or sentiment analysis failed)
                             socketio.emit('audio_label', {
                                 'label': human_label,
