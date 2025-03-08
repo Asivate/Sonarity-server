@@ -27,7 +27,6 @@ import threading
 import queue
 from transformers import pipeline
 import logging
-import atexit
 
 # Import our AST model implementation
 import ast_model
@@ -91,22 +90,11 @@ ast_lock = Lock()
 speech_lock = Lock() # Lock for speech processing
 
 # Prediction aggregation system - store recent predictions to improve accuracy
-MAX_PREDICTIONS_HISTORY = 3  # Number of recent predictions to keep
+MAX_PREDICTIONS_HISTORY = 2  # Reduced from 3 to 2 for general sounds
+SPEECH_PREDICTIONS_HISTORY = 4  # Keep more prediction history for speech
 recent_predictions = []  # Store recent prediction probabilities for each sound category
+speech_predictions = []  # Separate storage for speech predictions
 prediction_lock = Lock()  # Lock for thread-safe access to prediction history
-
-# Dual-track processing - separate handling for speech vs. other sounds
-# For speech we want longer audio (3s) but for other sounds we want faster response (0.7s)
-MAX_SPEECH_BUFFER_SIZE = 8  # For speech recognition (8 chunks ≈ 3 seconds)
-MAX_SOUND_BUFFER_SIZE = 2   # For general sound recognition (2 chunks ≈ 0.7 seconds)
-speech_audio_buffer = []     # Store audio chunks for speech processing
-sound_audio_buffer = []      # Store audio chunks for general sound processing
-speech_buffer_lock = Lock()  # Lock for thread-safe access to speech buffer
-sound_buffer_lock = Lock()   # Lock for thread-safe access to sound buffer
-
-# Separate aggregation for speech vs other sounds
-speech_predictions = []  # Store speech-specific predictions
-sound_predictions = []   # Store general sound predictions
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'soundwatch_secret!'
@@ -120,30 +108,19 @@ context = homesounds.everything
 active_context = homesounds.everything
 
 # thresholds
-PREDICTION_THRES = 0.15  # General threshold for all sounds
+PREDICTION_THRES = 0.15  # Increased from 0.05 to reduce false positives 
 FINGER_SNAP_THRES = 0.03  # Special lower threshold for finger snapping
 DBLEVEL_THRES = -60  # Adjusted from -65 to -60 to filter out more background noise
 SILENCE_THRES = -75  # Threshold for silence detection
-SPEECH_SENTIMENT_THRES = 0.35  # Threshold for speech sentiment analysis
-SPEECH_PREDICTION_THRES = 0.80  # Increased from 0.70 to 0.80 to reduce speech false positives
+SPEECH_SENTIMENT_THRES = 0.35  # Increased from 0.12 to 0.35 to reduce false positives
 CHOPPING_THRES = 0.70  # Higher threshold for chopping sounds to prevent false positives
-
-# Class-specific thresholds for better discrimination
-CLASS_THRESHOLDS = {
-    "speech": 0.80,         # Higher threshold for speech to reduce false positives
-    "dog-bark": 0.30,       # Medium threshold for dog barks
-    "knock": 0.35,          # Higher for commonly confused sounds
-    "door": 0.40,           # Higher for commonly confused sounds
-    "chopping": 0.70,       # Higher for commonly confused sounds
-    "baby-cry": 0.40,       # Higher for commonly confused sounds
-    "finger-snap": 0.03,    # Keep very low threshold for finger snaps
-    "cat-meow": 0.35,       # Medium threshold for cat meows
-}
+SPEECH_PREDICTION_THRES = 0.70  # Higher threshold for speech to reduce false positives
+SPEECH_DETECTION_THRES = 0.30  # Lower threshold just for detecting potential speech (0.3 = 30%)
 
 CHANNELS = 1
 RATE = 16000
 CHUNK = RATE  # 1 second chunks
-SPEECH_CHUNK_MULTIPLIER = 2.5  # Increased from 1.5 to 2.5 for better speech recognition
+SPEECH_CHUNK_MULTIPLIER = 4.0  # Increased from 2.5 to 4.0 for better speech recognition
 MICROPHONES_DESCRIPTION = []
 FPS = 60.0
 
@@ -410,9 +387,21 @@ def handle_source(json_data):
                     # Get the raw prediction array for aggregation
                     raw_predictions = ast_predictions["raw_predictions"]
                     
+                    # Check if this might be a speech prediction
+                    is_speech_prediction = False
+                    for pred in ast_predictions["top_predictions"]:
+                        if pred["label"].lower() == "speech" and pred["confidence"] > SPEECH_DETECTION_THRES:
+                            is_speech_prediction = True
+                            logger.info(f"AST detected potential speech with confidence: {pred['confidence']:.4f}")
+                            break
+                    
                     # Aggregate predictions from multiple overlapping segments
                     if raw_predictions is not None and len(raw_predictions) > 0:
-                        aggregated_predictions = aggregate_predictions(raw_predictions, ast_model.class_labels, is_speech_focused=False)
+                        aggregated_predictions = aggregate_predictions(
+                            raw_predictions, 
+                            ast_model.class_labels,
+                            is_speech=is_speech_prediction
+                        )
                         
                         # Update the predictions with aggregated values
                         ast_predictions = ast_model.process_predictions(
@@ -463,13 +452,6 @@ def handle_source(json_data):
                         
                         print(f"Top AST prediction: {human_label} ({top_confidence:.6f})")
                         
-                        # Look up appropriate threshold for this sound class
-                        class_threshold = CLASS_THRESHOLDS.get(top_label, PREDICTION_THRES)
-                        
-                        # Special case for finger snapping
-                        if top_label == "finger-snap":
-                            class_threshold = FINGER_SNAP_THRES
-                        
                         # Check for speech detection and handle sentiment analysis
                         if human_label == "Speech" and top_confidence > SPEECH_SENTIMENT_THRES:
                             # Process speech with sentiment analysis
@@ -491,16 +473,16 @@ def handle_source(json_data):
                                 print(f"EMITTING SPEECH WITH SENTIMENT: {label} with emoji {sentiment_result['sentiment']['emoji']}")
                                 return
                         
-                        # Emit the prediction if confidence is above class-specific threshold
-                        if top_confidence > class_threshold:
+                        # Emit the prediction if confidence is above threshold or it's a finger snap
+                        if top_confidence > PREDICTION_THRES or (top_label == "finger-snap" and top_confidence > FINGER_SNAP_THRES):
                             socketio.emit('audio_label', {
                                 'label': human_label,
                                 'accuracy': str(top_confidence),
                                 'db': str(db)
                             })
-                            print(f"EMITTING AST PREDICTION: {human_label} ({top_confidence:.6f}), threshold: {class_threshold:.4f}")
+                            print(f"EMITTING AST PREDICTION: {human_label} ({top_confidence:.6f})")
                         else:
-                            print(f"Top AST prediction {human_label} ({top_confidence:.6f}) below threshold {class_threshold:.4f}")
+                            print(f"Top AST prediction {human_label} ({top_confidence:.6f}) below threshold")
                             if not finger_snap_detected:  # Only emit unrecognized if no finger snap was detected
                                 socketio.emit('audio_label', {
                                     'label': 'Unrecognized Sound',
@@ -539,8 +521,29 @@ def handle_source(json_data):
                     if np.ndim(predictions) > 0 and len(predictions) > 0:
                         debug_predictions(predictions[0], homesounds.everything)
                         
-                        # Aggregate predictions from multiple overlapping segments
-                        aggregated_predictions = aggregate_predictions(predictions[0], homesounds.everything, is_speech_focused=False)
+                        # Check if the top prediction might be speech
+                        is_speech_prediction = False
+                        speech_idx = -1
+                        
+                        # Find the index of "speech" in the label list if it exists
+                        for idx, label in enumerate(homesounds.everything):
+                            if label.lower() == "speech":
+                                speech_idx = idx
+                                break
+                        
+                        # Check if speech is among the top predictions
+                        if speech_idx >= 0 and speech_idx < len(predictions[0]):
+                            # If speech confidence is significant
+                            if predictions[0][speech_idx] > SPEECH_DETECTION_THRES:  # Use the detection threshold
+                                is_speech_prediction = True
+                                logger.info(f"Detected potential speech with confidence: {predictions[0][speech_idx]:.4f}")
+                        
+                        # Aggregate predictions from multiple overlapping segments - use speech-specific if needed
+                        aggregated_predictions = aggregate_predictions(
+                            predictions[0], 
+                            homesounds.everything,
+                            is_speech=is_speech_prediction
+                        )
                         
                         # Debug the aggregated predictions
                         logger.info("Aggregated predictions:")
@@ -555,56 +558,52 @@ def handle_source(json_data):
                             if i >= 0 and i < len(aggregated_predictions) and aggregated_predictions[i] > pred_max_val:
                                 pred_max = i
                                 pred_max_val = aggregated_predictions[i]
-                                pred_label = l  # Store the label for threshold lookup
                         
-                        if pred_max != -1:
-                            # Get the appropriate threshold for this sound class
-                            class_threshold = CLASS_THRESHOLDS.get(pred_label, PREDICTION_THRES)
-                            
-                            # Check if prediction exceeds its class-specific threshold
-                            if pred_max_val > class_threshold:
-                                for label, index in homesounds.labels.items():
-                                    if index == pred_max:
-                                        human_label = homesounds.to_human_labels.get(label, label)
-                                        print(f"Top prediction: {human_label} ({pred_max_val:.4f}), threshold: {class_threshold:.4f}")
-                                        
-                                        # Check for speech detection with TensorFlow model
-                                        if human_label == "Speech" and pred_max_val > SPEECH_SENTIMENT_THRES:
-                                            # Process speech with sentiment analysis
-                                            print("Speech detected with TensorFlow model. Processing sentiment...")
-                                            sentiment_result = process_speech_with_sentiment(np_wav)
-                                            
-                                            if sentiment_result:
-                                                # Emit with sentiment information - fixed to match actual structure
-                                                label = f"Speech {sentiment_result['sentiment']['category']}"
-                                                socketio.emit('audio_label', {
-                                                    'label': label,
-                                                    'accuracy': str(sentiment_result['sentiment']['confidence']),
-                                                    'db': str(db),
-                                                    'emoji': sentiment_result['sentiment']['emoji'],
-                                                    'transcription': sentiment_result['text'],
-                                                    'emotion': sentiment_result['sentiment']['original_emotion'],
-                                                    'sentiment_score': str(sentiment_result['sentiment']['confidence'])
-                                                })
-                                                print(f"EMITTING SPEECH WITH SENTIMENT: {label} with emoji {sentiment_result['sentiment']['emoji']}")
-                                                return
-                                        
-                                        # Normal sound emission (non-speech or sentiment analysis failed)
+                        if pred_max != -1 and pred_max_val > PREDICTION_THRES:
+                            for label, index in homesounds.labels.items():
+                                if index == pred_max:
+                                    human_label = homesounds.to_human_labels.get(label, label)
+                                    print(f"Top prediction: {human_label} ({pred_max_val:.4f})")
+                                    
+                                    # Special case for "Chopping" - use higher threshold to prevent false positives
+                                    if human_label == "Chopping" and pred_max_val < CHOPPING_THRES:
+                                        print(f"Ignoring Chopping sound with confidence {pred_max_val:.4f} < {CHOPPING_THRES} threshold")
                                         socketio.emit('audio_label', {
-                                            'label': human_label,
-                                            'accuracy': str(pred_max_val),
+                                            'label': 'Unrecognized Sound',
+                                            'accuracy': '0.2',
                                             'db': str(db)
                                         })
-                                        break
-                            else:
-                                print(f"Prediction {pred_label} ({pred_max_val:.4f}) below its threshold {class_threshold:.4f}")
-                                socketio.emit('audio_label', {
-                                    'label': 'Unrecognized Sound',
-                                    'accuracy': '0.2',
-                                    'db': str(db)
-                                })
+                                        return
+                                    
+                                    # Check for speech detection with TensorFlow model
+                                    if human_label == "Speech" and pred_max_val > SPEECH_SENTIMENT_THRES:
+                                        # Process speech with sentiment analysis
+                                        print("Speech detected with TensorFlow model. Processing sentiment...")
+                                        sentiment_result = process_speech_with_sentiment(np_wav)
+                                        
+                                        if sentiment_result:
+                                            # Emit with sentiment information - fixed to match actual structure
+                                            label = f"Speech {sentiment_result['sentiment']['category']}"
+                                            socketio.emit('audio_label', {
+                                                'label': label,
+                                                'accuracy': str(sentiment_result['sentiment']['confidence']),
+                                                'db': str(db),
+                                                'emoji': sentiment_result['sentiment']['emoji'],
+                                                'transcription': sentiment_result['text'],
+                                                'emotion': sentiment_result['sentiment']['original_emotion'],
+                                                'sentiment_score': str(sentiment_result['sentiment']['confidence'])
+                                            })
+                                            print(f"EMITTING SPEECH WITH SENTIMENT: {label} with emoji {sentiment_result['sentiment']['emoji']}")
+                                            return
+                                    # Normal sound emission (non-speech or sentiment analysis failed)
+                                    socketio.emit('audio_label', {
+                                        'label': human_label,
+                                        'accuracy': str(pred_max_val),
+                                        'db': str(db)
+                                    })
+                                    break
                         else:
-                            print(f"No prediction found")
+                            print(f"No prediction above threshold: {pred_max_val:.4f}")
                             socketio.emit('audio_label', {
                                 'label': 'Unrecognized Sound',
                                 'accuracy': '0.2',
@@ -634,76 +633,9 @@ def handle_source(json_data):
             'db': str(db) if 'db' in locals() else '-100'
         })
 
-# Global variable to track speech confidence
-speech_confidence = 0.0
 
-# Helper function to calculate dB level
-def calculate_db_level(audio_data):
-    rms = np.sqrt(np.mean(audio_data**2))
-    return dbFS(rms)
-
-# Queue for asynchronous speech processing
-speech_queue = queue.Queue(maxsize=10)  # Limit queue size to prevent memory issues
-speech_processing_thread = None
-speech_processing_active = True
-
-# Function to process speech in a separate thread
-def speech_processing_worker():
-    global speech_processing_active
-    
-    logging.info("Starting speech processing worker thread")
-    
-    while speech_processing_active:
-        try:
-            # Get audio data from the queue with a timeout
-            # This allows the thread to check speech_processing_active periodically
-            try:
-                audio_data = speech_queue.get(timeout=1.0)
-            except queue.Empty:
-                continue
-                
-            # Process the speech data
-            process_speech_with_sentiment(audio_data)
-            
-            # Mark the task as done
-            speech_queue.task_done()
-            
-        except Exception as e:
-            logging.error(f"Error in speech processing worker: {str(e)}")
-            traceback.print_exc()
-    
-    logging.info("Speech processing worker thread stopped")
-
-# Start the speech processing thread
-def start_speech_processing_thread():
-    global speech_processing_thread, speech_processing_active
-    
-    if speech_processing_thread is None or not speech_processing_thread.is_alive():
-        speech_processing_active = True
-        speech_processing_thread = threading.Thread(target=speech_processing_worker)
-        speech_processing_thread.daemon = True  # Thread will exit when main program exits
-        speech_processing_thread.start()
-        logging.info("Speech processing thread started")
-
-# Stop the speech processing thread
-def stop_speech_processing_thread():
-    global speech_processing_active
-    
-    speech_processing_active = False
-    logging.info("Speech processing thread stopping...")
-
-# Modified function to handle audio data
 @socketio.on('audio_data')
 def handle_audio(data):
-    global speech_audio_buffer, sound_audio_buffer, speech_buffer_lock, sound_buffer_lock, speech_confidence
-    
-    # Ensure buffers are initialized
-    if 'speech_audio_buffer' not in globals() or speech_audio_buffer is None:
-        speech_audio_buffer = []
-    
-    if 'sound_audio_buffer' not in globals() or sound_audio_buffer is None:
-        sound_audio_buffer = []
-        
     # Parse the incoming audio data
     try:
         # Check if data is a dictionary (JSON object)
@@ -754,7 +686,8 @@ def handle_audio(data):
     
     # Compute RMS and convert to dB
     print('Successfully convert to NP rep', np_wav)
-    db = calculate_db_level(np_wav)
+    rms = np.sqrt(np.mean(np_wav**2))
+    db = dbFS(rms)
     print('Db...', db)
     
     # Check for silence (extremely quiet)
@@ -788,40 +721,25 @@ def handle_audio(data):
                     print("===== AST MODEL RAW PREDICTIONS =====")
                     for pred in ast_predictions["top_predictions"][:5]:  # Show top 5 for brevity
                         print(f"  {pred['label']}: {pred['confidence']:.6f}")
-
-                    # Check if this is likely speech by finding speech confidence
-                    is_likely_speech = False
-                    for pred in ast_predictions["top_predictions"]:
-                        if pred["label"] == "Speech" and pred["confidence"] > SPEECH_PREDICTION_THRES * 0.7:
-                            is_likely_speech = True
-                            speech_confidence = pred["confidence"]
-                            print("Likely speech detection - using speech-focused processing")
-                            break
-                    
-                    # Add current audio to the appropriate buffer
-                    if is_likely_speech:
-                        # Add to speech buffer for potential speech processing
-                        with speech_buffer_lock:
-                            speech_audio_buffer.append(np_wav)
-                            if len(speech_audio_buffer) > MAX_SPEECH_BUFFER_SIZE:
-                                speech_audio_buffer = speech_audio_buffer[-MAX_SPEECH_BUFFER_SIZE:]
-                        
-                        # Add to speech queue for asynchronous processing if confidence is high enough
-                        if speech_confidence > SPEECH_PREDICTION_THRES and not speech_queue.full():
-                            speech_queue.put(np_wav)
-                    else:
-                        # Add to general sound buffer
-                        with sound_buffer_lock:
-                            sound_audio_buffer.append(np_wav)
-                            if len(sound_audio_buffer) > MAX_SOUND_BUFFER_SIZE:
-                                sound_audio_buffer = sound_audio_buffer[-MAX_SOUND_BUFFER_SIZE:]
                     
                     # Get the raw prediction array for aggregation
                     raw_predictions = ast_predictions["raw_predictions"]
                     
+                    # Check if this might be a speech prediction
+                    is_speech_prediction = False
+                    for pred in ast_predictions["top_predictions"]:
+                        if pred["label"].lower() == "speech" and pred["confidence"] > SPEECH_DETECTION_THRES:
+                            is_speech_prediction = True
+                            logger.info(f"AST detected potential speech with confidence: {pred['confidence']:.4f}")
+                            break
+                    
                     # Aggregate predictions from multiple overlapping segments
                     if raw_predictions is not None and len(raw_predictions) > 0:
-                        aggregated_predictions = aggregate_predictions(raw_predictions, ast_model.class_labels, is_speech_focused=is_likely_speech)
+                        aggregated_predictions = aggregate_predictions(
+                            raw_predictions, 
+                            ast_model.class_labels,
+                            is_speech=is_speech_prediction
+                        )
                         
                         # Update the predictions with aggregated values
                         ast_predictions = ast_model.process_predictions(
@@ -831,7 +749,7 @@ def handle_audio(data):
                         )
                         
                         # Debug the aggregated predictions
-                        print(f"===== AGGREGATED AST MODEL PREDICTIONS ({'speech-focused' if is_likely_speech else 'sound-focused'}) =====")
+                        print("===== AGGREGATED AST MODEL PREDICTIONS =====")
                         for pred in ast_predictions["top_predictions"][:5]:  # Show top 5 for brevity
                             print(f"  {pred['label']}: {pred['confidence']:.6f}")
                     
@@ -872,34 +790,37 @@ def handle_audio(data):
                         
                         print(f"Top AST prediction: {human_label} ({top_confidence:.6f})")
                         
-                        # Look up appropriate threshold for this sound class
-                        class_threshold = CLASS_THRESHOLDS.get(top_label, PREDICTION_THRES)
+                        # Check for speech detection and handle sentiment analysis
+                        if human_label == "Speech" and top_confidence > SPEECH_SENTIMENT_THRES:
+                            # Process speech with sentiment analysis
+                            print("Speech detected. Processing sentiment...")
+                            sentiment_result = process_speech_with_sentiment(np_wav)
+                            
+                            if sentiment_result:
+                                # Emit with sentiment information - fixed to match actual structure
+                                label = f"Speech {sentiment_result['sentiment']['category']}"
+                                socketio.emit('audio_label', {
+                                    'label': label,
+                                    'accuracy': str(sentiment_result['sentiment']['confidence']),
+                                    'db': str(db),
+                                    'emoji': sentiment_result['sentiment']['emoji'],
+                                    'transcription': sentiment_result['text'],
+                                    'emotion': sentiment_result['sentiment']['original_emotion'],
+                                    'sentiment_score': str(sentiment_result['sentiment']['confidence'])
+                                })
+                                print(f"EMITTING SPEECH WITH SENTIMENT: {label} with emoji {sentiment_result['sentiment']['emoji']}")
+                                return
                         
-                        # Special case for finger snapping
-                        if top_label == "finger-snap":
-                            class_threshold = FINGER_SNAP_THRES
-                        
-                        # For speech, we'll handle it asynchronously, so don't process it here
-                        # Just emit the detection for immediate feedback
-                        if human_label == "Speech" and top_confidence > SPEECH_PREDICTION_THRES:
-                            socketio.emit('audio_label', {
-                                'label': 'Speech',
-                                'accuracy': str(top_confidence),
-                                'db': str(db)
-                            })
-                            print(f"EMITTING SPEECH DETECTION: Speech ({top_confidence:.6f})")
-                            # Don't return - let the async processing handle sentiment
-                        
-                        # Emit the prediction if confidence is above class-specific threshold
-                        elif top_confidence > class_threshold:
+                        # Emit the prediction if confidence is above threshold or it's a finger snap
+                        if top_confidence > PREDICTION_THRES or (top_label == "finger-snap" and top_confidence > FINGER_SNAP_THRES):
                             socketio.emit('audio_label', {
                                 'label': human_label,
                                 'accuracy': str(top_confidence),
                                 'db': str(db)
                             })
-                            print(f"EMITTING AST PREDICTION: {human_label} ({top_confidence:.6f}), threshold: {class_threshold:.4f}")
+                            print(f"EMITTING AST PREDICTION: {human_label} ({top_confidence:.6f})")
                         else:
-                            print(f"Top AST prediction {human_label} ({top_confidence:.6f}) below threshold {class_threshold:.4f}")
+                            print(f"Top AST prediction {human_label} ({top_confidence:.6f}) below threshold")
                             if not finger_snap_detected:  # Only emit unrecognized if no finger snap was detected
                                 socketio.emit('audio_label', {
                                     'label': 'Unrecognized Sound',
@@ -934,89 +855,260 @@ def handle_audio(data):
             'db': str(db)
         })
 
+# Helper function to process with TensorFlow model
+def process_with_tensorflow_model(np_wav, db):
+    try:
+        with tf_lock:
+            # Process the audio data to get the right input format
+            print(f"Original np_wav shape: {np_wav.shape}, size: {np_wav.size}")
+            
+            # VGGish requires at least 0.975 seconds of audio at 16kHz (15600 samples)
+            # If our audio is shorter, we need to pad it
+            min_samples_needed = 16000  # 1 second at 16kHz
+            
+            if np_wav.size < min_samples_needed:
+                # Pad the audio with zeros to reach the minimum length
+                padding_needed = min_samples_needed - np_wav.size
+                np_wav = np.pad(np_wav, (0, padding_needed), 'constant')
+                print(f"Padded audio data to size: {np_wav.size} samples (1 second)")
+            
+            # Convert to VGGish input features using the proper preprocessing
+            try:
+                # Use waveform_to_examples to convert the raw audio to the correct spectrogram format
+                input_features = waveform_to_examples(np_wav, RATE)
+                
+                # This should give us properly formatted features for the model
+                if input_features.shape[0] == 0:
+                    print("Error: No features extracted from audio")
+                    return None
+                
+                # If we got multiple frames, just use the first one
+                if len(input_features.shape) == 3:
+                    input_features = input_features[0]
+                    print(f"Using first frame from multiple frames: {input_features.shape}")
+                
+                # Reshape for TensorFlow model - add the channel dimension
+                np_data = np.reshape(input_features, (1, 96, 64, 1))
+                print(f"Processed audio data shape: {np_data.shape}")
+            except Exception as e:
+                print(f"Error during audio preprocessing: {str(e)}")
+                traceback.print_exc()
+                return None
+            
+            print("Making prediction with TensorFlow model...")
+            
+            with tf_graph.as_default():
+                with tf_session.as_default():
+                    predictions = models["tensorflow"].predict(np_data)
+            
+            # Debug all predictions before applying threshold
+            if np.ndim(predictions) > 0 and len(predictions) > 0:
+                debug_predictions(predictions[0], homesounds.everything)
+                
+                # Check if the top prediction might be speech
+                is_speech_prediction = False
+                speech_idx = -1
+                
+                # Find the index of "speech" in the label list if it exists
+                for idx, label in enumerate(homesounds.everything):
+                    if label.lower() == "speech":
+                        speech_idx = idx
+                        break
+                
+                # Check if speech is among the top predictions
+                if speech_idx >= 0 and speech_idx < len(predictions[0]):
+                    # If speech confidence is significant
+                    if predictions[0][speech_idx] > SPEECH_DETECTION_THRES:  # Use the detection threshold
+                        is_speech_prediction = True
+                        logger.info(f"Detected potential speech with confidence: {predictions[0][speech_idx]:.4f}")
+                
+                # Aggregate predictions from multiple overlapping segments - use speech-specific if needed
+                aggregated_predictions = aggregate_predictions(
+                    predictions[0], 
+                    homesounds.everything,
+                    is_speech=is_speech_prediction
+                )
+                
+                # Debug the aggregated predictions
+                logger.info("Aggregated predictions:")
+                debug_predictions(aggregated_predictions, homesounds.everything)
+                
+                # Find top prediction from active context
+                pred_max = -1
+                pred_max_val = 0
+                pred_label = None
+                for l in active_context:
+                    i = homesounds.labels.get(l, -1)
+                    if i >= 0 and i < len(aggregated_predictions) and aggregated_predictions[i] > pred_max_val:
+                        pred_max = i
+                        pred_max_val = aggregated_predictions[i]
+                
+                if pred_max != -1 and pred_max_val > PREDICTION_THRES:
+                    for label, index in homesounds.labels.items():
+                        if index == pred_max:
+                            human_label = homesounds.to_human_labels.get(label, label)
+                            print(f"Top prediction: {human_label} ({pred_max_val:.4f})")
+                            
+                            # Special case for "Chopping" - use higher threshold to prevent false positives
+                            if human_label == "Chopping" and pred_max_val < CHOPPING_THRES:
+                                print(f"Ignoring Chopping sound with confidence {pred_max_val:.4f} < {CHOPPING_THRES} threshold")
+                                socketio.emit('audio_label', {
+                                    'label': 'Unrecognized Sound',
+                                    'accuracy': '0.2',
+                                    'db': str(db)
+                                })
+                                return
+                            
+                            # Check for speech detection with TensorFlow model
+                            if human_label == "Speech" and pred_max_val > SPEECH_SENTIMENT_THRES:
+                                # Process speech with sentiment analysis
+                                print("Speech detected with TensorFlow model. Processing sentiment...")
+                                sentiment_result = process_speech_with_sentiment(np_wav)
+                                
+                                if sentiment_result:
+                                    # Emit with sentiment information - fixed to match actual structure
+                                    label = f"Speech {sentiment_result['sentiment']['category']}"
+                                    socketio.emit('audio_label', {
+                                        'label': label,
+                                        'accuracy': str(sentiment_result['sentiment']['confidence']),
+                                        'db': str(db),
+                                        'emoji': sentiment_result['sentiment']['emoji'],
+                                        'transcription': sentiment_result['text'],
+                                        'emotion': sentiment_result['sentiment']['original_emotion'],
+                                        'sentiment_score': str(sentiment_result['sentiment']['confidence'])
+                                    })
+                                    print(f"EMITTING SPEECH WITH SENTIMENT: {label} with emoji {sentiment_result['sentiment']['emoji']}")
+                                    return
+                            
+                            # Normal sound emission (non-speech or sentiment analysis failed)
+                            socketio.emit('audio_label', {
+                                'label': human_label,
+                                'accuracy': str(pred_max_val),
+                                'db': str(db)
+                            })
+                            break
+                else:
+                    print(f"No prediction above threshold: {pred_max_val:.4f}")
+                    socketio.emit('audio_label', {
+                        'label': 'Unrecognized Sound',
+                        'accuracy': '0.2',
+                        'db': str(db)
+                    })
+            else:
+                print("Invalid prediction format")
+                socketio.emit('audio_label', {
+                    'label': 'Error Processing',
+                    'accuracy': '0.0',
+                    'db': str(db)
+                })
+    except Exception as e:
+        print(f"Error in TensorFlow processing: {str(e)}")
+        traceback.print_exc()
+        socketio.emit('audio_label', {
+            'label': 'Error Processing',
+            'accuracy': '0.0',
+            'db': str(db)
+        })
+
 # Keep track of recent audio buffers for better speech transcription
 recent_audio_buffer = []
 MAX_BUFFER_SIZE = 5  # Keep last 5 chunks
 
 # Helper function to process speech detection with sentiment analysis
 def process_speech_with_sentiment(audio_data):
-    global speech_audio_buffer, speech_buffer_lock
+    """
+    Process speech audio, transcribe it and analyze sentiment.
     
-    try:
-        # Settings for speech processing
-        MIN_WORD_COUNT = 2   # Minimum number of meaningful words for valid transcription
-        MIN_CONFIDENCE = 0.7  # Minimum confidence level for speech detection
+    Args:
+        audio_data: Raw audio data
         
-        # Add audio to speech buffer with locking to ensure thread safety
-        with speech_buffer_lock:
-            # Append current audio data to speech buffer
-            speech_audio_buffer.append(audio_data)
-            
-            # Limit buffer size to prevent memory issues
-            if len(speech_audio_buffer) > MAX_SPEECH_BUFFER_SIZE:
-                speech_audio_buffer.pop(0)
-            
-            # Create a copy of the buffer for processing
-            audio_buffer_copy = speech_audio_buffer.copy()
+    Returns:
+        Dictionary with transcription and sentiment
+    """
+    # Settings for improved speech processing
+    SPEECH_MAX_BUFFER_SIZE = 8  # Number of audio chunks to keep in buffer for speech only
+    MIN_WORD_COUNT = 3   # Minimum number of meaningful words for valid transcription
+    MIN_CONFIDENCE = 0.7  # Minimum confidence level for speech detection
+    
+    # Initialize or update audio buffer (stored in function attributes)
+    if not hasattr(process_speech_with_sentiment, "recent_audio_buffer"):
+        process_speech_with_sentiment.recent_audio_buffer = []
+    
+    # Add current audio to buffer
+    process_speech_with_sentiment.recent_audio_buffer.append(audio_data)
+    
+    # Keep only the most recent chunks
+    if len(process_speech_with_sentiment.recent_audio_buffer) > SPEECH_MAX_BUFFER_SIZE:
+        process_speech_with_sentiment.recent_audio_buffer = process_speech_with_sentiment.recent_audio_buffer[-SPEECH_MAX_BUFFER_SIZE:]
+    
+    # For better transcription, use concatenated audio from multiple chunks if available
+    if len(process_speech_with_sentiment.recent_audio_buffer) > 1:
+        # Use up to 8 chunks for speech recognition
+        num_chunks = min(SPEECH_MAX_BUFFER_SIZE, len(process_speech_with_sentiment.recent_audio_buffer))
+        logger.info(f"Using concatenated audio from {num_chunks} chunks for speech transcription")
         
-        # Log the buffer size being used
-        logging.info(f"Using concatenated audio from {len(audio_buffer_copy)} chunks for better transcription")
-        
-        # Concatenate audio data for better transcription
-        if len(audio_buffer_copy) > 0:
-            concatenated_audio = np.concatenate(audio_buffer_copy)
-        else:
-            logging.warning("Empty audio buffer for speech processing")
-            return None
-        
-        # Transcribe speech to text
-        logging.info("Transcribing speech to text...")
-        transcription = transcribe_speech(concatenated_audio)
-        
-        if not transcription:
-            logging.warning("No transcription result")
-            return None
-        
-        # Extract meaningful words (filter out filler words)
-        filler_words = {'um', 'uh', 'ah', 'like', 'so', 'well', 'you know', 'I mean'}
-        words = transcription.lower().split()
-        meaningful_words = [word for word in words if word not in filler_words]
-        
-        # Check if we have enough meaningful words
-        if len(meaningful_words) < MIN_WORD_COUNT:
-            logging.info(f"Not enough meaningful words: {len(meaningful_words)} < {MIN_WORD_COUNT}")
-            # Even if we don't have enough words, still emit the speech detection
-            socketio.emit('audio_label', {
-                'label': 'Speech', 
-                'accuracy': 0.9, 
-                'transcription': transcription,
-                'sentiment': 'neutral'  # Default sentiment
-            })
-            return None
-        
-        # Perform sentiment analysis
-        sentiment = analyze_sentiment(transcription)
-        
-        # Create result dictionary
-        result = {
-            'transcription': transcription,
-            'sentiment': sentiment
+        # Concatenate audio chunks
+        concatenated_audio = np.concatenate(process_speech_with_sentiment.recent_audio_buffer[-num_chunks:])
+    else:
+        concatenated_audio = audio_data
+    
+    # Ensure minimum audio length for better transcription - increase to 4.0 seconds
+    min_samples = RATE * 4.0  # At least 4.0 seconds of audio for speech
+    if len(concatenated_audio) < min_samples:
+        pad_size = int(min_samples) - len(concatenated_audio)
+        # Use reflect padding to extend short audio naturally
+        concatenated_audio = np.pad(concatenated_audio, (0, pad_size), mode='reflect')
+        logger.info(f"Padded speech audio to size: {len(concatenated_audio)} samples ({len(concatenated_audio)/RATE:.1f} seconds)")
+    
+    # Calculate the RMS value of the audio to gauge its "loudness"
+    rms = np.sqrt(np.mean(np.square(concatenated_audio)))
+    if rms < 0.01:  # If the audio is very quiet, skip transcription
+        logger.info(f"Audio too quiet (RMS: {rms:.4f}), skipping transcription")
+        return {
+            "transcription": "",
+            "sentiment": "neutral",
+            "confidence": 0.0
         }
-        
-        # Emit the result to the client
-        socketio.emit('audio_label', {
-            'label': 'Speech', 
-            'accuracy': 0.9, 
-            'transcription': transcription,
-            'sentiment': sentiment
-        })
-        
-        return result
-        
-    except Exception as e:
-        print(f"Error in process_speech_with_sentiment: {str(e)}")
-        traceback.print_exc()
+    
+    logger.info("Transcribing speech to text...")
+    
+    # Transcribe audio using the selected speech-to-text processor
+    if USE_GOOGLE_SPEECH:
+        # Use Google Cloud Speech-to-Text
+        transcription = transcribe_with_google(concatenated_audio, RATE)
+        logger.info(f"Used Google Cloud Speech-to-Text for transcription")
+    else:
+        # Use Whisper (default)
+        transcription = speech_processor.transcribe(concatenated_audio, RATE)
+        logger.info(f"Used Whisper for transcription")
+    
+    # Check for valid transcription with sufficient content
+    if not transcription:
+        logger.info("No valid transcription found")
         return None
+    
+    # Filter out short or meaningless transcriptions
+    common_words = ["the", "a", "an", "and", "but", "or", "if", "then", "so", "to", "of", "for", "in", "on", "at"]
+    meaningful_words = [word for word in transcription.lower().split() if word not in common_words]
+    
+    if len(meaningful_words) < MIN_WORD_COUNT:
+        logger.info(f"Transcription has too few meaningful words: '{transcription}'")
+        return None
+    
+    logger.info(f"Transcription: {transcription}")
+    
+    # Analyze sentiment
+    sentiment = analyze_sentiment(transcription)
+    
+    if sentiment:
+        result = {
+            "text": transcription,
+            "sentiment": sentiment
+        }
+        logger.info(f"Sentiment analysis result: Speech {sentiment['category']} with emoji {sentiment['emoji']}")
+        return result
+    
+    return None
 
 def background_thread():
     """Example of how to send server generated events to clients."""
@@ -1135,309 +1227,73 @@ def handle_disconnect():
     print(f"Client disconnected: {request.sid}")
 
 # Helper function to aggregate predictions from multiple overlapping segments
-def aggregate_predictions(new_prediction, label_list, is_speech_focused=False):
+def aggregate_predictions(new_prediction, label_list, is_speech=False):
     """
     Aggregate predictions from multiple overlapping segments to improve accuracy.
     
     Args:
         new_prediction: The new prediction probabilities
         label_list: List of sound labels
-        is_speech_focused: Whether this aggregation is for speech detection (True) or general sounds (False)
+        is_speech: Whether this is a speech prediction (uses different parameters)
         
     Returns:
         Aggregated prediction with highest confidence
     """
-    global recent_predictions, speech_predictions, sound_predictions
+    global recent_predictions, speech_predictions
     
-    # Choose the appropriate prediction history based on focus
-    if is_speech_focused:
-        # For speech processing, use speech-specific buffer with longer history
-        with prediction_lock:
+    with prediction_lock:
+        # Use different prediction history for speech vs other sounds
+        if is_speech:
             # Add the new prediction to speech history
             speech_predictions.append(new_prediction)
             
-            # Keep only the most recent predictions for speech
-            if len(speech_predictions) > MAX_PREDICTIONS_HISTORY:
-                speech_predictions = speech_predictions[-MAX_PREDICTIONS_HISTORY:]
+            # Keep only the most recent predictions
+            if len(speech_predictions) > SPEECH_PREDICTIONS_HISTORY:
+                speech_predictions = speech_predictions[-SPEECH_PREDICTIONS_HISTORY:]
             
-            # If we have multiple predictions, average them
-            if len(speech_predictions) > 1:
-                # Average the predictions
-                aggregated = np.zeros_like(new_prediction)
-                for pred in speech_predictions:
-                    aggregated += pred
-                aggregated /= len(speech_predictions)
-                
-                # Debug the aggregation
-                logger.info(f"Aggregating {len(speech_predictions)} speech predictions")
-                return aggregated
-            else:
-                # Just return the single prediction if we don't have history yet
-                return new_prediction
-    else:
-        # For general sound processing, use a smaller history buffer for faster response
-        with prediction_lock:
-            # Add the new prediction to sound history
-            sound_predictions.append(new_prediction)
-            
-            # Keep only the most recent predictions for sounds (shorter history)
-            max_sound_history = 2  # Shorter history for non-speech sounds
-            if len(sound_predictions) > max_sound_history:
-                sound_predictions = sound_predictions[-max_sound_history:]
-            
-            # If we have multiple predictions, use a weighted average that favors newer predictions
-            if len(sound_predictions) > 1:
-                # Weighted average (more weight to recent predictions)
-                aggregated = np.zeros_like(new_prediction)
-                total_weight = 0
-                
-                for i, pred in enumerate(sound_predictions):
-                    # More recent predictions get higher weights
-                    weight = i + 1  # 1 for oldest, 2 for newer, etc.
-                    aggregated += pred * weight
-                    total_weight += weight
-                
-                aggregated /= total_weight
-                
-                # Debug the aggregation
-                logger.info(f"Aggregating {len(sound_predictions)} sound predictions with weighted average")
-                
-                # Compare original vs aggregated for top predictions
-                orig_top_idx = np.argmax(new_prediction)
-                agg_top_idx = np.argmax(aggregated)
-                
-                if orig_top_idx != agg_top_idx:
-                    # The top prediction changed after aggregation
-                    orig_label = label_list[orig_top_idx] if orig_top_idx < len(label_list) else "unknown"
-                    agg_label = label_list[agg_top_idx] if agg_top_idx < len(label_list) else "unknown"
-                    logger.info(f"Aggregation changed top prediction: {orig_label} ({new_prediction[orig_top_idx]:.4f}) -> {agg_label} ({aggregated[agg_top_idx]:.4f})")
-                else:
-                    # Same top prediction, but confidence may have changed
-                    label = label_list[orig_top_idx] if orig_top_idx < len(label_list) else "unknown"
-                    logger.info(f"Aggregation kept same top prediction: {label}, confidence: {new_prediction[orig_top_idx]:.4f} -> {aggregated[orig_top_idx]:.4f}")
-                
-                return aggregated
-            else:
-                # Just return the single prediction if we don't have history yet
-                return new_prediction
-
-# Start the speech processing thread when the server starts
-@app.before_first_request
-def before_first_request():
-    start_speech_processing_thread()
-
-# Ensure the speech processing thread is stopped when the server shuts down
-@atexit.register
-def cleanup():
-    stop_speech_processing_thread()
-
-# Helper function to transcribe speech
-def transcribe_speech(audio_data):
-    """
-    Transcribe speech audio data using the configured speech recognition service.
-    
-    Args:
-        audio_data: Raw audio data as numpy array
-        
-    Returns:
-        Transcription text or None if transcription failed
-    """
-    try:
-        # Ensure minimum audio length for better transcription
-        min_samples = RATE * 3.0  # At least 3.0 seconds
-        if len(audio_data) < min_samples:
-            pad_size = int(min_samples) - len(audio_data)
-            # Use reflect padding to extend short audio naturally
-            audio_data = np.pad(audio_data, (0, pad_size), mode='reflect')
-            logging.info(f"Padded audio data to size: {len(audio_data)} samples ({len(audio_data)/RATE:.1f} seconds)")
-        
-        # Calculate the RMS value of the audio to gauge its "loudness"
-        rms = np.sqrt(np.mean(np.square(audio_data)))
-        if rms < 0.01:  # If the audio is very quiet, skip transcription
-            logging.info(f"Audio too quiet (RMS: {rms:.4f}), skipping transcription")
-            return None
-        
-        # Use Google Cloud Speech-to-Text if configured
-        if USE_GOOGLE_SPEECH:
-            # Use Google Cloud Speech-to-Text
-            transcription = transcribe_with_google(audio_data, RATE)
-            logging.info(f"Used Google Cloud Speech-to-Text for transcription")
+            predictions_list = speech_predictions
+            history_len = SPEECH_PREDICTIONS_HISTORY
+            logger.info(f"Using speech-specific aggregation with {len(predictions_list)} samples")
         else:
-            # Use Whisper (default)
-            transcription = speech_processor.transcribe(audio_data, RATE)
-            logging.info(f"Used Whisper for transcription")
+            # Add the new prediction to general sound history
+            recent_predictions.append(new_prediction)
+            
+            # Keep only the most recent predictions
+            if len(recent_predictions) > MAX_PREDICTIONS_HISTORY:
+                recent_predictions = recent_predictions[-MAX_PREDICTIONS_HISTORY:]
+            
+            predictions_list = recent_predictions
+            history_len = MAX_PREDICTIONS_HISTORY
         
-        return transcription
-    except Exception as e:
-        logging.error(f"Error in transcribe_speech: {str(e)}")
-        traceback.print_exc()
-        return None
-
-# Helper function to process with TensorFlow model
-def process_with_tensorflow_model(np_wav, db):
-    global speech_audio_buffer, sound_audio_buffer, speech_buffer_lock, sound_buffer_lock, speech_predictions, sound_predictions, speech_confidence
-    
-    # Check if silence (very low volume)
-    if db < SILENCE_THRES:
-        print("Audio volume too low - likely silence")
-        socketio.emit('audio_label', {'label': 'Error Processing', 'accuracy': 0.0, 'db': db})
-        return
-    
-    try:
-        with tf_lock:
-            # Process the audio data to get the right input format
-            print(f"Original np_wav shape: {np_wav.shape}, size: {np_wav.size}")
+        # If we have multiple predictions, average them
+        if len(predictions_list) > 1:
+            # Average the predictions
+            aggregated = np.zeros_like(new_prediction)
+            for pred in predictions_list:
+                aggregated += pred
+            aggregated /= len(predictions_list)
             
-            # VGGish requires at least 0.975 seconds of audio at 16kHz (15600 samples)
-            # If our audio is shorter, we need to pad it
-            min_samples_needed = 16000  # 1 second at 16kHz
+            # Debug the aggregation
+            logger.info(f"Aggregating {len(predictions_list)} predictions {'(speech)' if is_speech else ''}")
             
-            if np_wav.size < min_samples_needed:
-                # Pad the audio with zeros to reach the minimum length
-                padding_needed = min_samples_needed - np_wav.size
-                np_wav = np.pad(np_wav, (0, padding_needed), 'constant')
-                print(f"Padded audio data to size: {np_wav.size} samples (1 second)")
-                
-            # Convert to VGGish input features using the proper preprocessing
-            try:
-                # Use waveform_to_examples to convert the raw audio to the correct spectrogram format
-                input_features = waveform_to_examples(np_wav, RATE)
-                
-                # This should give us properly formatted features for the model
-                if input_features.shape[0] == 0:
-                    print("Error: No features extracted from audio")
-                    return None
-                
-                # If we got multiple frames, just use the first one
-                if len(input_features.shape) == 3:
-                    input_features = input_features[0]
-                    print(f"Using first frame from multiple frames: {input_features.shape}")
-                
-                # Reshape for TensorFlow model - add the channel dimension
-                np_data = np.reshape(input_features, (1, 96, 64, 1))
-                print(f"Processed audio data shape: {np_data.shape}")
-            except Exception as e:
-                print(f"Error during audio preprocessing: {str(e)}")
-                traceback.print_exc()
-                return None
+            # Compare original vs aggregated for top predictions
+            orig_top_idx = np.argmax(new_prediction)
+            agg_top_idx = np.argmax(aggregated)
             
-            print("Making prediction with TensorFlow model...")
-            
-            with tf_graph.as_default():
-                with tf_session.as_default():
-                    predictions = models["tensorflow"].predict(np_data)
-            
-            # Debug all predictions before applying threshold
-            if np.ndim(predictions) > 0 and len(predictions) > 0:
-                debug_predictions(predictions[0], homesounds.everything)
-
-                # Check if this is likely speech by finding the speech prediction confidence
-                is_likely_speech = False
-                speech_confidence = 0.0
-                
-                # Find speech prediction confidence and general sound prediction confidence
-                for label, index in homesounds.labels.items():
-                    if label == "speech" and index < len(predictions[0]):
-                        speech_confidence = predictions[0][index]
-                        print(f"Speech confidence: {speech_confidence:.4f}")
-                        
-                        if speech_confidence > SPEECH_PREDICTION_THRES * 0.7:  # 70% of speech threshold
-                            is_likely_speech = True
-                            print("Likely speech detection - using speech-focused processing")
-                
-                # Add current audio to the appropriate buffer
-                if is_likely_speech:
-                    # Add to speech buffer for potential speech processing
-                    with speech_buffer_lock:
-                        speech_audio_buffer.append(np_wav)
-                        if len(speech_audio_buffer) > MAX_SPEECH_BUFFER_SIZE:
-                            speech_audio_buffer = speech_audio_buffer[-MAX_SPEECH_BUFFER_SIZE:]
-                    
-                    # Add to speech queue for asynchronous processing if confidence is high enough
-                    if speech_confidence > SPEECH_PREDICTION_THRES and not speech_queue.full():
-                        speech_queue.put(np_wav)
-                else:
-                    # Add to general sound buffer
-                    with sound_buffer_lock:
-                        sound_audio_buffer.append(np_wav)
-                        if len(sound_audio_buffer) > MAX_SOUND_BUFFER_SIZE:
-                            sound_audio_buffer = sound_audio_buffer[-MAX_SOUND_BUFFER_SIZE:]
-                
-                # Aggregate predictions using the appropriate track
-                aggregated_predictions = aggregate_predictions(predictions[0], homesounds.everything, is_speech_focused=is_likely_speech)
-                
-                # Debug the aggregated predictions
-                logging.info(f"Aggregated predictions ({'speech-focused' if is_likely_speech else 'sound-focused'}):")
-                debug_predictions(aggregated_predictions, homesounds.everything)
-                
-                # Find top prediction from active context
-                pred_max = -1
-                pred_max_val = 0
-                pred_label = None
-                for l in active_context:
-                    i = homesounds.labels.get(l, -1)
-                    if i >= 0 and i < len(aggregated_predictions) and aggregated_predictions[i] > pred_max_val:
-                        pred_max = i
-                        pred_max_val = aggregated_predictions[i]
-                        pred_label = l  # Store the label for threshold lookup
-                
-                if pred_max != -1:
-                    # Get the appropriate threshold for this sound class
-                    class_threshold = CLASS_THRESHOLDS.get(pred_label, PREDICTION_THRES)
-                    
-                    # Check if prediction exceeds its class-specific threshold
-                    if pred_max_val > class_threshold:
-                        for label, index in homesounds.labels.items():
-                            if index == pred_max:
-                                human_label = homesounds.to_human_labels.get(label, label)
-                                print(f"Top prediction: {human_label} ({pred_max_val:.4f}), threshold: {class_threshold:.4f}")
-                                
-                                # For speech, we'll handle it asynchronously, so emit immediate detection
-                                if human_label == "Speech" and pred_max_val > SPEECH_PREDICTION_THRES:
-                                    socketio.emit('audio_label', {
-                                        'label': 'Speech',
-                                        'accuracy': str(pred_max_val),
-                                        'db': str(db)
-                                    })
-                                    print(f"EMITTING SPEECH DETECTION: Speech ({pred_max_val:.6f})")
-                                    # Don't return - the async processing will handle sentiment
-                                else:
-                                    # Normal sound emission (non-speech)
-                                    socketio.emit('audio_label', {
-                                        'label': human_label,
-                                        'accuracy': str(pred_max_val),
-                                        'db': str(db)
-                                    })
-                                break
-                    else:
-                        print(f"Prediction {pred_label} ({pred_max_val:.4f}) below its threshold {class_threshold:.4f}")
-                        socketio.emit('audio_label', {
-                            'label': 'Unrecognized Sound',
-                            'accuracy': '0.2',
-                            'db': str(db)
-                        })
-                else:
-                    print(f"No prediction found")
-                    socketio.emit('audio_label', {
-                        'label': 'Unrecognized Sound',
-                        'accuracy': '0.2',
-                        'db': str(db)
-                    })
+            if orig_top_idx != agg_top_idx:
+                # The top prediction changed after aggregation
+                orig_label = label_list[orig_top_idx] if orig_top_idx < len(label_list) else "unknown"
+                agg_label = label_list[agg_top_idx] if agg_top_idx < len(label_list) else "unknown"
+                logger.info(f"Aggregation changed top prediction: {orig_label} ({new_prediction[orig_top_idx]:.4f}) -> {agg_label} ({aggregated[agg_top_idx]:.4f})")
             else:
-                print("Invalid prediction format")
-                socketio.emit('audio_label', {
-                    'label': 'Error Processing',
-                    'accuracy': '0.0',
-                    'db': str(db)
-                })
-    except Exception as e:
-        print(f"Error in TensorFlow processing: {str(e)}")
-        traceback.print_exc()
-        socketio.emit('audio_label', {
-            'label': 'Error Processing',
-            'accuracy': '0.0',
-            'db': str(db)
-        })
+                # Same top prediction, but confidence may have changed
+                label = label_list[orig_top_idx] if orig_top_idx < len(label_list) else "unknown"
+                logger.info(f"Aggregation kept same top prediction: {label}, confidence: {new_prediction[orig_top_idx]:.4f} -> {aggregated[orig_top_idx]:.4f}")
+            
+            return aggregated
+        else:
+            # Just return the single prediction if we don't have history yet
+            return new_prediction
 
 if __name__ == '__main__':
     # Parse command-line arguments for port configuration
