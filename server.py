@@ -636,6 +636,15 @@ def handle_source(json_data):
 
 @socketio.on('audio_data')
 def handle_audio(data):
+    global speech_audio_buffer, sound_audio_buffer, speech_buffer_lock, sound_buffer_lock
+    
+    # Ensure buffers are initialized
+    if 'speech_audio_buffer' not in globals() or speech_audio_buffer is None:
+        speech_audio_buffer = []
+    
+    if 'sound_audio_buffer' not in globals() or sound_audio_buffer is None:
+        sound_audio_buffer = []
+        
     # Parse the incoming audio data
     try:
         # Check if data is a dictionary (JSON object)
@@ -874,6 +883,14 @@ def handle_audio(data):
 
 # Helper function to process with TensorFlow model
 def process_with_tensorflow_model(np_wav, db):
+    global speech_audio_buffer, sound_audio_buffer, speech_buffer_lock, sound_buffer_lock, speech_predictions, sound_predictions
+    
+    # Check if silence (very low volume)
+    if db < SILENCE_THRES:
+        print("Audio volume too low - likely silence")
+        socketio.emit('audio_label', {'label': 'Error Processing', 'accuracy': 0.0, 'db': db})
+        return
+    
     try:
         with tf_lock:
             # Process the audio data to get the right input format
@@ -1052,19 +1069,18 @@ def process_speech_with_sentiment(audio_data):
     Returns:
         Dictionary with transcription and sentiment
     """
-    # Settings for improved speech processing
-    MIN_WORD_COUNT = 3   # Minimum number of meaningful words for valid transcription
-    MIN_CONFIDENCE = 0.7  # Minimum confidence level for speech detection
+    global speech_audio_buffer, speech_buffer_lock
     
-    # Add current audio to speech buffer
-    with speech_buffer_lock:
-        # Add current audio to buffer
-        speech_audio_buffer.append(audio_data)
+    try:
+        # Add audio to speech buffer with locking to ensure thread safety
+        with speech_buffer_lock:
+            # Append current audio data to speech buffer
+            speech_audio_buffer.append(audio_data)
         
         # Keep only the most recent chunks for speech
         if len(speech_audio_buffer) > MAX_SPEECH_BUFFER_SIZE:
             speech_audio_buffer = speech_audio_buffer[-MAX_SPEECH_BUFFER_SIZE:]
-    
+        
         # For better transcription, use concatenated audio from multiple chunks if available
         if len(speech_audio_buffer) > 1:
             # Use up to MAX_SPEECH_BUFFER_SIZE chunks for more context
@@ -1075,68 +1091,72 @@ def process_speech_with_sentiment(audio_data):
             concatenated_audio = np.concatenate(speech_audio_buffer[-num_chunks:])
         else:
             concatenated_audio = audio_data
-    
-    # Ensure minimum audio length for better transcription
-    min_samples = RATE * 3.0  # At least 3.0 seconds
-    if len(concatenated_audio) < min_samples:
-        pad_size = int(min_samples) - len(concatenated_audio)
-        # Use reflect padding to extend short audio naturally
-        concatenated_audio = np.pad(concatenated_audio, (0, pad_size), mode='reflect')
-        logger.info(f"Padded audio data to size: {len(concatenated_audio)} samples ({len(concatenated_audio)/RATE:.1f} seconds)")
-    
-    # Calculate the RMS value of the audio to gauge its "loudness"
-    rms = np.sqrt(np.mean(np.square(concatenated_audio)))
-    if rms < 0.01:  # If the audio is very quiet, skip transcription
-        logger.info(f"Audio too quiet (RMS: {rms:.4f}), skipping transcription")
-        return {
-            "text": "",
-            "sentiment": {
-                "category": "neutral", 
-                "confidence": 0.0,
-                "emoji": "😐",
-                "original_emotion": "neutral"
+        
+        # Ensure minimum audio length for better transcription
+        min_samples = RATE * 3.0  # At least 3.0 seconds
+        if len(concatenated_audio) < min_samples:
+            pad_size = int(min_samples) - len(concatenated_audio)
+            # Use reflect padding to extend short audio naturally
+            concatenated_audio = np.pad(concatenated_audio, (0, pad_size), mode='reflect')
+            logger.info(f"Padded audio data to size: {len(concatenated_audio)} samples ({len(concatenated_audio)/RATE:.1f} seconds)")
+        
+        # Calculate the RMS value of the audio to gauge its "loudness"
+        rms = np.sqrt(np.mean(np.square(concatenated_audio)))
+        if rms < 0.01:  # If the audio is very quiet, skip transcription
+            logger.info(f"Audio too quiet (RMS: {rms:.4f}), skipping transcription")
+            return {
+                "text": "",
+                "sentiment": {
+                    "category": "neutral", 
+                    "confidence": 0.0,
+                    "emoji": "😐",
+                    "original_emotion": "neutral"
+                }
             }
-        }
-    
-    logger.info("Transcribing speech to text...")
-    
-    # Transcribe audio using the selected speech-to-text processor
-    if USE_GOOGLE_SPEECH:
-        # Use Google Cloud Speech-to-Text
-        transcription = transcribe_with_google(concatenated_audio, RATE)
-        logger.info(f"Used Google Cloud Speech-to-Text for transcription")
-    else:
-        # Use Whisper (default)
-        transcription = speech_processor.transcribe(concatenated_audio, RATE)
-        logger.info(f"Used Whisper for transcription")
-    
-    # Check for valid transcription with sufficient content
-    if not transcription:
-        logger.info("No valid transcription found")
+        
+        logger.info("Transcribing speech to text...")
+        
+        # Transcribe audio using the selected speech-to-text processor
+        if USE_GOOGLE_SPEECH:
+            # Use Google Cloud Speech-to-Text
+            transcription = transcribe_with_google(concatenated_audio, RATE)
+            logger.info(f"Used Google Cloud Speech-to-Text for transcription")
+        else:
+            # Use Whisper (default)
+            transcription = speech_processor.transcribe(concatenated_audio, RATE)
+            logger.info(f"Used Whisper for transcription")
+        
+        # Check for valid transcription with sufficient content
+        if not transcription:
+            logger.info("No valid transcription found")
+            return None
+        
+        # Filter out short or meaningless transcriptions
+        common_words = ["the", "a", "an", "and", "but", "or", "if", "then", "so", "to", "of", "for", "in", "on", "at"]
+        meaningful_words = [word for word in transcription.lower().split() if word not in common_words]
+        
+        if len(meaningful_words) < MIN_WORD_COUNT:
+            logger.info(f"Transcription has too few meaningful words: '{transcription}'")
+            return None
+        
+        logger.info(f"Transcription: {transcription}")
+        
+        # Analyze sentiment
+        sentiment = analyze_sentiment(transcription)
+        
+        if sentiment:
+            result = {
+                "text": transcription,
+                "sentiment": sentiment
+            }
+            logger.info(f"Sentiment analysis result: Speech {sentiment['category']} with emoji {sentiment['emoji']}")
+            return result
+        
         return None
-    
-    # Filter out short or meaningless transcriptions
-    common_words = ["the", "a", "an", "and", "but", "or", "if", "then", "so", "to", "of", "for", "in", "on", "at"]
-    meaningful_words = [word for word in transcription.lower().split() if word not in common_words]
-    
-    if len(meaningful_words) < MIN_WORD_COUNT:
-        logger.info(f"Transcription has too few meaningful words: '{transcription}'")
+    except Exception as e:
+        print(f"Error in process_speech_with_sentiment: {str(e)}")
+        traceback.print_exc()
         return None
-    
-    logger.info(f"Transcription: {transcription}")
-    
-    # Analyze sentiment
-    sentiment = analyze_sentiment(transcription)
-    
-    if sentiment:
-        result = {
-            "text": transcription,
-            "sentiment": sentiment
-        }
-        logger.info(f"Sentiment analysis result: Speech {sentiment['category']} with emoji {sentiment['emoji']}")
-        return result
-    
-    return None
 
 def background_thread():
     """Example of how to send server generated events to clients."""
