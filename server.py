@@ -101,12 +101,13 @@ context = homesounds.everything
 active_context = homesounds.everything
 
 # thresholds
-PREDICTION_THRES = 0.05  # Lowered from 0.1 to 0.05 
+PREDICTION_THRES = 0.15  # Increased from 0.05 to reduce false positives 
 FINGER_SNAP_THRES = 0.03  # Special lower threshold for finger snapping
-DBLEVEL_THRES = -65  # Lowered from -60 to -65 to detect quieter sounds
+DBLEVEL_THRES = -60  # Adjusted from -65 to -60 to filter out more background noise
 SILENCE_THRES = -75  # Threshold for silence detection
 SPEECH_SENTIMENT_THRES = 0.35  # Increased from 0.12 to 0.35 to reduce false positives
 CHOPPING_THRES = 0.70  # Higher threshold for chopping sounds to prevent false positives
+SPEECH_PREDICTION_THRES = 0.70  # Higher threshold for speech to reduce false positives
 
 CHANNELS = 1
 RATE = 16000
@@ -745,7 +746,6 @@ def process_with_tensorflow_model(np_wav, db):
                     if i >= 0 and i < len(predictions[0]) and predictions[0][i] > pred_max_val:
                         pred_max = i
                         pred_max_val = predictions[0][i]
-                        pred_label = l
                 
                 if pred_max != -1 and pred_max_val > PREDICTION_THRES:
                     for label, index in homesounds.labels.items():
@@ -832,6 +832,7 @@ def process_speech_with_sentiment(audio_data):
     # Settings for improved speech processing
     MAX_BUFFER_SIZE = 5  # Number of audio chunks to keep in buffer
     MIN_WORD_COUNT = 3   # Minimum number of meaningful words for valid transcription
+    MIN_CONFIDENCE = 0.7  # Minimum confidence level for speech detection
     
     # Initialize or update audio buffer (stored in function attributes)
     if not hasattr(process_speech_with_sentiment, "recent_audio_buffer"):
@@ -855,13 +856,23 @@ def process_speech_with_sentiment(audio_data):
     else:
         concatenated_audio = audio_data
     
-    # Ensure minimum audio length for better transcription - increase from 0.5 to 1.5 seconds
-    min_samples = RATE * 1.5  # At least 1.5 seconds (was 0.5)
+    # Ensure minimum audio length for better transcription - increase from 1.5 to 2.0 seconds
+    min_samples = RATE * 2.0  # At least 2.0 seconds (was 1.5)
     if len(concatenated_audio) < min_samples:
         pad_size = int(min_samples) - len(concatenated_audio)
         # Use reflect padding to extend short audio naturally
         concatenated_audio = np.pad(concatenated_audio, (0, pad_size), mode='reflect')
         logger.info(f"Padded audio data to size: {len(concatenated_audio)} samples ({len(concatenated_audio)/RATE:.1f} seconds)")
+    
+    # Calculate the RMS value of the audio to gauge its "loudness"
+    rms = np.sqrt(np.mean(np.square(concatenated_audio)))
+    if rms < 0.01:  # If the audio is very quiet, skip transcription
+        logger.info(f"Audio too quiet (RMS: {rms:.4f}), skipping transcription")
+        return {
+            "transcription": "",
+            "sentiment": "neutral",
+            "confidence": 0.0
+        }
     
     logger.info("Transcribing speech to text...")
     
