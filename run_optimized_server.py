@@ -76,7 +76,7 @@ def print_server_info():
         local_ip = socket.gethostbyname(hostname)
         print(f" → http://{local_ip}:8080 (internal network)")
         # Add external IP information
-        print(f" → http://35.226.202.115:8080 (external - Internet)")
+        print(f" → http://34.16.101.179:8080 (external - Internet)")
     except:
         pass
     print("\nPress Ctrl+C to stop the server")
