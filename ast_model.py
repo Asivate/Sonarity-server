@@ -12,15 +12,15 @@ warnings.filterwarnings("ignore", category=UserWarning)
 def check_float16_support():
     """Check if the system supports float16 operations in a backward-compatible way."""
     try:
+        # For server stability, we'll be conservative and recommend not using float16
+        # unless we're 100% certain it's compatible with the system
+        
         # Try the new way (newer PyTorch versions)
         if hasattr(torch.backends, 'cpu') and hasattr(torch.backends.cpu, 'supports_float16'):
-            return torch.backends.cpu.supports_float16()
-        # Try the old way or fallback
-        else:
-            # Simple test of float16 functionality
-            test_tensor = torch.tensor([1.0], dtype=torch.float16)
-            result = test_tensor + test_tensor
-            return True
+            return False  # Returning False for now as we've seen compatibility issues
+        
+        # Since we're having issues with float16, return False to use float32 instead
+        return False
     except Exception as e:
         print(f"Error checking float16 support: {e}")
         return False
@@ -53,10 +53,10 @@ def load_ast_model(model_name="MIT/ast-finetuned-audioset-10-10-0.4593", **kwarg
         if torch_dtype:
             print(f"Using model precision: {torch_dtype}")
         
-        # Check if we can use float16 precision
-        if not torch_dtype and check_float16_support():
-            print("CPU supports float16 - using half precision for faster inference")
-            kwargs["torch_dtype"] = torch.float16
+        # Explicitly set torch_dtype to float32 for maximum compatibility
+        if "torch_dtype" not in kwargs:
+            print("Setting model precision to float32 for maximum compatibility")
+            kwargs["torch_dtype"] = torch.float32
         
         # Load model with optimizations
         model = AutoModelForAudioClassification.from_pretrained(model_name, **kwargs)
@@ -289,6 +289,9 @@ def preprocess_audio_for_ast(audio_data, sample_rate, feature_extractor):
     if np.abs(audio_data).max() > 1.0:
         audio_data = audio_data / np.abs(audio_data).max()
     
+    # Convert to float32 before feature extraction to ensure consistent precision
+    audio_data = audio_data.astype(np.float32)
+    
     # Extract features using the feature extractor
     inputs = feature_extractor(
         audio_data, 
@@ -296,6 +299,9 @@ def preprocess_audio_for_ast(audio_data, sample_rate, feature_extractor):
         return_tensors="pt",
         padding=True
     )
+    
+    # This is critical: ensure inputs are float32 for compatibility
+    inputs = {k: v.to(torch.float32) for k, v in inputs.items()}
     
     return inputs
 
@@ -347,8 +353,12 @@ def predict_sound(audio_data, sample_rate, model, feature_extractor, threshold=0
         # Get the model's device
         device = next(model.parameters()).device
         
-        # Move inputs to the model's device
-        inputs = {k: v.to(device) for k, v in inputs.items()}
+        # Get the model's data type
+        model_dtype = next(model.parameters()).dtype
+        print(f"Model is using dtype: {model_dtype}")
+        
+        # Move inputs to the model's device and convert to model's dtype
+        inputs = {k: v.to(device).to(model_dtype) for k, v in inputs.items()}
         
         print(f"Feature extraction completed. Running inference...")
         

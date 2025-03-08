@@ -248,13 +248,13 @@ def load_models():
             
             # Load in a CPU-optimized way - lower precision for faster inference
             # but only if adequate hardware support exists
-            supports_float16 = ast_model.check_float16_support()
+            supports_float16 = False  # Default to False to avoid compatibility issues
             
             if supports_float16:
                 print("CPU supports float16 - using half precision for faster inference")
                 ast_kwargs["torch_dtype"] = torch.float16
             else:
-                print("CPU does not support float16 or check failed - using default precision (slower)")
+                print("Using standard precision (float32) for maximum compatibility")
             
             # Load model with optimizations
             models["ast"], models["feature_extractor"] = ast_model.load_ast_model(
@@ -366,13 +366,13 @@ try:
     
     # Load in a CPU-optimized way - lower precision for faster inference
     # but only if adequate hardware support exists
-    supports_float16 = ast_model.check_float16_support()
+    supports_float16 = False  # Default to False to avoid compatibility issues
     
     if supports_float16:
         print("CPU supports float16 - using half precision for faster inference")
         ast_kwargs["torch_dtype"] = torch.float16
     else:
-        print("CPU does not support float16 or check failed - using default precision (slower)")
+        print("Using standard precision (float32) for maximum compatibility")
     
     # Load model with optimizations
     with ast_lock:
