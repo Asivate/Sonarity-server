@@ -444,17 +444,18 @@ def handle_source(json_data):
                                         sentiment_result = process_speech_with_sentiment(np_wav)
                                         
                                         if sentiment_result:
-                                            # Emit with sentiment information
+                                            # Emit with sentiment information - fixed to match actual structure
+                                            label = f"Speech {sentiment_result['sentiment']['category']}"
                                             socketio.emit('audio_label', {
-                                                'label': sentiment_result['label'],
-                                                'accuracy': str(sentiment_result['accuracy']),
+                                                'label': label,
+                                                'accuracy': str(sentiment_result['sentiment']['confidence']),
                                                 'db': str(db),
-                                                'emoji': sentiment_result['emoji'],
-                                                'transcription': sentiment_result['transcription'],
-                                                'emotion': sentiment_result['emotion'],
-                                                'sentiment_score': str(sentiment_result['sentiment_score'])
+                                                'emoji': sentiment_result['sentiment']['emoji'],
+                                                'transcription': sentiment_result['text'],
+                                                'emotion': sentiment_result['sentiment']['original_emotion'],
+                                                'sentiment_score': str(sentiment_result['sentiment']['confidence'])
                                             })
-                                            print(f"EMITTING SPEECH WITH SENTIMENT: {sentiment_result['label']} with emoji {sentiment_result['emoji']}")
+                                            print(f"EMITTING SPEECH WITH SENTIMENT: {label} with emoji {sentiment_result['sentiment']['emoji']}")
                                             return
                                     # Normal sound emission (non-speech or sentiment analysis failed)
                                     socketio.emit('audio_label', {
@@ -627,17 +628,18 @@ def handle_audio(data):
                             sentiment_result = process_speech_with_sentiment(np_wav)
                             
                             if sentiment_result:
-                                # Emit with sentiment information
+                                # Emit with sentiment information - fixed to match actual structure
+                                label = f"Speech {sentiment_result['sentiment']['category']}"
                                 socketio.emit('audio_label', {
-                                    'label': sentiment_result['label'],
-                                    'accuracy': str(sentiment_result['accuracy']),
+                                    'label': label,
+                                    'accuracy': str(sentiment_result['sentiment']['confidence']),
                                     'db': str(db),
-                                    'emoji': sentiment_result['emoji'],
-                                    'transcription': sentiment_result['transcription'],
-                                    'emotion': sentiment_result['emotion'],
-                                    'sentiment_score': str(sentiment_result['sentiment_score'])
+                                    'emoji': sentiment_result['sentiment']['emoji'],
+                                    'transcription': sentiment_result['text'],
+                                    'emotion': sentiment_result['sentiment']['original_emotion'],
+                                    'sentiment_score': str(sentiment_result['sentiment']['confidence'])
                                 })
-                                print(f"EMITTING SPEECH WITH SENTIMENT: {sentiment_result['label']} with emoji {sentiment_result['emoji']}")
+                                print(f"EMITTING SPEECH WITH SENTIMENT: {label} with emoji {sentiment_result['sentiment']['emoji']}")
                                 return
                         
                         # Emit the prediction if confidence is above threshold or it's a finger snap
@@ -768,17 +770,18 @@ def process_with_tensorflow_model(np_wav, db):
                                 sentiment_result = process_speech_with_sentiment(np_wav)
                                 
                                 if sentiment_result:
-                                    # Emit with sentiment information
+                                    # Emit with sentiment information - fixed to match actual structure
+                                    label = f"Speech {sentiment_result['sentiment']['category']}"
                                     socketio.emit('audio_label', {
-                                        'label': sentiment_result['label'],
-                                        'accuracy': str(sentiment_result['accuracy']),
+                                        'label': label,
+                                        'accuracy': str(sentiment_result['sentiment']['confidence']),
                                         'db': str(db),
-                                        'emoji': sentiment_result['emoji'],
-                                        'transcription': sentiment_result['transcription'],
-                                        'emotion': sentiment_result['emotion'],
-                                        'sentiment_score': str(sentiment_result['sentiment_score'])
+                                        'emoji': sentiment_result['sentiment']['emoji'],
+                                        'transcription': sentiment_result['text'],
+                                        'emotion': sentiment_result['sentiment']['original_emotion'],
+                                        'sentiment_score': str(sentiment_result['sentiment']['confidence'])
                                     })
-                                    print(f"EMITTING SPEECH WITH SENTIMENT: {sentiment_result['label']} with emoji {sentiment_result['emoji']}")
+                                    print(f"EMITTING SPEECH WITH SENTIMENT: {label} with emoji {sentiment_result['sentiment']['emoji']}")
                                     return
                             
                             # Normal sound emission (non-speech or sentiment analysis failed)
