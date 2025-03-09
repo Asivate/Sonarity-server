@@ -361,77 +361,121 @@ def predict_sound(audio_data, sample_rate, model, feature_extractor, threshold=0
                 param_dtypes[param.dtype] = 0
             param_dtypes[param.dtype] += 1
         
-        print("Model parameter dtypes:", param_dtypes)
+        print(f"Model is using dtype: {next(model.parameters()).dtype}")
         
         try:
             # Use the preprocess function to prepare audio input
-            print("Extracting audio features...")
             inputs = preprocess_audio_for_ast(audio_data, sample_rate, feature_extractor)
             
-            # Get the model's device and check model dtype
+            # Get the model's device
             device = next(model.parameters()).device
-            model_dtype = next(model.parameters()).dtype
-            print(f"Model is using device: {device}, dtype: {model_dtype}")
             
-            # Debug info about input tensor dtypes before conversion
-            for key, tensor in inputs.items():
-                print(f"Input tensor '{key}' dtype: {tensor.dtype}, device: {tensor.device}")
-            
-            # Force all inputs to explicit float32 and move to model's device
-            print("Converting all inputs to float32...")
-            for key in inputs:
-                # First move to CPU/GPU device, then convert dtype
-                inputs[key] = inputs[key].to(device)
-                # Make sure data is in float32 format
-                if inputs[key].dtype != torch.float32:
-                    inputs[key] = inputs[key].to(dtype=torch.float32)
-            
-            # Verify inputs after conversion
-            for key, tensor in inputs.items():
-                print(f"After conversion: '{key}' dtype: {tensor.dtype}, device: {tensor.device}")
+            # Ensure all tensors are float32 and on the correct device
+            if isinstance(inputs, dict):
+                for key in inputs:
+                    # First check the dtype and device before conversion to avoid unnecessary operations
+                    if inputs[key].dtype != torch.float32:
+                        try:
+                            inputs[key] = inputs[key].to(dtype=torch.float32)
+                        except Exception as e:
+                            print(f"Error converting {key} to float32: {str(e)}")
+                            # Fallback to safe conversion
+                            inputs[key] = inputs[key].float()
+                    
+                    # Move to the model's device if needed
+                    if inputs[key].device != device:
+                        try:
+                            inputs[key] = inputs[key].to(device=device)
+                        except Exception as e:
+                            print(f"Error moving {key} to device {device}: {str(e)}")
+                            # Try with cpu first then move
+                            inputs[key] = inputs[key].to("cpu").to(device)
             
             print(f"Feature extraction completed. Running inference...")
             
             # Run inference with no gradient tracking for efficiency
             with torch.no_grad():
-                # Run the model with the prepared inputs
-                outputs = model(**inputs)
-                logits = outputs.logits
-                
-                # Apply softmax to get probabilities
-                probs = torch.nn.functional.softmax(logits, dim=-1)
-                
-                # Get the model's id2label mapping
-                id2label = model.config.id2label
-                
-                # Convert to numpy for easier processing
-                probs_np = probs[0].cpu().numpy()
-                
-                # Store the raw predictions for aggregation
-                raw_predictions = probs_np.copy()
-                
-                # Process the predictions
-                result = process_predictions(probs_np, id2label, threshold, top_k)
-                
-                # Add the raw predictions to the result
-                result["raw_predictions"] = raw_predictions
-                
-                elapsed_time = time.time() - start_time
-                print(f"AST prediction completed in {elapsed_time:.2f} seconds")
-                
-                return result
-                
-        except Exception as inner_e:
-            print(f"Error during AST processing: {inner_e}")
+                try:
+                    # Run the model with the prepared inputs, explicit cast to float32
+                    outputs = model(**inputs)
+                    logits = outputs.logits.float()  # Ensure logits are float32
+                    
+                    # Apply softmax to get probabilities
+                    probs = torch.nn.functional.softmax(logits, dim=-1)
+                    
+                    # Get the model's id2label mapping
+                    id2label = model.config.id2label
+                    
+                    # Convert to numpy for easier processing
+                    probs_np = probs[0].cpu().numpy()
+                    
+                    # Store the raw predictions for aggregation
+                    raw_predictions = probs_np
+                    
+                    # Process predictions to get the top results with label information
+                    predictions = process_predictions(probs_np, id2label, threshold, top_k)
+                    
+                    # Also map AST predictions to the homesounds categories if possible
+                    mapped_predictions = map_ast_labels_to_homesounds(predictions["top_predictions"])
+                    
+                    # Include the raw probability vector for aggregation
+                    predictions["raw_predictions"] = raw_predictions
+                    predictions["mapped_predictions"] = mapped_predictions
+                    
+                    # Record and log the prediction time
+                    end_time = time.time()
+                    elapsed = end_time - start_time
+                    print(f"AST prediction completed in {elapsed:.2f} seconds")
+                    
+                    return predictions
+                    
+                except RuntimeError as e:
+                    if "Expected all tensors to be on the same device" in str(e):
+                        print(f"Device error in model inference: {str(e)}")
+                        print("Attempting recovery with CPU...")
+                        # Move model to CPU as a fallback
+                        model = model.to("cpu")
+                        
+                        # Move all inputs to CPU
+                        for key in inputs:
+                            inputs[key] = inputs[key].to("cpu")
+                        
+                        # Retry with everything on CPU
+                        outputs = model(**inputs)
+                        logits = outputs.logits
+                        probs = torch.nn.functional.softmax(logits, dim=-1)
+                        id2label = model.config.id2label
+                        probs_np = probs[0].cpu().numpy()
+                        raw_predictions = probs_np
+                        predictions = process_predictions(probs_np, id2label, threshold, top_k)
+                        mapped_predictions = map_ast_labels_to_homesounds(predictions["top_predictions"])
+                        predictions["raw_predictions"] = raw_predictions
+                        predictions["mapped_predictions"] = mapped_predictions
+                        
+                        end_time = time.time()
+                        elapsed = end_time - start_time
+                        print(f"AST prediction completed in {elapsed:.2f} seconds (recovery path)")
+                        
+                        return predictions
+                    else:
+                        # Rethrow if it's not a device error
+                        raise
+                        
+        except Exception as e:
+            print(f"Error in feature extraction or model inference: {str(e)}")
             traceback.print_exc()
-            raise inner_e
-        
+            # Return a fallback result
+            return {
+                "top_predictions": [{"label": "Error", "confidence": 0.0}],
+                "mapped_predictions": [],
+                "raw_predictions": None
+            }
+    
     except Exception as e:
-        print(f"Error in predict_sound: {e}")
+        print(f"Critical error in AST prediction: {str(e)}")
         traceback.print_exc()
         return {
-            "error": str(e),
-            "top_predictions": [],
+            "top_predictions": [{"label": "Error", "confidence": 0.0}],
             "mapped_predictions": [],
             "raw_predictions": None
         }

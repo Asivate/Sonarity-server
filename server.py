@@ -591,21 +591,59 @@ def handle_source(json_data):
                             sentiment_result = process_speech_with_sentiment(np_wav)
                             
                             if sentiment_result:
-                                # Emit with sentiment information - fixed to match actual structure
-                                label = f"Speech {sentiment_result['sentiment']['category']}"
-                                socketio.emit('audio_label', {
-                                    'label': label,
-                                    'accuracy': str(sentiment_result['sentiment']['confidence']),
-                                    'db': str(db),
-                                    'emoji': sentiment_result['sentiment']['emoji'],
-                                    'transcription': sentiment_result['text'],
-                                    'emotion': sentiment_result['sentiment']['original_emotion'],
-                                    'sentiment_score': str(sentiment_result['sentiment']['confidence'])
-                                })
-                                print(f"EMITTING SPEECH WITH SENTIMENT: {label} with emoji {sentiment_result['sentiment']['emoji']}")
-                                # Run memory cleanup after prediction
-                                cleanup_memory()
-                                return
+                                # Check if sentiment_result has the expected structure
+                                if isinstance(sentiment_result, dict) and 'sentiment' in sentiment_result and isinstance(sentiment_result['sentiment'], dict) and 'category' in sentiment_result['sentiment']:
+                                    # Emit with sentiment information - fixed to match actual structure
+                                    label = f"Speech {sentiment_result['sentiment']['category']}"
+                                    socketio.emit('audio_label', {
+                                        'label': label,
+                                        'accuracy': str(sentiment_result['sentiment']['confidence']),
+                                        'db': str(db),
+                                        'emoji': sentiment_result['sentiment']['emoji'],
+                                        'transcription': sentiment_result['text'],
+                                        'emotion': sentiment_result['sentiment']['original_emotion'],
+                                        'sentiment_score': str(sentiment_result['sentiment']['confidence'])
+                                    })
+                                    print(f"EMITTING SPEECH WITH SENTIMENT: {label} with emoji {sentiment_result['sentiment']['emoji']}")
+                                else:
+                                    # Handle the case where sentiment_result doesn't have the expected structure
+                                    label = "Speech"
+                                    if isinstance(sentiment_result, dict):
+                                        transcription = sentiment_result.get('transcription', sentiment_result.get('text', ''))
+                                        sentiment_value = sentiment_result.get('sentiment', 'neutral')
+                                        confidence = sentiment_result.get('confidence', 0.5)
+                                        
+                                        if isinstance(sentiment_value, dict):
+                                            category = sentiment_value.get('category', 'Neutral')
+                                            emoji = sentiment_value.get('emoji', '😐')
+                                            emotion = sentiment_value.get('original_emotion', 'neutral')
+                                            confidence = sentiment_value.get('confidence', confidence)
+                                        else:
+                                            category = 'Neutral' if isinstance(sentiment_value, str) else 'Neutral'
+                                            emoji = '😐'
+                                            emotion = 'neutral'
+                                        
+                                        label = f"Speech {category}"
+                                        socketio.emit('audio_label', {
+                                            'label': label,
+                                            'accuracy': str(confidence),
+                                            'db': str(db),
+                                            'emoji': emoji,
+                                            'transcription': transcription,
+                                            'emotion': emotion,
+                                            'sentiment_score': str(confidence)
+                                        })
+                                        print(f"EMITTING SPEECH WITH BASIC SENTIMENT: {label}")
+                                    else:
+                                        socketio.emit('audio_label', {
+                                            'label': 'Speech',
+                                            'accuracy': '0.6',
+                                            'db': str(db)
+                                        })
+                                        print("EMITTING BASIC SPEECH DETECTION (no sentiment)")
+                                    # Cleanup memory
+                                    cleanup_memory()
+                                    return
                         
                         # Emit the prediction if confidence is above threshold or it's a finger snap
                         if top_confidence > PREDICTION_THRES or (top_label == "finger-snap" and top_confidence > FINGER_SNAP_THRES):
@@ -718,30 +756,68 @@ def handle_source(json_data):
                                         sentiment_result = process_speech_with_sentiment(np_wav)
                                         
                                         if sentiment_result:
-                                            # Emit with sentiment information - fixed to match actual structure
-                                            label = f"Speech {sentiment_result['sentiment']['category']}"
-                                            socketio.emit('audio_label', {
-                                                'label': label,
-                                                'accuracy': str(sentiment_result['sentiment']['confidence']),
-                                                'db': str(db),
-                                                'emoji': sentiment_result['sentiment']['emoji'],
-                                                'transcription': sentiment_result['text'],
-                                                'emotion': sentiment_result['sentiment']['original_emotion'],
-                                                'sentiment_score': str(sentiment_result['sentiment']['confidence'])
-                                            })
-                                            print(f"EMITTING SPEECH WITH SENTIMENT: {label} with emoji {sentiment_result['sentiment']['emoji']}")
-                                            # Cleanup memory
-                                            cleanup_memory()
-                                            return
-                                    # Normal sound emission (non-speech or sentiment analysis failed)
-                                    socketio.emit('audio_label', {
-                                        'label': human_label,
-                                        'accuracy': str(pred_max_val),
-                                        'db': str(db)
-                                    })
-                                    # Cleanup memory
-                                    cleanup_memory()
-                                    break
+                                            # Check if sentiment_result has the expected structure
+                                            if isinstance(sentiment_result, dict) and 'sentiment' in sentiment_result and isinstance(sentiment_result['sentiment'], dict) and 'category' in sentiment_result['sentiment']:
+                                                # Emit with sentiment information - fixed to match actual structure
+                                                label = f"Speech {sentiment_result['sentiment']['category']}"
+                                                socketio.emit('audio_label', {
+                                                    'label': label,
+                                                    'accuracy': str(sentiment_result['sentiment']['confidence']),
+                                                    'db': str(db),
+                                                    'emoji': sentiment_result['sentiment']['emoji'],
+                                                    'transcription': sentiment_result['text'],
+                                                    'emotion': sentiment_result['sentiment']['original_emotion'],
+                                                    'sentiment_score': str(sentiment_result['sentiment']['confidence'])
+                                                })
+                                                print(f"EMITTING SPEECH WITH SENTIMENT: {label} with emoji {sentiment_result['sentiment']['emoji']}")
+                                            else:
+                                                # Handle the case where sentiment_result doesn't have the expected structure
+                                                label = "Speech"
+                                                if isinstance(sentiment_result, dict):
+                                                    transcription = sentiment_result.get('transcription', sentiment_result.get('text', ''))
+                                                    sentiment_value = sentiment_result.get('sentiment', 'neutral')
+                                                    confidence = sentiment_result.get('confidence', 0.5)
+                                                    
+                                                    if isinstance(sentiment_value, dict):
+                                                        category = sentiment_value.get('category', 'Neutral')
+                                                        emoji = sentiment_value.get('emoji', '😐')
+                                                        emotion = sentiment_value.get('original_emotion', 'neutral')
+                                                        confidence = sentiment_value.get('confidence', confidence)
+                                                    else:
+                                                        category = 'Neutral' if isinstance(sentiment_value, str) else 'Neutral'
+                                                        emoji = '😐'
+                                                        emotion = 'neutral'
+                                                    
+                                                    label = f"Speech {category}"
+                                                    socketio.emit('audio_label', {
+                                                        'label': label,
+                                                        'accuracy': str(confidence),
+                                                        'db': str(db),
+                                                        'emoji': emoji,
+                                                        'transcription': transcription,
+                                                        'emotion': emotion,
+                                                        'sentiment_score': str(confidence)
+                                                    })
+                                                    print(f"EMITTING SPEECH WITH BASIC SENTIMENT: {label}")
+                                                else:
+                                                    socketio.emit('audio_label', {
+                                                        'label': 'Speech',
+                                                        'accuracy': '0.6',
+                                                        'db': str(db)
+                                                    })
+                                                    print("EMITTING BASIC SPEECH DETECTION (no sentiment)")
+                                                # Cleanup memory
+                                                cleanup_memory()
+                                                return
+                                        # Normal sound emission (non-speech or sentiment analysis failed)
+                                        socketio.emit('audio_label', {
+                                            'label': human_label,
+                                            'accuracy': str(pred_max_val),
+                                            'db': str(db)
+                                        })
+                                        # Cleanup memory
+                                        cleanup_memory()
+                                        break
                         else:
                             print(f"No prediction above threshold: {pred_max_val:.4f}")
                             socketio.emit('audio_label', {
@@ -939,21 +1015,59 @@ def handle_audio(data):
                             sentiment_result = process_speech_with_sentiment(np_wav)
                             
                             if sentiment_result:
-                                # Emit with sentiment information - fixed to match actual structure
-                                label = f"Speech {sentiment_result['sentiment']['category']}"
-                                socketio.emit('audio_label', {
-                                    'label': label,
-                                    'accuracy': str(sentiment_result['sentiment']['confidence']),
-                                    'db': str(db),
-                                    'emoji': sentiment_result['sentiment']['emoji'],
-                                    'transcription': sentiment_result['text'],
-                                    'emotion': sentiment_result['sentiment']['original_emotion'],
-                                    'sentiment_score': str(sentiment_result['sentiment']['confidence'])
-                                })
-                                print(f"EMITTING SPEECH WITH SENTIMENT: {label} with emoji {sentiment_result['sentiment']['emoji']}")
-                                # Run memory cleanup after prediction
-                                cleanup_memory()
-                                return
+                                # Check if sentiment_result has the expected structure
+                                if isinstance(sentiment_result, dict) and 'sentiment' in sentiment_result and isinstance(sentiment_result['sentiment'], dict) and 'category' in sentiment_result['sentiment']:
+                                    # Emit with sentiment information - fixed to match actual structure
+                                    label = f"Speech {sentiment_result['sentiment']['category']}"
+                                    socketio.emit('audio_label', {
+                                        'label': label,
+                                        'accuracy': str(sentiment_result['sentiment']['confidence']),
+                                        'db': str(db),
+                                        'emoji': sentiment_result['sentiment']['emoji'],
+                                        'transcription': sentiment_result['text'],
+                                        'emotion': sentiment_result['sentiment']['original_emotion'],
+                                        'sentiment_score': str(sentiment_result['sentiment']['confidence'])
+                                    })
+                                    print(f"EMITTING SPEECH WITH SENTIMENT: {label} with emoji {sentiment_result['sentiment']['emoji']}")
+                                else:
+                                    # Handle the case where sentiment_result doesn't have the expected structure
+                                    label = "Speech"
+                                    if isinstance(sentiment_result, dict):
+                                        transcription = sentiment_result.get('transcription', sentiment_result.get('text', ''))
+                                        sentiment_value = sentiment_result.get('sentiment', 'neutral')
+                                        confidence = sentiment_result.get('confidence', 0.5)
+                                        
+                                        if isinstance(sentiment_value, dict):
+                                            category = sentiment_value.get('category', 'Neutral')
+                                            emoji = sentiment_value.get('emoji', '😐')
+                                            emotion = sentiment_value.get('original_emotion', 'neutral')
+                                            confidence = sentiment_value.get('confidence', confidence)
+                                        else:
+                                            category = 'Neutral' if isinstance(sentiment_value, str) else 'Neutral'
+                                            emoji = '😐'
+                                            emotion = 'neutral'
+                                        
+                                        label = f"Speech {category}"
+                                        socketio.emit('audio_label', {
+                                            'label': label,
+                                            'accuracy': str(confidence),
+                                            'db': str(db),
+                                            'emoji': emoji,
+                                            'transcription': transcription,
+                                            'emotion': emotion,
+                                            'sentiment_score': str(confidence)
+                                        })
+                                        print(f"EMITTING SPEECH WITH BASIC SENTIMENT: {label}")
+                                    else:
+                                        socketio.emit('audio_label', {
+                                            'label': 'Speech',
+                                            'accuracy': '0.6',
+                                            'db': str(db)
+                                        })
+                                        print("EMITTING BASIC SPEECH DETECTION (no sentiment)")
+                                    # Cleanup memory
+                                    cleanup_memory()
+                                    return
                         
                         # Emit the prediction if confidence is above threshold or it's a finger snap
                         if top_confidence > PREDICTION_THRES or (top_label == "finger-snap" and top_confidence > FINGER_SNAP_THRES):
@@ -1119,18 +1233,56 @@ def process_with_tensorflow_model(np_wav, db):
                                 sentiment_result = process_speech_with_sentiment(np_wav)
                                 
                                 if sentiment_result:
-                                    # Emit with sentiment information - fixed to match actual structure
-                                    label = f"Speech {sentiment_result['sentiment']['category']}"
-                                    socketio.emit('audio_label', {
-                                        'label': label,
-                                        'accuracy': str(sentiment_result['sentiment']['confidence']),
-                                        'db': str(db),
-                                        'emoji': sentiment_result['sentiment']['emoji'],
-                                        'transcription': sentiment_result['text'],
-                                        'emotion': sentiment_result['sentiment']['original_emotion'],
-                                        'sentiment_score': str(sentiment_result['sentiment']['confidence'])
-                                    })
-                                    print(f"EMITTING SPEECH WITH SENTIMENT: {label} with emoji {sentiment_result['sentiment']['emoji']}")
+                                    # Check if sentiment_result has the expected structure
+                                    if isinstance(sentiment_result, dict) and 'sentiment' in sentiment_result and isinstance(sentiment_result['sentiment'], dict) and 'category' in sentiment_result['sentiment']:
+                                        # Emit with sentiment information - fixed to match actual structure
+                                        label = f"Speech {sentiment_result['sentiment']['category']}"
+                                        socketio.emit('audio_label', {
+                                            'label': label,
+                                            'accuracy': str(sentiment_result['sentiment']['confidence']),
+                                            'db': str(db),
+                                            'emoji': sentiment_result['sentiment']['emoji'],
+                                            'transcription': sentiment_result['text'],
+                                            'emotion': sentiment_result['sentiment']['original_emotion'],
+                                            'sentiment_score': str(sentiment_result['sentiment']['confidence'])
+                                        })
+                                        print(f"EMITTING SPEECH WITH SENTIMENT: {label} with emoji {sentiment_result['sentiment']['emoji']}")
+                                    else:
+                                        # Handle the case where sentiment_result doesn't have the expected structure
+                                        label = "Speech"
+                                        if isinstance(sentiment_result, dict):
+                                            transcription = sentiment_result.get('transcription', sentiment_result.get('text', ''))
+                                            sentiment_value = sentiment_result.get('sentiment', 'neutral')
+                                            confidence = sentiment_result.get('confidence', 0.5)
+                                            
+                                            if isinstance(sentiment_value, dict):
+                                                category = sentiment_value.get('category', 'Neutral')
+                                                emoji = sentiment_value.get('emoji', '😐')
+                                                emotion = sentiment_value.get('original_emotion', 'neutral')
+                                                confidence = sentiment_value.get('confidence', confidence)
+                                            else:
+                                                category = 'Neutral' if isinstance(sentiment_value, str) else 'Neutral'
+                                                emoji = '😐'
+                                                emotion = 'neutral'
+                                            
+                                            label = f"Speech {category}"
+                                            socketio.emit('audio_label', {
+                                                'label': label,
+                                                'accuracy': str(confidence),
+                                                'db': str(db),
+                                                'emoji': emoji,
+                                                'transcription': transcription,
+                                                'emotion': emotion,
+                                                'sentiment_score': str(confidence)
+                                            })
+                                            print(f"EMITTING SPEECH WITH BASIC SENTIMENT: {label}")
+                                        else:
+                                            socketio.emit('audio_label', {
+                                                'label': 'Speech',
+                                                'accuracy': '0.6',
+                                                'db': str(db)
+                                            })
+                                            print("EMITTING BASIC SPEECH DETECTION (no sentiment)")
                                     # Cleanup memory
                                     cleanup_memory()
                                     return
@@ -1425,33 +1577,50 @@ def aggregate_predictions(new_prediction, label_list, is_speech=False):
         
         # If we have multiple predictions, average them
         if len(predictions_list) > 1:
-            # Average the predictions
-            aggregated = np.zeros_like(new_prediction)
+            # Get the shape of the first prediction to determine the expected size
+            expected_shape = predictions_list[0].shape
+            valid_predictions = []
+            
+            # Filter predictions with matching shapes
             for pred in predictions_list:
-                aggregated += pred
-            aggregated /= len(predictions_list)
+                if pred.shape == expected_shape:
+                    valid_predictions.append(pred)
+                else:
+                    logger.warning(f"Skipping prediction with incompatible shape: {pred.shape} (expected {expected_shape})")
             
-            # Debug the aggregation
-            logger.info(f"Aggregating {len(predictions_list)} predictions {'(speech)' if is_speech else ''}")
-            
-            # Compare original vs aggregated for top predictions
-            orig_top_idx = np.argmax(new_prediction)
-            agg_top_idx = np.argmax(aggregated)
-            
-            if orig_top_idx != agg_top_idx:
-                # The top prediction changed after aggregation
-                orig_label = label_list[orig_top_idx] if orig_top_idx < len(label_list) else "unknown"
-                agg_label = label_list[agg_top_idx] if agg_top_idx < len(label_list) else "unknown"
-                logger.info(f"Aggregation changed top prediction: {orig_label} ({new_prediction[orig_top_idx]:.4f}) -> {agg_label} ({aggregated[agg_top_idx]:.4f})")
+            # Proceed only if we have valid predictions with matching shapes
+            if valid_predictions:
+                # Average the predictions with matching shapes
+                aggregated = np.zeros_like(valid_predictions[0])
+                for pred in valid_predictions:
+                    aggregated += pred
+                aggregated /= len(valid_predictions)
+                
+                # Debug the aggregation
+                logger.info(f"Aggregating {len(valid_predictions)} predictions {'(speech)' if is_speech else ''}")
             else:
-                # Same top prediction, but confidence may have changed
-                label = label_list[orig_top_idx] if orig_top_idx < len(label_list) else "unknown"
-                logger.info(f"Aggregation kept same top prediction: {label}, confidence: {new_prediction[orig_top_idx]:.4f} -> {aggregated[orig_top_idx]:.4f}")
-            
-            return aggregated
+                # If no matching predictions, just use the most recent one
+                logger.warning("No predictions with matching shapes, using most recent prediction")
+                aggregated = predictions_list[-1]
         else:
             # Just return the single prediction if we don't have history yet
-            return new_prediction
+            aggregated = new_prediction
+        
+        # Compare original vs aggregated for top predictions
+        orig_top_idx = np.argmax(new_prediction)
+        agg_top_idx = np.argmax(aggregated)
+        
+        if orig_top_idx != agg_top_idx:
+            # The top prediction changed after aggregation
+            orig_label = label_list[orig_top_idx] if orig_top_idx < len(label_list) else "unknown"
+            agg_label = label_list[agg_top_idx] if agg_top_idx < len(label_list) else "unknown"
+            logger.info(f"Aggregation changed top prediction: {orig_label} ({new_prediction[orig_top_idx]:.4f}) -> {agg_label} ({aggregated[agg_top_idx]:.4f})")
+        else:
+            # Same top prediction, but confidence may have changed
+            label = label_list[orig_top_idx] if orig_top_idx < len(label_list) else "unknown"
+            logger.info(f"Aggregation kept same top prediction: {label}, confidence: {new_prediction[orig_top_idx]:.4f} -> {aggregated[orig_top_idx]:.4f}")
+        
+        return aggregated
 
 if __name__ == '__main__':
     # Parse command-line arguments for port configuration
