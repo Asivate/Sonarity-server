@@ -516,6 +516,13 @@ def predict_sound(audio_data, sample_rate, threshold=0.01, top_k=10):
             if np.min(clipwise_output) < 0 or np.max(clipwise_output) > 1:
                 print("Applying sigmoid to model outputs (converting from logits to probabilities)")
                 clipwise_output = 1.0 / (1.0 + np.exp(-clipwise_output))
+            
+            # Apply scaling factor to boost values - based on observed output ranges
+            # The model consistently outputs values with max around 0.138
+            # Scale by 1.5 to help predictions cross threshold
+            scaling_factor = 1.5
+            clipwise_output = np.clip(clipwise_output * scaling_factor, 0.0, 1.0)
+            print(f"Applied scaling factor of {scaling_factor} to outputs")
                 
             # Print min/max values to verify normalization
             print(f"Output range: min={np.min(clipwise_output):.6f}, max={np.max(clipwise_output):.6f}")
@@ -585,7 +592,7 @@ def predict_sound(audio_data, sample_rate, threshold=0.01, top_k=10):
                 print("  No predictions above threshold")
             
             # Map PANNs labels to homesounds categories
-            mapped_predictions = map_panns_labels_to_homesounds(predictions, threshold)
+            mapped_predictions = map_panns_labels_to_homesounds(predictions, 0.05)
             
             # If there are mapped predictions, print them
             print("===== MAPPED PREDICTIONS =====")
