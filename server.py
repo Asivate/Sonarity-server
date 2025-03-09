@@ -527,7 +527,7 @@ def handle_source(json_data):
                         # Debug the aggregated predictions
                         print("===== AGGREGATED AST MODEL PREDICTIONS =====")
                         for pred in ast_predictions["top_predictions"][:5]:  # Show top 5 for brevity
-                            print(f"  {pred['label']}: {pred['confidence']:.6f}")
+                        print(f"  {pred['label']}: {pred['confidence']:.6f}")
                     
                     # Special check for finger snapping
                     finger_snap_detected = False
