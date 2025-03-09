@@ -288,7 +288,7 @@ def load_models():
             
             # Initialize with a dummy prediction to avoid lag on first real prediction
             print("Initializing TensorFlow model with a dummy prediction...")
-            dummy_input = np.zeros((1, 32, 64, 1))
+            dummy_input = np.zeros((1, 96, 64, 1))
             tf_model.predict(dummy_input)
             print("Model prediction function initialized successfully")
             

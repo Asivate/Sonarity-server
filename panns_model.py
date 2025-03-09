@@ -359,9 +359,9 @@ def predict_sound(audio_data, sample_rate, threshold=0.05, top_k=5):
             
             # In panns-inference 0.1.1, AudioTagging.inference() expects:
             # 1. audio_path OR 
-            # 2. (audio, sample_rate) tuple
-            # We'll use the second approach
-            clipwise_output = PANNS_MODEL.inference(audio=audio_data, sample_rate=32000)
+            # 2. audio data directly, not (audio, sample_rate) tuple
+            # We'll pass just the audio data
+            clipwise_output = PANNS_MODEL.inference(audio_data)
             
             # Convert predictions to list of dictionaries
             predictions = []
