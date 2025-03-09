@@ -527,7 +527,7 @@ def handle_source(json_data):
                         # Debug the aggregated predictions
                         print("===== AGGREGATED AST MODEL PREDICTIONS =====")
                         for pred in ast_predictions["top_predictions"][:5]:  # Show top 5 for brevity
-                            print(f"  {pred['label']}: {pred['confidence']:.6f}")
+                        print(f"  {pred['label']}: {pred['confidence']:.6f}")
                     
                     # Special check for finger snapping
                     finger_snap_detected = False
@@ -917,47 +917,39 @@ def handle_audio(data):
                 
                 # Debug all raw predictions from PANNs model
                 print("===== PANNS MODEL PREDICTIONS =====")
-                for pred in panns_predictions["top_predictions"][:5]:  # Show top 5 for brevity
-                    print(f"  {pred['label']}: {pred['confidence']:.6f}")
+                if "top_predictions" in panns_predictions and panns_predictions["top_predictions"]:
+                    for pred in panns_predictions["top_predictions"][:5]:  # Show top 5 for brevity
+                        print(f"  {pred['label']}: {pred['confidence']:.6f}")
+                else:
+                    print("  No predictions above threshold")
                 
                 # Get the top prediction
-                if panns_predictions["top_predictions"]:
-                    top_pred = panns_predictions["top_predictions"][0]
-                    top_label = top_pred["label"]
-                    top_confidence = top_pred["confidence"]
+                mapped_predictions = panns_predictions.get("mapped_predictions", [])
+                
+                if mapped_predictions:
+                    top_mapped_prediction = mapped_predictions[0]
+                    top_label = top_mapped_prediction["label"]
                     
-                    # Check for mapped predictions (to homesounds categories)
-                    if panns_predictions["mapped_predictions"]:
-                        mapped_pred = panns_predictions["mapped_predictions"][0]
-                        label = mapped_pred["label"]
-                        
-                        # Use the mapped label for emission
-                        socketio.emit('audio_label', {
-                            'label': label.capitalize(),
-                            'accuracy': str(mapped_pred["confidence"]),
-                            'db': str(db)
-                        })
-                        print(f"EMITTING PANNS PREDICTION: {label.capitalize()} ({mapped_pred['confidence']:.6f})")
-                    else:
-                        # No mapped predictions found, emit original label
-                        socketio.emit('audio_label', {
-                            'label': f"Unrecognized Sound",
-                            'accuracy': '0.0',
-                            'db': str(db)
-                        })
-                        print(f"Emitting Unrecognized Sound (db: {db})")
+                    # Emit the prediction to the client
+                    emit('sound_prediction', {
+                        'label': top_label,
+                        'confidence': float(top_mapped_prediction["confidence"]),
+                        'db': db
+                    })
+                    
+                    # Print the top prediction
+                    print(f"Emitting {top_label} (db: {db})")
+                    
+                    # Add to aggregation
+                    aggregate_predictions(raw_predictions, label_list=None)
                 else:
-                    # No predictions above threshold
-                    socketio.emit('audio_label', {
-                        'label': f"Unrecognized Sound",
-                        'accuracy': '0.0',
-                        'db': str(db)
+                    # Emit "Unrecognized Sound" if no mapped predictions
+                    emit('sound_prediction', {
+                        'label': "Unrecognized Sound",
+                        'confidence': 0.0,
+                        'db': db
                     })
                     print(f"Emitting Unrecognized Sound (db: {db})")
-                
-                # Run memory cleanup after prediction
-                cleanup_memory()
-                return
                 
             except Exception as e:
                 print(f"Error processing audio with PANNs model: {str(e)}")

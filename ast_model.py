@@ -419,7 +419,7 @@ def predict_sound(audio_data, sample_rate, model, feature_extractor, threshold=0
             inputs = preprocess_audio_for_ast(audio_data, sample_rate, feature_extractor)
             
             # Get the model's device
-            device = next(model.parameters()).device
+        device = next(model.parameters()).device
             
             # Ensure all tensors are float32 and on the correct device
             if isinstance(inputs, dict):
