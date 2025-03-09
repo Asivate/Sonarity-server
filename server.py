@@ -252,7 +252,6 @@ def load_models():
             model_name = "MIT/ast-finetuned-audioset-10-10-0.4593"
             models["ast"], models["feature_extractor"] = ast_model.load_ast_model(
                 model_name=model_name,
-                torch_dtype=torch.float32,
                 **ast_kwargs
             )
             
@@ -371,7 +370,6 @@ try:
         # Load the AST model with optimizations
         models["ast"], models["feature_extractor"] = ast_model.load_ast_model(
             model_name=ast_model_name,
-            torch_dtype=torch.float32,  # Explicitly specify the data type
             **ast_kwargs
         )
         # Initialize class labels for aggregation
