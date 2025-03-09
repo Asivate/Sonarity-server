@@ -63,10 +63,17 @@ def main():
     # Get sound recognition model choice
     model_choice = get_choice(
         "Which sound recognition model would you like to use?",
-        ["TensorFlow (default, best for general sound recognition)", 
-         "AST (Audio Spectrogram Transformer, better for some specific sounds)"]
+        ["TensorFlow (default, best for general sound recognition)",
+         "AST (Audio Spectrogram Transformer, better for some specific sounds)",
+         "PANNs (Pretrained Audio Neural Networks, excellent sound discrimination)"]
     )
-    settings["Sound Recognition Model"] = "TensorFlow" if model_choice == 1 else "AST"
+    
+    if model_choice == 1:
+        settings["Sound Recognition Model"] = "TensorFlow"
+    elif model_choice == 2:
+        settings["Sound Recognition Model"] = "AST"
+    else:
+        settings["Sound Recognition Model"] = "PANNs"
     
     # Get speech recognition system choice
     speech_choice = get_choice(
@@ -83,14 +90,22 @@ def main():
     # Build the command to start the server
     cmd = ["python3" if platform.system() != "Windows" else "python", "server.py"]
     
-    # For the AST model, we use an environment variable instead of a command line flag
-    # since the server.py doesn't have an --use-ast command line option
+    # For the AST and PANNs models, we use environment variables since the server.py 
+    # doesn't have command line options for these
     env = os.environ.copy()
+    
+    # First, reset all model selection variables
+    env["USE_AST_MODEL"] = "0"
+    env["USE_PANNS_MODEL"] = "0"
+    
+    # Then set the chosen model's variable
     if settings["Sound Recognition Model"] == "AST":
         env["USE_AST_MODEL"] = "1"
         print("Using AST model (via environment variable)")
+    elif settings["Sound Recognition Model"] == "PANNs":
+        env["USE_PANNS_MODEL"] = "1"
+        print("Using PANNs model (via environment variable)")
     else:
-        env["USE_AST_MODEL"] = "0"  # Explicitly disable AST model when TensorFlow is selected
         print("Using TensorFlow model (via environment variable)")
     
     # Add speech recognition flag if Google is selected

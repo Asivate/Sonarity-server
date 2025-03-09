@@ -14,7 +14,7 @@ A Flask-based server application for audio analysis and recognition, designed to
 ### Interactive Startup
 
 The server now includes an interactive startup option that lets you choose:
-- Which sound recognition model to use (TensorFlow or AST)
+- Which sound recognition model to use (TensorFlow, AST, or PANNs)
 - Which speech recognition system to use (Whisper or Google Cloud)
 
 The server will always use port 8080 by default.
@@ -32,10 +32,11 @@ python3 interactive_start.py
 
 ### Sound Recognition Models
 
-The server supports two sound recognition models:
+The server supports three sound recognition models:
 
 1. **TensorFlow Model** (Default): The traditional model used for general sound recognition
 2. **AST (Audio Spectrogram Transformer)**: A newer model that may perform better for some specific sounds
+3. **PANNs (Pretrained Audio Neural Networks)**: High-performance sound recognition using models pre-trained on AudioSet
 
 #### Using the AST Model
 
@@ -71,6 +72,32 @@ To use the AST model:
    python toggle_ast.py  # Toggle the current setting
    ```
    The toggle script will update the environment variable and offer to restart the server with the new settings.
+
+#### Using the PANNs Model
+
+PANNs (Pretrained Audio Neural Networks) provides excellent sound recognition capabilities with models trained on AudioSet.
+
+To use the PANNs model:
+
+1. Set the `USE_PANNS_MODEL` environment variable to `1`:
+   ```bash
+   # On Linux
+   export USE_PANNS_MODEL=1
+   python3 server.py
+   
+   # On Windows PowerShell
+   $env:USE_PANNS_MODEL=1
+   python server.py
+   ```
+
+2. Or use the interactive startup script which will set this for you:
+   ```bash
+   ./start_interactive.sh
+   ```
+
+3. First-time usage will automatically download the model weights (approximately 85MB)
+
+**Note**: When enabling PANNs, make sure both AST and TensorFlow models are disabled. The interactive startup script handles this automatically.
 
 ### Speech Recognition Options
 
@@ -221,3 +248,18 @@ The speech recognition has been improved:
 - Uses longer minimum audio duration (1.5 seconds instead of 0.5)
 - Google Speech-to-Text now uses the "video" model which handles shorter utterances better
 - Added speech adaptation for common phrases
+
+3. Or use the toggle script to switch between models:
+   ```bash
+   # On Linux/macOS
+   python3 toggle_panns.py on    # Enable PANNs model
+   python3 toggle_panns.py off   # Disable PANNs model
+
+   # On Windows
+   python toggle_panns.py on     # Enable PANNs model
+   python toggle_panns.py off    # Disable PANNs model
+
+   # Without arguments it will toggle between enabled/disabled
+   python toggle_panns.py        # Toggle the current setting
+   ```
+   The toggle script will update the environment variable and offer to restart the server with the new settings.
