@@ -272,15 +272,31 @@ def load_panns_model(model_type=DEFAULT_MODEL_TYPE):
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
         print(f"Using device: {device}")
         
-        # Initialize model
-        at = AudioTagging(checkpoint_path=None, device=device)
+        # Set up data directory
+        home_dir = os.path.expanduser("~")
+        panns_data_dir = os.path.join(home_dir, "panns_data")
+        os.makedirs(panns_data_dir, exist_ok=True)
+        
+        # Get the CNN14 model checkpoint path
+        checkpoint_path = os.path.join(panns_data_dir, "Cnn14_mAP=0.431.pth")
+        print(f"Checkpoint path: {checkpoint_path}")
+        
+        # Check if the model file exists, download if it doesn't
+        if not os.path.exists(checkpoint_path):
+            print("Downloading PANNs model checkpoint...")
+            model_url = "https://zenodo.org/record/3987831/files/Cnn14_mAP%3D0.431.pth?download=1"
+            wget.download(model_url, checkpoint_path)
+            print(f"\nDownloaded checkpoint to {checkpoint_path}")
+        
+        # Initialize model with the proper arguments for v0.1.1
+        at = AudioTagging(checkpoint_path=checkpoint_path, device=device)
         PANNS_MODEL = at
         PANNS_MODEL_TYPE = model_type
         
         # Test model with a silent audio sample
-        silent_audio = np.zeros((1, 16000), dtype=np.float32)  # 1 second of silence
+        silent_audio = np.zeros((1, 32000), dtype=np.float32)  # 1 second of silence with batch dimension
         with torch.no_grad():
-            _ = at.inference(silent_audio)
+            _, _ = at.inference(silent_audio)
         
         print(f"PANNs model loaded successfully: {model_type}")
         return at, True
@@ -357,11 +373,15 @@ def predict_sound(audio_data, sample_rate, threshold=0.05, top_k=5):
             # Run inference on the audio data
             print("Running PANNs inference...")
             
-            # In panns-inference 0.1.1, AudioTagging.inference() expects:
-            # 1. audio_path OR 
-            # 2. audio data directly, not (audio, sample_rate) tuple
-            # We'll pass just the audio data
-            clipwise_output = PANNS_MODEL.inference(audio_data)
+            # IMPORTANT FIX: Add batch dimension to audio data
+            # The model expects input in shape (batch_size, segment_samples)
+            # In our case, batch_size=1 since we're processing one audio clip at a time
+            if len(audio_data.shape) == 1:
+                audio_data = audio_data[np.newaxis, :]  # Add batch dimension: (samples,) -> (1, samples)
+            
+            # In panns-inference 0.1.1, AudioTagging.inference() returns (clipwise_output, embedding)
+            # but we only need clipwise_output for predictions
+            clipwise_output, _ = PANNS_MODEL.inference(audio_data)
             
             # Convert predictions to list of dictionaries
             predictions = []
@@ -432,7 +452,7 @@ def initialize():
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
         print(f"Using device: {device}")
         
-        # Set model type - Always use the 16kHz variant
+        # Set model type - Always use CNN14 for the regular CNN14 model
         PANNS_MODEL_TYPE = "CNN14"
         
         # Set up data directory
@@ -440,13 +460,26 @@ def initialize():
         panns_data_dir = os.path.join(home_dir, "panns_data")
         os.makedirs(panns_data_dir, exist_ok=True)
         
-        # In version 0.1.1, AudioTagging doesn't accept model_type directly
-        # Instead we need to create an AudioTagging instance without parameters
-        PANNS_MODEL = AudioTagging()
+        # Get the CNN14 model checkpoint path
+        checkpoint_path = os.path.join(panns_data_dir, "Cnn14_mAP=0.431.pth")
+        print(f"Checkpoint path: {checkpoint_path}")
         
-        # Move the model to the correct device
-        if device == 'cuda' and torch.cuda.is_available():
-            PANNS_MODEL.cuda()
+        # Check if the model file exists, download if it doesn't
+        if not os.path.exists(checkpoint_path):
+            print("Downloading PANNs model checkpoint...")
+            model_url = "https://zenodo.org/record/3987831/files/Cnn14_mAP%3D0.431.pth?download=1"
+            wget.download(model_url, checkpoint_path)
+            print(f"\nDownloaded checkpoint to {checkpoint_path}")
+        
+        # In version 0.1.1, AudioTagging expects the checkpoint_path and device
+        # Create an AudioTagging instance with proper parameters
+        PANNS_MODEL = AudioTagging(checkpoint_path=checkpoint_path, device=device)
+        
+        # Test inference with a dummy input
+        print("Testing PANNs inference with dummy input...")
+        dummy_audio = np.zeros((1, 32000), dtype=np.float32)  # 1 second of silence with batch dimension
+        with torch.no_grad():
+            _, _ = PANNS_MODEL.inference(dummy_audio)
         
         print(f"PANNs model loaded successfully: {PANNS_MODEL_TYPE}")
         MODEL_INITIALIZED = True
