@@ -118,13 +118,12 @@ class GoogleSpeechToText:
             self.client = speech.SpeechClient()
             logger.info("Google Cloud Speech-to-Text client initialized successfully")
             
-            # Configure default recognition settings
+            # Create recognition config
             self.config = speech.RecognitionConfig(
                 encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
                 sample_rate_hertz=16000,
                 language_code="en-US",
-                # Use video model which is better for shorter utterances
-                model="video",
+                model="command_and_search",  # Better for short phrases than "video"
                 use_enhanced=True,
                 profanity_filter=False,
                 enable_automatic_punctuation=True,
@@ -132,8 +131,15 @@ class GoogleSpeechToText:
                 max_alternatives=3,
                 # Enable speech adaptation to improve recognition of specific contexts
                 speech_contexts=[speech.SpeechContext(
-                    phrases=["okay", "not okay", "I am", "help", "emergency", "alert"],
-                    boost=15.0
+                    phrases=[
+                        "okay", "not okay", "I am", "help", "emergency", "alert",
+                        "I am tired", "so tired", "feeling tired", "I'm tired",
+                        "I am so tired", "I'm so tired", "I am very tired",
+                        "happy", "sad", "angry", "confused", "scared", "tired", "sleepy",
+                        "good", "bad", "fine", "great", "terrible", "awful",
+                        "I feel", "I'm feeling", "I am feeling"
+                    ],
+                    boost=20.0  # Increased boost from 15.0 to 20.0
                 )],
                 # Enable word-level confidence
                 enable_word_confidence=True,
@@ -212,14 +218,21 @@ class GoogleSpeechToText:
                     encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
                     sample_rate_hertz=sample_rate,
                     language_code="en-US",
-                    model="video",
+                    model="command_and_search",  # Better for short phrases than "video"
                     use_enhanced=True,
                     profanity_filter=False,
                     enable_automatic_punctuation=True,
                     max_alternatives=3,
                     speech_contexts=[speech.SpeechContext(
-                        phrases=["okay", "not okay", "I am", "help", "emergency", "alert"],
-                        boost=15.0
+                        phrases=[
+                            "okay", "not okay", "I am", "help", "emergency", "alert",
+                            "I am tired", "so tired", "feeling tired", "I'm tired",
+                            "I am so tired", "I'm so tired", "I am very tired",
+                            "happy", "sad", "angry", "confused", "scared", "tired", "sleepy",
+                            "good", "bad", "fine", "great", "terrible", "awful",
+                            "I feel", "I'm feeling", "I am feeling"
+                        ],
+                        boost=20.0  # Increased boost
                     )],
                     enable_word_confidence=True,
                     enable_word_time_offsets=True

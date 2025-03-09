@@ -5,6 +5,7 @@ import soundfile as sf
 from transformers import AutoFeatureExtractor, AutoModelForAudioClassification
 import warnings
 import time
+import traceback
 
 # Suppress transformers warnings
 warnings.filterwarnings("ignore", category=UserWarning)
@@ -78,12 +79,15 @@ def load_ast_model(model_name="MIT/ast-finetuned-audioset-10-10-0.4593", **kwarg
 
 # Map AST model labels to homesounds labels
 # This mapping is based on semantic similarity between the labels from both systems
-def map_ast_labels_to_homesounds():
+def map_ast_labels_to_homesounds(predictions):
     """
-    Define mappings from AudioSet/AST labels to homesounds labels
+    Map AST model predictions to homesounds labels
     
+    Args:
+        predictions: List of prediction dictionaries from AST model
+        
     Returns:
-        dict: Mapping from AST labels to homesounds labels
+        list: Mapped predictions with homesounds labels
     """
     # Comprehensive mapping from AST/AudioSet labels to homesounds labels
     # These mappings are based on semantic similarity
@@ -270,7 +274,26 @@ def map_ast_labels_to_homesounds():
         "Chime": "notification",
     }
     
-    return ast_to_homesounds
+    # Map predictions to homesounds categories
+    mapped_predictions = []
+    
+    for pred in predictions:
+        # Extract label and confidence
+        ast_label = pred["label"]
+        confidence = pred["confidence"]
+        
+        # Check if this label is mapped
+        if ast_label in ast_to_homesounds:
+            homesound_label = ast_to_homesounds[ast_label]
+            mapped_predictions.append({
+                "original_label": ast_label,
+                "label": homesound_label,
+                "confidence": confidence
+            })
+    
+    # Sort by confidence
+    mapped_predictions = sorted(mapped_predictions, key=lambda x: x["confidence"], reverse=True)
+    return mapped_predictions
 
 def preprocess_audio_for_ast(audio_data, sample_rate, feature_extractor):
     """

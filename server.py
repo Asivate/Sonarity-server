@@ -1281,18 +1281,18 @@ def process_with_tensorflow_model(np_wav, db):
                                                 'db': str(db)
                                             })
                                             print("EMITTING BASIC SPEECH DETECTION (no sentiment)")
-                                    # Cleanup memory
-                                    cleanup_memory()
-                                    return
-                            # Normal sound emission (non-speech or sentiment analysis failed)
-                            socketio.emit('audio_label', {
-                                'label': human_label,
-                                'accuracy': str(pred_max_val),
-                                'db': str(db)
-                            })
-                            # Cleanup memory
-                            cleanup_memory()
-                            break
+                                        # Cleanup memory
+                                        cleanup_memory()
+                                        return
+                                # Normal sound emission (non-speech or sentiment analysis failed)
+                                socketio.emit('audio_label', {
+                                    'label': human_label,
+                                    'accuracy': str(pred_max_val),
+                                    'db': str(db)
+                                })
+                                # Cleanup memory
+                                cleanup_memory()
+                                break
                 else:
                     print(f"No prediction above threshold: {pred_max_val:.4f}")
                     socketio.emit('audio_label', {
@@ -1370,13 +1370,43 @@ def process_speech_with_sentiment(audio_data):
     
     # Calculate the RMS value of the audio to gauge its "loudness"
     rms = np.sqrt(np.mean(np.square(concatenated_audio)))
-    if rms < 0.01:  # If the audio is very quiet, skip transcription
+    if rms < 0.001:  # Reduced threshold from 0.01 to 0.001 to be more sensitive
         logger.info(f"Audio too quiet (RMS: {rms:.4f}), skipping transcription")
         return {
-            "transcription": "",
-            "sentiment": "neutral",
-            "confidence": 0.0
+            "text": "",
+            "sentiment": {
+                "category": "Neutral",
+                "original_emotion": "neutral",
+                "confidence": 0.5,
+                "emoji": "😐"
+            }
         }
+    
+    # Enhance audio signal for better transcription if the volume is low
+    if rms < 0.05:  # If audio is quiet but above the minimum threshold
+        # Apply audio normalization to boost the signal
+        logger.info(f"Boosting audio signal (original RMS: {rms:.4f})")
+        
+        # Method 1: Simple normalization to get RMS to target level
+        target_rms = 0.1  # Target RMS value
+        gain_factor = target_rms / (rms + 1e-10)  # Avoid division by zero
+        enhanced_audio = concatenated_audio * gain_factor
+        
+        # Check that we don't have clipping after amplification
+        if np.max(np.abs(enhanced_audio)) > 0.99:
+            # If clipping would occur, use a different approach
+            logger.info("Using peak normalization to avoid clipping")
+            peak_value = np.max(np.abs(concatenated_audio))
+            if peak_value > 0:
+                gain_factor = 0.95 / peak_value  # Target peak at 95% to avoid distortion
+                enhanced_audio = concatenated_audio * gain_factor
+            else:
+                enhanced_audio = concatenated_audio
+        
+        # Use the enhanced audio for transcription
+        new_rms = np.sqrt(np.mean(np.square(enhanced_audio)))
+        logger.info(f"Audio boosted from RMS {rms:.4f} to {new_rms:.4f}")
+        concatenated_audio = enhanced_audio
     
     logger.info("Transcribing speech to text...")
     
