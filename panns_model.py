@@ -77,147 +77,176 @@ def check_panns_availability():
 
 def map_panns_labels_to_homesounds(predictions: List[Dict], threshold: float = 0.05) -> List[Dict]:
     """
-    Map PANNs labels to homesounds categories
+    Map PANNs model predictions to homesounds categories
     
     Args:
-        predictions (List[Dict]): List of predictions from the PANNs model
-        threshold (float): Confidence threshold for mapping
+        predictions: List of prediction dictionaries from PANNs model
+        threshold: Minimum confidence threshold
         
     Returns:
-        List[Dict]: Mapped predictions with homesounds categories
+        List of mapped predictions with homesounds labels
     """
-    # PANNs predicts AudioSet classes which need to be mapped to homesounds categories
+    # Dictionary mapping AudioSet classes to homesounds categories
+    # This mapping connects the 527 AudioSet classes to our smaller set of homesound categories
     mapping = {
-        # Speech and human sounds
-        "Speech": "speech",
-        "Male speech, man speaking": "speech",
-        "Female speech, woman speaking": "speech",
-        "Child speech, kid speaking": "speech",
-        "Conversation": "speech",
-        "Narration, monologue": "speech",
-        "Babbling": "speech",
-        "Crowd": "speech",
-        "Shout": "speech",
-        "Hubbub, speech noise, speech babble": "speech",
+        # Door related sounds
+        "door": "door",
+        "knock": "door",
+        "tap": "door",
+        "knock": "door",
+        "doorbell": "door",
+        "door": "door",
         
-        # Doorbell related sounds
-        "Doorbell": "doorbell",
-        "Ding-dong": "doorbell",
-        "Buzzer": "doorbell",
-        "Reversing beeps": "doorbell",
-        "Bell": "doorbell",
+        # Water related sounds
+        "water": "water",
+        "splash": "water",
+        "water tap": "water",
+        "sink (filling or washing)": "water",
+        "bathtub (filling or washing)": "water",
+        "flowing water": "water",
         
-        # Knocker sounds
-        "Knock": "knock",
-        "Tapping": "knock",
-        "Tap": "knock",
+        # Alarm related sounds
+        "alarm": "alarm",
+        "alarm clock": "alarm",
+        "siren": "alarm",
+        "buzzer": "alarm",
+        "smoke detector": "alarm",
+        "fire alarm": "alarm",
+        "carbon monoxide detector": "alarm",
+        "civil defense siren": "alarm",
+        "air raid siren": "alarm",
+        "ambulance (siren)": "alarm",
+        "fire engine, fire truck (siren)": "alarm",
+        "police car (siren)": "alarm",
         
-        # Baby crying/baby sounds
-        "Crying, sobbing": "baby",
-        "Baby cry, infant cry": "baby",
-        "Whimper": "baby",
+        # Appliance and home device sounds
+        "microwave oven": "microwave",
+        "microwave": "microwave",
+        "dishwasher": "appliance",
+        "washing machine": "appliance",
+        "kettle": "appliance", 
+        "blender": "appliance",
+        "coffee maker": "appliance",
+        "toaster": "appliance",
+        "refrigerator": "appliance",
+        "air conditioning": "appliance",
+        "vacuum cleaner": "appliance",
         
-        # Alarms and smoke alarms
-        "Alarm": "fire-alarm",
-        "Siren": "fire-alarm",
-        "Fire alarm": "fire-alarm",
-        "Smoke detector, smoke alarm": "fire-alarm",
-        "Carbon monoxide detector, CO detector": "fire-alarm",
-        "Emergency vehicle": "fire-alarm",
+        # Phone related sounds
+        "telephone": "phone",
+        "telephone bell ringing": "phone",
+        "ringtone": "phone",
+        "cell phone": "phone",
+        "telephone dialing": "phone",
         
-        # Sink running water
-        "Water tap, faucet": "sink-water-running",
-        "Sink (filling or washing)": "sink-water-running",
-        "Water": "sink-water-running",
-        "Liquid": "sink-water-running",
+        # Baby sounds
+        "baby cry": "baby",
+        "baby laughter": "baby",
+        "infant cry": "baby",
+        "children shouting": "baby",
         
-        # Dog barking
-        "Bark": "dog-bark",
-        "Howl": "dog-bark",
-        "Dog": "dog-bark",
-        "Canidae, dogs, wolves": "dog-bark",
-        "Yip": "dog-bark",
+        # Speech and person
+        "speech": "speech",
+        "male speech": "speech",
+        "female speech": "speech",
+        "child speech": "speech",
+        "conversation": "speech",
+        "narration": "speech",
         
-        # Phone ring
-        "Telephone": "phone-ring",
-        "Telephone bell ringing": "phone-ring",
-        "Ringtone": "phone-ring",
-        "Cellphone": "phone-ring",
-        "Mobile phone": "phone-ring",
+        # Cat sounds
+        "cat": "cat",
+        "meow": "cat",
+        "purr": "cat",
+        "hiss": "cat",
         
-        # Finger snapping
-        "Finger snapping": "finger-snap",
-        "Snap": "finger-snap",
-        "Click": "finger-snap",
+        # Dog sounds
+        "dog": "dog",
+        "bark": "dog",
+        "howl": "dog",
+        "growling": "dog",
         
-        # Music
-        "Music": "music",
-        "Musical instrument": "music",
-        "Singing": "music",
-        "Guitar": "music",
-        "Piano": "music",
-        "Percussion": "music",
-        "Bass guitar": "music",
-        "Drum": "music",
-        "Synthesizer": "music",
-        
-        # Beeping sounds
-        "Beep, bleep": "beep",
-        "Microwave oven": "beep",
-        "Electronic device": "beep",
-        "Computer": "beep",
-        
-        # Alarms and sirens
-        "Siren": "siren",
-        "Police car (siren)": "siren",
-        "Ambulance (siren)": "siren",
-        "Fire truck, fire engine (siren)": "siren",
-        "Civil defense siren": "siren",
-        "Buzzer": "siren",
-        
-        # Sine Wave (for Fire/Smoke Alarm)
-        "Sine wave": "fire-alarm",
+        # Special handling for finger snaps
+        "finger snapping": "finger_snap",
     }
     
-    # Special handling for finger snapping with lower threshold
-    finger_snap_prediction = None
-    finger_snap_confidence = 0
-    
+    # Store the mapped predictions
     mapped_predictions = []
     
+    # Special handling for finger snapping - use a lower threshold
+    finger_snap_detected = False
+    finger_snap_confidence = 0.0
+    
+    # First pass to check for finger snapping with lower threshold
     for pred in predictions:
-        # Extract label and confidence
-        panns_label = pred["label"]
+        label = pred["label"].lower()
         confidence = pred["confidence"]
         
-        # Special case for finger snapping
-        if "Finger snap" in panns_label or panns_label == "Snap" or panns_label == "Click":
-            if confidence > finger_snap_confidence and confidence > 0.03:  # Lower threshold for finger snap
-                finger_snap_prediction = {
-                    "original_label": panns_label,
-                    "label": "finger-snap",
-                    "confidence": confidence
-                }
+        if "finger snapping" in label or "finger snap" in label:
+            if confidence >= 0.03:  # Lower threshold for finger snaps
+                finger_snap_detected = True
                 finger_snap_confidence = confidence
+                break
+    
+    # Map each prediction to a homesounds category if possible
+    for pred in predictions:
+        # Get original label and confidence
+        original_label = pred["label"]
+        label = original_label.lower()
+        confidence = pred["confidence"]
         
-        # Check if this label is mapped
-        for key in mapping:
-            if key in panns_label:
-                # Only add if confidence is above threshold
-                if confidence >= threshold:
-                    mapped_predictions.append({
-                        "original_label": panns_label,
-                        "label": mapping[key],
-                        "confidence": confidence
-                    })
+        # Skip if below threshold (except for finger snapping)
+        if confidence < threshold and "finger snap" not in label:
+            continue
+            
+        # Try to map to a homesounds category
+        mapped_label = None
+        
+        # Direct mapping
+        for audio_label, home_label in mapping.items():
+            if audio_label.lower() in label:
+                mapped_label = home_label
                 break
                 
-    # Add finger snap if found
-    if finger_snap_prediction is not None:
-        mapped_predictions.append(finger_snap_prediction)
+        # If no mapping was found, try to use a more general category
+        if mapped_label is None:
+            # Generic mappings based on partial matches
+            if any(word in label for word in ["dog", "bark", "howl"]):
+                mapped_label = "dog"
+            elif any(word in label for word in ["cat", "meow", "purr"]):
+                mapped_label = "cat"
+            elif any(word in label for word in ["door", "knock", "bell"]):
+                mapped_label = "door"
+            elif any(word in label for word in ["water", "drip", "sink", "shower"]):
+                mapped_label = "water"
+            elif any(word in label for word in ["alarm", "siren", "alert"]):
+                mapped_label = "alarm"
+            elif any(word in label for word in ["speech", "voice", "talking", "conversation"]):
+                mapped_label = "speech"
+            elif any(word in label for word in ["phone", "telephone", "ringtone", "cell"]):
+                mapped_label = "phone"
+            elif any(word in label for word in ["baby", "cry", "infant"]):
+                mapped_label = "baby"
+            elif "finger snap" in label:
+                mapped_label = "finger_snap"
+        
+        # Add to mapped predictions if a mapping was found
+        if mapped_label:
+            mapped_predictions.append({
+                "original_label": original_label,
+                "label": mapped_label,
+                "confidence": confidence
+            })
     
-    # Sort mapped predictions by confidence
-    mapped_predictions = sorted(mapped_predictions, key=lambda x: x["confidence"], reverse=True)
+    # Special case: Add finger snap if detected with lower threshold but not already included
+    if finger_snap_detected and not any(p["label"] == "finger_snap" for p in mapped_predictions):
+        mapped_predictions.append({
+            "original_label": "Finger snapping",
+            "label": "finger_snap",
+            "confidence": finger_snap_confidence
+        })
+    
+    # Sort by confidence
+    mapped_predictions.sort(key=lambda x: x["confidence"], reverse=True)
     
     return mapped_predictions
 
@@ -327,18 +356,18 @@ def predict_sound(audio_data, sample_rate, threshold=0.05, top_k=5):
         try:
             # Run inference on the audio data
             print("Running PANNs inference...")
-            # For PANNs 0.1.1, no need to add batch dimension, AudioTagging handles it
-            clipwise_output = PANNS_MODEL.inference(audio_data)
             
-            # Convert to numpy array if it's a tensor
-            if isinstance(clipwise_output, torch.Tensor):
-                clipwise_output = clipwise_output.cpu().numpy()
+            # In panns-inference 0.1.1, AudioTagging.inference() expects:
+            # 1. audio_path OR 
+            # 2. (audio, sample_rate) tuple
+            # We'll use the second approach
+            clipwise_output = PANNS_MODEL.inference(audio=audio_data, sample_rate=32000)
             
             # Convert predictions to list of dictionaries
             predictions = []
             
             # Get the class labels
-            class_labels = PANNS_MODEL.labels
+            class_labels = PANNS_MODEL.labels()
             
             # Sort predictions by confidence
             sorted_indices = np.argsort(clipwise_output)[::-1]
@@ -411,12 +440,13 @@ def initialize():
         panns_data_dir = os.path.join(home_dir, "panns_data")
         os.makedirs(panns_data_dir, exist_ok=True)
         
-        # Initialize the Audio Tagging model with the CNN14 architecture
-        PANNS_MODEL = AudioTagging(
-            model_type=PANNS_MODEL_TYPE,
-            checkpoint_path=None,  # Will be downloaded automatically
-            device=device
-        )
+        # In version 0.1.1, AudioTagging doesn't accept model_type directly
+        # Instead we need to create an AudioTagging instance without parameters
+        PANNS_MODEL = AudioTagging()
+        
+        # Move the model to the correct device
+        if device == 'cuda' and torch.cuda.is_available():
+            PANNS_MODEL.cuda()
         
         print(f"PANNs model loaded successfully: {PANNS_MODEL_TYPE}")
         MODEL_INITIALIZED = True
