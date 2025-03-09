@@ -11,6 +11,7 @@ Source: https://github.com/qiuqiangkong/audioset_tagging_cnn
 """
 
 import os
+import sys
 import time
 import traceback
 import numpy as np
@@ -18,14 +19,24 @@ import torch
 import librosa
 from typing import Dict, List, Tuple, Optional, Union
 import logging
+import wget
 
 # Setup logging
 logger = logging.getLogger(__name__)
+
+try:
+    # Import PANNs libraries
+    from panns_inference.inference import AudioTagging
+    from panns_inference.models import Cnn14, Cnn14_16k, Wavegram_Logmel_Cnn14
+except ImportError as e:
+    print(f"PANNs import error: {e}")
+    PANNS_AVAILABLE = False
 
 # Global variables
 USE_PANNS_MODEL = False  # Controls whether PANNs is used as the primary model
 PANNS_MODEL = None  # The PANNs model instance
 PANNS_MODEL_TYPE = None  # The type of PANNs model being used
+MODEL_INITIALIZED = False  # Flag to check if the model is initialized
 
 # Choose from different PANNs variants
 # CNN10 - Lighter, faster model with good performance
@@ -36,17 +47,27 @@ DEFAULT_MODEL_TYPE = "CNN14_16k"  # Default model type
 
 def check_panns_availability():
     """
-    Check if the required packages for PANNs are available
+    Check if the PANNs package is available
     
     Returns:
-        bool: True if all required packages are available, False otherwise
+        bool: True if PANNs is available, False otherwise
     """
+    global PANNS_AVAILABLE
+    
     try:
-        import panns_inference
+        # Try to import PANNs-related packages
+        from panns_inference.inference import AudioTagging
+        from panns_inference.models import Cnn14, Cnn14_16k, Wavegram_Logmel_Cnn14
+        import librosa
+        
+        # If we got here, PANNs is available
+        PANNS_AVAILABLE = True
+        print("PANNs package is available")
         return True
-    except ImportError:
-        logger.warning("panns_inference package not found. PANNs model will not be available.")
-        logger.warning("To install: pip install panns-inference librosa")
+    except ImportError as e:
+        # Failed to import PANNs
+        PANNS_AVAILABLE = False
+        print(f"PANNs package is not available: {e}")
         return False
 
 
@@ -239,133 +260,184 @@ def load_panns_model(model_type=DEFAULT_MODEL_TYPE):
 
 def predict_sound(audio_data, sample_rate, threshold=0.05, top_k=5):
     """
-    Process audio input and return predictions using PANNs
+    Process audio input and return predictions using PANNs model
     
     Args:
-        audio_data (np.ndarray): Audio data as a numpy array
-        sample_rate (int): Sample rate of the audio data
-        threshold (float): Confidence threshold for predictions
-        top_k (int): Number of top predictions to return
+        audio_data: Raw audio data as numpy array
+        sample_rate: Sample rate of the audio data
+        threshold: Minimum confidence threshold for predictions
+        top_k: Number of top predictions to return
         
     Returns:
-        dict: Dictionary with raw and mapped predictions
+        Dictionary containing predictions
     """
     global PANNS_MODEL
     
     try:
-        start_time = time.time()
-        
-        # Ensure the audio data is the right shape and type
-        if len(audio_data.shape) > 1:
-            # If multi-channel, convert to mono by averaging
-            audio_data = np.mean(audio_data, axis=1)
-        
-        # Normalize audio data
-        if np.abs(audio_data).max() > 1.0:
-            audio_data = audio_data / np.abs(audio_data).max()
-        
-        # Force float32 precision for audio data
-        audio_data = audio_data.astype(np.float32)
-        
-        # Calculate RMS and dB for silence detection
-        rms = np.sqrt(np.mean(audio_data**2))
-        db_level = 20 * np.log10(rms) if rms > 0 else -100
-        
+        # Print shape info for debugging
         print(f"Audio data shape: {audio_data.shape}, sample rate: {sample_rate}")
         
-        # Check for silence first (very low volume)
-        if db_level < -65:
-            print(f"Silence detected (db level: {db_level:.2f})")
-            return {
-                "top_predictions": [{"label": "Silence", "confidence": 0.95}],
-                "mapped_predictions": [{"original_label": "Silence", "label": "silence", "confidence": 0.95}],
-                "raw_predictions": None  # No raw predictions for silence
-            }
+        # Check if model is loaded
+        if PANNS_MODEL is None:
+            print("PANNs model not loaded, initializing...")
+            if not initialize():
+                return {"top_predictions": [{"label": "Error", "confidence": 0.0}], "mapped_predictions": []}
+        
+        # Convert to float32 if needed
+        if audio_data.dtype != np.float32:
+            audio_data = audio_data.astype(np.float32)
             
-        # PANNs expects a batch dimension and 32kHz sample rate
-        # Add batch dimension
-        audio_data = audio_data[np.newaxis, :]
+        # If audio is multichannel, convert to mono
+        if len(audio_data.shape) > 1 and audio_data.shape[1] > 1:
+            audio_data = np.mean(audio_data, axis=1)
         
-        # Resample if needed - PANNs models expects 32kHz (or 16kHz for the 16k variant)
-        target_sr = 16000 if PANNS_MODEL_TYPE == "CNN14_16k" else 32000
-        if sample_rate != target_sr:
-            print(f"Resampling from {sample_rate}Hz to {target_sr}Hz")
-            audio_data = librosa.resample(
-                audio_data[0], orig_sr=sample_rate, target_sr=target_sr
-            )[np.newaxis, :]
+        # Normalize audio if not already normalized
+        if np.max(np.abs(audio_data)) > 1.0:
+            audio_data = audio_data / 32768.0  # Normalize 16-bit PCM
+            
+        # Calculate RMS and dB level for silence detection
+        rms = np.sqrt(np.mean(np.square(audio_data)))
+        db_level = 20 * np.log10(rms) if rms > 0 else -100
         
-        # Run inference
-        with torch.no_grad():
+        # Skip processing if audio is too quiet
+        if db_level < -75:
+            print(f"Audio too quiet: {db_level} dB")
+            return {"top_predictions": [{"label": "Silence", "confidence": 0.95}], "mapped_predictions": []}
+        
+        # Resample audio to 32kHz if needed - PANNs expects 32kHz
+        if sample_rate != 32000:
+            print(f"Resampling from {sample_rate}Hz to 32000Hz")
+            # Use scipy's resample function for better resampling quality
+            from scipy import signal
+            target_length = int(audio_data.shape[0] * 32000 / sample_rate)
+            audio_data = signal.resample(audio_data, target_length)
+        
+        # PANNs models expect audio to be a specific minimum length
+        # If audio is too short, pad it with zeros
+        min_required_samples = 32000  # 1 second at 32kHz
+        if len(audio_data) < min_required_samples:
+            padding = min_required_samples - len(audio_data)
+            audio_data = np.pad(audio_data, (0, padding), 'constant')
+            print(f"Padded audio from {len(audio_data) - padding} to {len(audio_data)} samples")
+        
+        # Make prediction with PANNs model
+        try:
+            # Run inference on the audio data
+            print("Running PANNs inference...")
             clipwise_output, _ = PANNS_MODEL.inference(audio_data)
             
-        # Process predictions to get the top results
-        clipwise_output = clipwise_output.cpu().numpy()[0]
-        sorted_indexes = np.argsort(clipwise_output)[::-1]
-        
-        # Create top predictions list
-        top_predictions = []
-        for idx in sorted_indexes[:top_k]:
-            label = PANNS_MODEL.labels[idx]
-            confidence = float(clipwise_output[idx])
+            # Convert predictions to list of dictionaries
+            predictions = []
             
-            # Only include predictions above threshold
-            if confidence >= threshold:
-                top_predictions.append({
-                    "label": label,
-                    "confidence": confidence
-                })
+            # Get the class labels
+            class_labels = PANNS_MODEL.labels
+            
+            # Sort predictions by confidence
+            sorted_indices = np.argsort(clipwise_output)[::-1]
+            
+            # Get top-k predictions above threshold
+            for i in sorted_indices[:top_k]:
+                confidence = float(clipwise_output[i])
+                if confidence >= threshold:
+                    predictions.append({
+                        "label": class_labels[i],
+                        "confidence": confidence
+                    })
+            
+            # Map PANNs labels to homesounds categories
+            mapped_predictions = map_panns_labels_to_homesounds(predictions, threshold)
+            
+            # Return both raw and mapped predictions
+            return {
+                "top_predictions": predictions,
+                "mapped_predictions": mapped_predictions,
+                "raw_predictions": clipwise_output.tolist()
+            }
+            
+        except Exception as e:
+            print(f"Critical error in PANNs prediction: {str(e)}")
+            traceback.print_exc()
+            return {"top_predictions": [{"label": "Error", "confidence": 0.0}], "mapped_predictions": []}
         
-        # Print top predictions
-        print("===== PANNS MODEL RAW PREDICTIONS =====")
-        for i in range(min(5, len(top_predictions))):
-            if i < len(top_predictions):
-                print(f"  {top_predictions[i]['label']}: {top_predictions[i]['confidence']:.6f}")
-        
-        # Map PANNs labels to homesounds categories
-        mapped_predictions = map_panns_labels_to_homesounds(top_predictions, threshold)
-        
-        end_time = time.time()
-        elapsed = end_time - start_time
-        print(f"PANNs prediction completed in {elapsed:.2f} seconds")
-        
-        return {
-            "top_predictions": top_predictions,
-            "mapped_predictions": mapped_predictions,
-            "raw_predictions": clipwise_output
-        }
-    
     except Exception as e:
-        print(f"Critical error in PANNs prediction: {str(e)}")
+        print(f"Error in PANNs predict_sound: {str(e)}")
         traceback.print_exc()
-        return {
-            "top_predictions": [{"label": "Error", "confidence": 0.0}],
-            "mapped_predictions": [],
-            "raw_predictions": None
-        }
+        return {"top_predictions": [{"label": "Error", "confidence": 0.0}], "mapped_predictions": []}
 
 
 def initialize():
     """
-    Initialize the PANNs model and set global variables
+    Initialize the PANNs model for sound recognition
     
     Returns:
-        bool: True if initialization was successful, False otherwise
+        bool: True if model was successfully loaded, False otherwise
     """
-    global USE_PANNS_MODEL
+    global PANNS_MODEL, PANNS_MODEL_TYPE, MODEL_INITIALIZED
     
-    # Check if PANNs is available
-    if not check_panns_availability():
-        USE_PANNS_MODEL = False
-        return False
-    
-    # Load PANNs model
-    model, success = load_panns_model()
-    
-    if success:
-        USE_PANNS_MODEL = True
+    if MODEL_INITIALIZED:
+        print("PANNs model already initialized")
         return True
-    else:
-        USE_PANNS_MODEL = False
+    
+    try:
+        print("Checking PANNs availability...")
+        if not check_panns_availability():
+            print("PANNs package not available - won't use PANNs model")
+            return False
+            
+        print("Loading PANNs model: CNN14_16k")
+        
+        # Determine device
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        print(f"Using device: {device}")
+        
+        # Set model type
+        PANNS_MODEL_TYPE = "CNN14_16k"  # This model works with 16kHz audio
+        
+        # Set up data directory
+        home_dir = os.path.expanduser("~")
+        panns_data_dir = os.path.join(home_dir, "panns_data")
+        os.makedirs(panns_data_dir, exist_ok=True)
+        
+        # Path to save checkpoint
+        checkpoint_path = os.path.join(panns_data_dir, f"Cnn14_mAP=0.431.pth")
+        print(f"Checkpoint path: {checkpoint_path}")
+        
+        # Download model if needed
+        if not os.path.exists(checkpoint_path):
+            checkpoint_url = "https://zenodo.org/record/3987831/files/Cnn14_mAP%3D0.431.pth?download=1"
+            print(f"Downloading PANNs model checkpoint from {checkpoint_url}")
+            wget.download(checkpoint_url, out=checkpoint_path)
+            print("\nDownload complete")
+        
+        # Load model with explicit configuration
+        # The key change: pass window_size parameter
+        PANNS_MODEL = Cnn14_16k(
+            checkpoint_path=checkpoint_path,
+            # The model needs a specific window size to avoid dimension errors
+            # These parameters prevent the "output size too small" error
+            window_size=1024,
+            hop_size=320,
+            mel_bins=64,
+            fmin=50,
+            fmax=14000,
+            classes_num=527
+        )
+        
+        # Move model to device
+        PANNS_MODEL.to(device)
+        
+        # Set model to evaluation mode
+        PANNS_MODEL.eval()
+        
+        print(f"PANNs model loaded successfully: {PANNS_MODEL_TYPE}")
+        MODEL_INITIALIZED = True
+        return True
+        
+    except Exception as e:
+        print(f"Error initializing PANNs model: {e}")
+        traceback.print_exc()
+        PANNS_MODEL = None
+        MODEL_INITIALIZED = False
         return False
 
 
