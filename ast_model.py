@@ -47,8 +47,8 @@ def load_ast_model(model_name="MIT/ast-finetuned-audioset-10-10-0.4593", **kwarg
         # Check for optimization parameters
         attn_implementation = kwargs.get("attn_implementation", None)
         
-        # Force float32 for compatibility
-        print("Setting model precision to float32 for maximum compatibility")
+        # Use standard precision for compatibility
+        print("Using standard precision (float32) for maximum compatibility")
         if "torch_dtype" in kwargs:
             del kwargs["torch_dtype"]  # Remove any torch_dtype setting
         
@@ -61,8 +61,11 @@ def load_ast_model(model_name="MIT/ast-finetuned-audioset-10-10-0.4593", **kwarg
         
         # Explicitly convert any half-precision parameters to float32
         for param in model.parameters():
-            if param.dtype == torch.float16:
+            if param.dtype != torch.float32:
                 param.data = param.data.to(torch.float32)
+        
+        # Set all model parameters to float32 to avoid mixed precision issues
+        model = model.to(torch.float32)
         
         print("Verified all model parameters are using float32 precision")
         
@@ -424,6 +427,7 @@ def predict_sound(audio_data, sample_rate, model, feature_extractor, threshold=0
                     # First check the dtype and device before conversion to avoid unnecessary operations
                     if inputs[key].dtype != torch.float32:
                         try:
+                            print(f"Converting input tensor {key} from {inputs[key].dtype} to float32")
                             inputs[key] = inputs[key].to(dtype=torch.float32)
                         except Exception as e:
                             print(f"Error converting {key} to float32: {str(e)}")
@@ -433,6 +437,7 @@ def predict_sound(audio_data, sample_rate, model, feature_extractor, threshold=0
                     # Move to the model's device if needed
                     if inputs[key].device != device:
                         try:
+                            print(f"Moving input tensor {key} from {inputs[key].device} to {device}")
                             inputs[key] = inputs[key].to(device=device)
                         except Exception as e:
                             print(f"Error moving {key} to device {device}: {str(e)}")
@@ -444,6 +449,12 @@ def predict_sound(audio_data, sample_rate, model, feature_extractor, threshold=0
             # Run inference with no gradient tracking for efficiency
             with torch.no_grad():
                 try:
+                    # Verify model parameters are float32
+                    for name, param in model.named_parameters():
+                        if param.dtype != torch.float32:
+                            print(f"Warning: Parameter {name} has dtype {param.dtype}, converting to float32")
+                            param.data = param.data.to(torch.float32)
+                    
                     # Run the model with the prepared inputs, explicit cast to float32
                     outputs = model(**inputs)
                     logits = outputs.logits.float()  # Ensure logits are float32
@@ -530,40 +541,52 @@ def predict_sound(audio_data, sample_rate, model, feature_extractor, threshold=0
 
 def process_predictions(probs_np, id2label, threshold=0.05, top_k=5):
     """
-    Process raw prediction probabilities into the expected format
+    Process raw model predictions to get top-k predictions with labels
     
     Args:
-        probs_np (np.ndarray): Raw prediction probabilities
-        id2label (dict): Mapping from model indices to labels
+        probs_np (np.ndarray): Raw probabilities from the model
+        id2label (dict): Mapping from prediction indices to label names
         threshold (float): Confidence threshold for predictions
         top_k (int): Number of top predictions to return
-    
+        
     Returns:
-        dict: Dictionary with top and mapped predictions
+        dict: Dictionary with processed predictions
     """
-    # Get indices of top k predictions
+    # Get indices of top-k predictions
     top_indices = np.argsort(probs_np)[::-1][:top_k]
+    
+    # Get corresponding probabilities/confidences
+    top_probs = probs_np[top_indices]
+    
+    # Get corresponding label names
+    top_labels = [id2label[idx] for idx in top_indices]
     
     # Create list of top predictions
     top_predictions = []
-    for idx in top_indices:
-        label = id2label[idx]
-        confidence = float(probs_np[idx])
+    for i in range(len(top_indices)):
+        # Skip predictions with confidence below threshold
+        if top_probs[i] < threshold:
+            continue
+            
         top_predictions.append({
-            "label": label,
-            "confidence": confidence
+            "label": top_labels[i],
+            "confidence": float(top_probs[i])  # Convert from numpy to python float
         })
     
-    # Map AST labels to homesounds labels
+    # Print top predictions for debugging
+    print("===== AST MODEL RAW PREDICTIONS =====")
+    for i in range(min(5, len(top_predictions))):
+        if i < len(top_predictions):
+            print(f"  {top_predictions[i]['label']}: {top_predictions[i]['confidence']:.6f}")
+    
+    # Map AST labels to homesounds categories
     mapped_predictions = map_ast_labels_to_homesounds(top_predictions, threshold)
     
-    # Output the results
-    result = {
+    return {
         "top_predictions": top_predictions,
-        "mapped_predictions": mapped_predictions
+        "mapped_predictions": mapped_predictions,
+        "has_predictions": len(top_predictions) > 0
     }
-    
-    return result
 
 # Make class labels available at module level for aggregation
 class_labels = []

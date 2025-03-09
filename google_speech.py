@@ -15,6 +15,7 @@ from google.cloud import speech
 from threading import Lock
 import traceback
 import re
+from scipy import signal
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -132,14 +133,15 @@ class GoogleSpeechToText:
                 # Enable speech adaptation to improve recognition of specific contexts
                 speech_contexts=[speech.SpeechContext(
                     phrases=[
-                        "okay", "not okay", "I am", "help", "emergency", "alert",
+                        "okay", "not okay", "I am not okay", "I'm not okay", 
+                        "I am", "help", "emergency", "alert",
                         "I am tired", "so tired", "feeling tired", "I'm tired",
                         "I am so tired", "I'm so tired", "I am very tired",
                         "happy", "sad", "angry", "confused", "scared", "tired", "sleepy",
                         "good", "bad", "fine", "great", "terrible", "awful",
                         "I feel", "I'm feeling", "I am feeling"
                     ],
-                    boost=20.0  # Increased boost from 15.0 to 20.0
+                    boost=25.0  # Increased boost for better detection
                 )],
                 # Enable word-level confidence
                 enable_word_confidence=True,
@@ -175,17 +177,37 @@ class GoogleSpeechToText:
         if len(audio_data) == 0:
             return audio_data
             
-        # No need for extensive preprocessing - convert to proper data type and normalize
+        # Convert to proper data type
         processed_audio = audio_data.astype(np.float32)
         
-        # Normalize amplitude (Google prefers normalized audio)
-        if np.max(np.abs(processed_audio)) > 0:
-            processed_audio = processed_audio / np.max(np.abs(processed_audio))
+        # Calculate RMS value to check audio level
+        rms = np.sqrt(np.mean(processed_audio**2))
         
-        # Convert back to int16 for API
-        processed_audio = (processed_audio * 32767).astype(np.int16)
+        # Boost low volume audio for better recognition
+        if rms < 0.05:  # If audio is very quiet
+            # Calculate boost factor (more boost for quieter audio)
+            boost_factor = min(0.1 / rms if rms > 0 else 10, 10)  # Cap at 10x boost
+            processed_audio = processed_audio * boost_factor
+            logger.info(f"Boosted quiet audio by factor of {boost_factor:.2f}")
         
-        return processed_audio
+        # Apply noise reduction if signal is noisy
+        # This is a simple high-pass filter to reduce low-frequency noise
+        if sample_rate > 1000:  # Only apply if we have enough frequency resolution
+            try:
+                # High-pass filter to reduce background noise (cutoff at 80Hz)
+                b, a = signal.butter(4, 80/(sample_rate/2), 'highpass')
+                processed_audio = signal.filtfilt(b, a, processed_audio)
+                logger.info("Applied high-pass filter for noise reduction")
+            except Exception as e:
+                logger.warning(f"Could not apply filter: {str(e)}")
+        
+        # Normalize audio to 16-bit range for LINEAR16 encoding
+        max_val = np.max(np.abs(processed_audio))
+        if max_val > 0:
+            processed_audio = processed_audio / max_val * 32767
+        
+        # Convert to int16 for Google Speech API
+        return processed_audio.astype(np.int16)
 
     def transcribe(self, audio_data, sample_rate=16000):
         """
@@ -225,14 +247,15 @@ class GoogleSpeechToText:
                     max_alternatives=3,
                     speech_contexts=[speech.SpeechContext(
                         phrases=[
-                            "okay", "not okay", "I am", "help", "emergency", "alert",
+                            "okay", "not okay", "I am not okay", "I'm not okay", 
+                            "I am", "help", "emergency", "alert",
                             "I am tired", "so tired", "feeling tired", "I'm tired",
                             "I am so tired", "I'm so tired", "I am very tired",
                             "happy", "sad", "angry", "confused", "scared", "tired", "sleepy",
                             "good", "bad", "fine", "great", "terrible", "awful",
                             "I feel", "I'm feeling", "I am feeling"
                         ],
-                        boost=20.0  # Increased boost
+                        boost=25.0  # Increased boost for better detection
                     )],
                     enable_word_confidence=True,
                     enable_word_time_offsets=True
