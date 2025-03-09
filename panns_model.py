@@ -75,7 +75,7 @@ def check_panns_availability():
         return False
 
 
-def map_panns_labels_to_homesounds(predictions: List[Dict], threshold: float = 0.05) -> List[Dict]:
+def map_panns_labels_to_homesounds(predictions: List[Dict], threshold: float = 0.01) -> List[Dict]:
     """
     Map PANNs model predictions to homesounds categories
     
@@ -96,6 +96,11 @@ def map_panns_labels_to_homesounds(predictions: List[Dict], threshold: float = 0
         "knock": "door",
         "doorbell": "door",
         "door": "door",
+        "slam": "door",
+        "ding-dong": "door",
+        "sliding door": "door",
+        "cupboard open or close": "door",
+        "drawer open or close": "door",
         
         # Water related sounds
         "water": "water",
@@ -104,6 +109,15 @@ def map_panns_labels_to_homesounds(predictions: List[Dict], threshold: float = 0
         "sink (filling or washing)": "water",
         "bathtub (filling or washing)": "water",
         "flowing water": "water",
+        "drip": "water",
+        "pour": "water",
+        "trickle, dribble": "water",
+        "gush": "water",
+        "fill (with liquid)": "water",
+        "spray": "water",
+        "pump (liquid)": "water",
+        "boiling": "water",
+        "toilet flush": "water",
         
         # Alarm related sounds
         "alarm": "alarm",
@@ -118,6 +132,12 @@ def map_panns_labels_to_homesounds(predictions: List[Dict], threshold: float = 0
         "ambulance (siren)": "alarm",
         "fire engine, fire truck (siren)": "alarm",
         "police car (siren)": "alarm",
+        "bell": "alarm",
+        "church bell": "alarm",
+        "jingle bell": "alarm",
+        "bicycle bell": "alarm",
+        "telephone bell ringing": "alarm",
+        "emergency vehicle": "alarm",
         
         # Appliance and home device sounds
         "microwave oven": "microwave",
@@ -131,6 +151,8 @@ def map_panns_labels_to_homesounds(predictions: List[Dict], threshold: float = 0
         "refrigerator": "appliance",
         "air conditioning": "appliance",
         "vacuum cleaner": "appliance",
+        "mechanical fan": "appliance",
+        "hair dryer": "appliance",
         
         # Phone related sounds
         "telephone": "phone",
@@ -138,12 +160,17 @@ def map_panns_labels_to_homesounds(predictions: List[Dict], threshold: float = 0
         "ringtone": "phone",
         "cell phone": "phone",
         "telephone dialing": "phone",
+        "dial tone": "phone",
+        "busy signal": "phone",
         
         # Baby sounds
         "baby cry": "baby",
         "baby laughter": "baby",
         "infant cry": "baby",
         "children shouting": "baby",
+        "baby cry, infant cry": "baby",
+        "whimper": "baby",
+        "crying, sobbing": "baby",
         
         # Speech and person
         "speech": "speech",
@@ -152,21 +179,97 @@ def map_panns_labels_to_homesounds(predictions: List[Dict], threshold: float = 0
         "child speech": "speech",
         "conversation": "speech",
         "narration": "speech",
+        "speech synthesizer": "speech",
+        "male speech, man speaking": "speech",
+        "female speech, woman speaking": "speech",
+        "child speech, kid speaking": "speech",
+        "narration, monologue": "speech",
         
         # Cat sounds
         "cat": "cat",
         "meow": "cat",
         "purr": "cat",
         "hiss": "cat",
+        "domestic animals, pets": "cat",
+        "caterwaul": "cat",
         
         # Dog sounds
         "dog": "dog",
         "bark": "dog",
         "howl": "dog",
         "growling": "dog",
+        "bow-wow": "dog",
+        "yip": "dog",
+        "whimper (dog)": "dog",
+        "domestic animals, pets": "dog",
         
         # Special handling for finger snaps
         "finger snapping": "finger_snap",
+        "finger snap": "finger_snap",
+        "clapping": "finger_snap",
+    }
+    
+    # For fuzzy matching - used for words that appear in labels
+    # This improves matching for partial or variant names
+    fuzzy_mapping = {
+        # Door related terms
+        "door": "door",
+        "knock": "door",
+        "slam": "door",
+        "ding-dong": "door",
+        "cupboard": "door",
+        "drawer": "door",
+        
+        # Water related terms
+        "water": "water",
+        "splash": "water",
+        "sink": "water",
+        "bath": "water",
+        "flow": "water",
+        "drip": "water",
+        "toilet": "water",
+        "liquid": "water",
+        "gush": "water",
+        "pour": "water",
+        
+        # Alarm related terms
+        "alarm": "alarm",
+        "siren": "alarm",
+        "buzzer": "alarm",
+        "detector": "alarm",
+        "bell": "alarm",
+        "emergency": "alarm",
+        
+        # Phone related terms
+        "phone": "phone",
+        "telephone": "phone",
+        "ringtone": "phone",
+        "dial": "phone",
+        
+        # Baby sound terms
+        "baby": "baby",
+        "infant": "baby",
+        "cry": "baby",
+        
+        # Speech related terms
+        "speech": "speech",
+        "voice": "speech",
+        "talk": "speech",
+        "speak": "speech",
+        "conversation": "speech",
+        
+        # Animal sounds
+        "cat": "cat",
+        "meow": "cat",
+        "purr": "cat",
+        "dog": "dog",
+        "bark": "dog",
+        "howl": "dog",
+        
+        # Finger snap
+        "finger": "finger_snap",
+        "snap": "finger_snap",
+        "clap": "finger_snap",
     }
     
     # Store the mapped predictions
@@ -182,20 +285,23 @@ def map_panns_labels_to_homesounds(predictions: List[Dict], threshold: float = 0
         confidence = pred["confidence"]
         
         if "finger snapping" in label or "finger snap" in label:
-            if confidence >= 0.03:  # Lower threshold for finger snaps
+            if confidence >= 0.008:  # Lower threshold for finger snaps
                 finger_snap_detected = True
                 finger_snap_confidence = confidence
                 break
+    
+    # Print a status message for the mapping process
+    print(f"Mapping {len(predictions)} predictions to homesounds categories (threshold: {threshold})")
     
     # Map each prediction to a homesounds category if possible
     for pred in predictions:
         # Get original label and confidence
         original_label = pred["label"]
-        label = original_label.lower()
+        label_lower = original_label.lower()
         confidence = pred["confidence"]
         
         # Skip if below threshold (except for finger snapping)
-        if confidence < threshold and "finger snap" not in label:
+        if confidence < threshold and "finger snap" not in label_lower:
             continue
             
         # Try to map to a homesounds category
@@ -203,30 +309,39 @@ def map_panns_labels_to_homesounds(predictions: List[Dict], threshold: float = 0
         
         # Direct mapping
         for audio_label, home_label in mapping.items():
-            if audio_label.lower() in label:
+            if audio_label.lower() in label_lower:
                 mapped_label = home_label
+                print(f"  Direct mapping: '{original_label}' -> '{home_label}' (confidence: {confidence:.4f})")
                 break
                 
+        # If no mapping was found, try fuzzy matching
+        if mapped_label is None:
+            for keyword, home_label in fuzzy_mapping.items():
+                if keyword in label_lower:
+                    mapped_label = home_label
+                    print(f"  Fuzzy matching: '{original_label}' contains '{keyword}' -> '{home_label}' (confidence: {confidence:.4f})")
+                    break
+        
         # If no mapping was found, try to use a more general category
         if mapped_label is None:
             # Generic mappings based on partial matches
-            if any(word in label for word in ["dog", "bark", "howl"]):
+            if any(word in label_lower for word in ["dog", "bark", "howl"]):
                 mapped_label = "dog"
-            elif any(word in label for word in ["cat", "meow", "purr"]):
+            elif any(word in label_lower for word in ["cat", "meow", "purr"]):
                 mapped_label = "cat"
-            elif any(word in label for word in ["door", "knock", "bell"]):
+            elif any(word in label_lower for word in ["door", "knock", "bell"]):
                 mapped_label = "door"
-            elif any(word in label for word in ["water", "drip", "sink", "shower"]):
+            elif any(word in label_lower for word in ["water", "drip", "sink", "shower"]):
                 mapped_label = "water"
-            elif any(word in label for word in ["alarm", "siren", "alert"]):
+            elif any(word in label_lower for word in ["alarm", "siren", "alert"]):
                 mapped_label = "alarm"
-            elif any(word in label for word in ["speech", "voice", "talking", "conversation"]):
+            elif any(word in label_lower for word in ["speech", "voice", "talking", "conversation"]):
                 mapped_label = "speech"
-            elif any(word in label for word in ["phone", "telephone", "ringtone", "cell"]):
+            elif any(word in label_lower for word in ["phone", "telephone", "ringtone", "cell"]):
                 mapped_label = "phone"
-            elif any(word in label for word in ["baby", "cry", "infant"]):
+            elif any(word in label_lower for word in ["baby", "cry", "infant"]):
                 mapped_label = "baby"
-            elif "finger snap" in label:
+            elif any(word in label_lower for word in ["finger snap", "snap", "clap"]):
                 mapped_label = "finger_snap"
         
         # Add to mapped predictions if a mapping was found
@@ -244,6 +359,7 @@ def map_panns_labels_to_homesounds(predictions: List[Dict], threshold: float = 0
             "label": "finger_snap",
             "confidence": finger_snap_confidence
         })
+        print(f"  Special case: Added 'finger_snap' with confidence {finger_snap_confidence:.4f}")
     
     # Sort by confidence
     mapped_predictions.sort(key=lambda x: x["confidence"], reverse=True)
@@ -307,15 +423,15 @@ def load_panns_model(model_type=DEFAULT_MODEL_TYPE):
         return None, False
 
 
-def predict_sound(audio_data, sample_rate, threshold=0.05, top_k=5):
+def predict_sound(audio_data, sample_rate, threshold=0.01, top_k=10):
     """
     Process audio input and return predictions using PANNs model
     
     Args:
         audio_data: Raw audio data as numpy array
         sample_rate: Sample rate of the audio data
-        threshold: Minimum confidence threshold for predictions
-        top_k: Number of top predictions to return
+        threshold: Minimum confidence threshold for predictions (reduced to 0.01)
+        top_k: Number of top predictions to return (increased to 10)
         
     Returns:
         Dictionary containing predictions
@@ -395,6 +511,15 @@ def predict_sound(audio_data, sample_rate, threshold=0.05, top_k=5):
             # Print shape for debugging
             print(f"Clipwise output shape: {clipwise_output.shape}")
             
+            # Apply sigmoid to outputs if needed - PANNs may output logits rather than probabilities
+            # The CNN14 model uses sigmoid activation in its final layer
+            if np.min(clipwise_output) < 0 or np.max(clipwise_output) > 1:
+                print("Applying sigmoid to model outputs (converting from logits to probabilities)")
+                clipwise_output = 1.0 / (1.0 + np.exp(-clipwise_output))
+                
+            # Print min/max values to verify normalization
+            print(f"Output range: min={np.min(clipwise_output):.6f}, max={np.max(clipwise_output):.6f}")
+            
             # Convert predictions to list of dictionaries
             predictions = []
             
@@ -435,6 +560,14 @@ def predict_sound(audio_data, sample_rate, threshold=0.05, top_k=5):
             sorted_indices = np.argsort(clipwise_output)[::-1]
             
             # Get top-k predictions above threshold
+            # Look at top 50 regardless of threshold for diagnostic purposes
+            top_50_indices = sorted_indices[:50]
+            print(f"Top 5 predictions (before threshold filtering):")
+            for i in top_50_indices[:5]:
+                confidence = float(clipwise_output[i])
+                print(f"  {class_labels[i]}: {confidence:.6f}")
+            
+            # Now filter by threshold for actual predictions
             for i in sorted_indices[:top_k]:
                 confidence = float(clipwise_output[i])
                 if confidence >= threshold:
@@ -445,11 +578,22 @@ def predict_sound(audio_data, sample_rate, threshold=0.05, top_k=5):
             
             # Print top predictions for debugging
             print("===== PANNS MODEL PREDICTIONS =====")
-            for pred in predictions[:5]:  # Print top 5 for debugging
-                print(f"  {pred['label']}: {pred['confidence']:.6f}")
+            if predictions:
+                for pred in predictions[:5]:  # Print top 5 for debugging
+                    print(f"  {pred['label']}: {pred['confidence']:.6f}")
+            else:
+                print("  No predictions above threshold")
             
             # Map PANNs labels to homesounds categories
             mapped_predictions = map_panns_labels_to_homesounds(predictions, threshold)
+            
+            # If there are mapped predictions, print them
+            print("===== MAPPED PREDICTIONS =====")
+            if mapped_predictions:
+                for pred in mapped_predictions[:5]:
+                    print(f"  {pred['label']} (from {pred['original_label']}): {pred['confidence']:.6f}")
+            else:
+                print("  No mapped predictions")
             
             # Return both raw and mapped predictions
             return {
