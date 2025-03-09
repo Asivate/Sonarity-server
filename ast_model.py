@@ -419,7 +419,7 @@ def predict_sound(audio_data, sample_rate, model, feature_extractor, threshold=0
             inputs = preprocess_audio_for_ast(audio_data, sample_rate, feature_extractor)
             
             # Get the model's device
-        device = next(model.parameters()).device
+            device = next(model.parameters()).device
             
             # Ensure all tensors are float32 and on the correct device
             if isinstance(inputs, dict):
@@ -441,25 +441,25 @@ def predict_sound(audio_data, sample_rate, model, feature_extractor, threshold=0
                             print(f"Error moving {key} to device {device}: {str(e)}")
                             # Try with cpu first then move
                             inputs[key] = inputs[key].to("cpu").to(device)
-        
-        print(f"Feature extraction completed. Running inference...")
-        
+            
+            print(f"Feature extraction completed. Running inference...")
+            
             # Run inference with no gradient tracking for efficiency
-        with torch.no_grad():
+            with torch.no_grad():
                 try:
                     # Run the model with the prepared inputs, explicit cast to float32
-            outputs = model(**inputs)
+                    outputs = model(**inputs)
                     logits = outputs.logits.float()  # Ensure logits are float32
-            
-            # Apply softmax to get probabilities
-            probs = torch.nn.functional.softmax(logits, dim=-1)
-            
-            # Get the model's id2label mapping
-            id2label = model.config.id2label
-            
-            # Convert to numpy for easier processing
-            probs_np = probs[0].cpu().numpy()
-            
+                    
+                    # Apply softmax to get probabilities
+                    probs = torch.nn.functional.softmax(logits, dim=-1)
+                    
+                    # Get the model's id2label mapping
+                    id2label = model.config.id2label
+                    
+                    # Convert to numpy for easier processing
+                    probs_np = probs[0].cpu().numpy()
+                    
                     # Store the raw predictions for aggregation
                     raw_predictions = probs_np
                     
