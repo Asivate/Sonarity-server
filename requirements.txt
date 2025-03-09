@@ -24,7 +24,7 @@ torchaudio==0.13.0
 huggingface-hub==0.16.4
 
 # Added for PANNs model support
-panns-inference==0.4.0
+panns-inference==0.1.1
 
 # Added for sentiment analysis and speech recognition
 accelerate==0.20.3
