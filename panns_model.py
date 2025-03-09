@@ -41,6 +41,7 @@ USE_PANNS_MODEL = False  # Controls whether PANNs is used as the primary model
 PANNS_MODEL = None  # The PANNs model instance
 PANNS_MODEL_TYPE = None  # The type of PANNs model being used
 MODEL_INITIALIZED = False  # Flag to check if the model is initialized
+MODEL_LOADED = False  # Flag to check if the model is loaded
 
 # Choose from different PANNs variants
 # CNN10 - Lighter, faster model with good performance
@@ -51,27 +52,31 @@ DEFAULT_MODEL_TYPE = "CNN14"  # The default model in 0.1.1
 
 def check_panns_availability():
     """
-    Check if the PANNs package is available
+    Check if PANNs and its dependencies are available
     
     Returns:
         bool: True if PANNs is available, False otherwise
     """
-    global PANNS_AVAILABLE
-    
     try:
-        # Try to import PANNs-related packages
-        from panns_inference.inference import AudioTagging
-        from panns_inference.models import Cnn14  # Only check for Cnn14 which is in 0.1.1
+        # Check for required packages
+        import torch
         import librosa
+        import panns_inference
         
-        # If we got here, PANNs is available
-        PANNS_AVAILABLE = True
-        print("PANNs package is available")
+        # Try to import AudioTagging specifically
+        from panns_inference import AudioTagging
+        
+        # All imports succeeded, PANNs is available
+        print("PANNs and all dependencies are available")
         return True
+        
     except ImportError as e:
-        # Failed to import PANNs
-        PANNS_AVAILABLE = False
-        print(f"PANNs package is not available: {e}")
+        print(f"PANNs dependencies missing: {e}")
+        print("Please install required packages:")
+        print("  pip install torch panns_inference librosa")
+        return False
+    except Exception as e:
+        print(f"Error checking PANNs availability: {e}")
         return False
 
 
@@ -93,14 +98,13 @@ def map_panns_labels_to_homesounds(predictions: List[Dict], threshold: float = 0
         "door": "door",
         "knock": "door",
         "tap": "door",
-        "knock": "door",
         "doorbell": "door",
-        "door": "door",
         "slam": "door",
         "ding-dong": "door",
         "sliding door": "door",
         "cupboard open or close": "door",
         "drawer open or close": "door",
+        "door knock": "door",
         
         # Water related sounds
         "water": "water",
@@ -118,6 +122,8 @@ def map_panns_labels_to_homesounds(predictions: List[Dict], threshold: float = 0
         "pump (liquid)": "water",
         "boiling": "water",
         "toilet flush": "water",
+        "gurgling": "water",
+        "water running": "water",
         
         # Alarm related sounds
         "alarm": "alarm",
@@ -138,6 +144,8 @@ def map_panns_labels_to_homesounds(predictions: List[Dict], threshold: float = 0
         "bicycle bell": "alarm",
         "telephone bell ringing": "alarm",
         "emergency vehicle": "alarm",
+        "beep, bleep": "alarm",
+        "chime": "alarm",
         
         # Appliance and home device sounds
         "microwave oven": "microwave",
@@ -153,6 +161,10 @@ def map_panns_labels_to_homesounds(predictions: List[Dict], threshold: float = 0
         "vacuum cleaner": "appliance",
         "mechanical fan": "appliance",
         "hair dryer": "appliance",
+        "domestic sounds, home sounds": "appliance",
+        "frying (food)": "appliance",
+        "chopping (food)": "appliance",
+        "kitchen utensil": "appliance",
         
         # Phone related sounds
         "telephone": "phone",
@@ -162,6 +174,9 @@ def map_panns_labels_to_homesounds(predictions: List[Dict], threshold: float = 0
         "telephone dialing": "phone",
         "dial tone": "phone",
         "busy signal": "phone",
+        "cell phone vibrating": "phone",
+        "text message notification": "phone",
+        "phone notification": "phone",
         
         # Baby sounds
         "baby cry": "baby",
@@ -171,6 +186,8 @@ def map_panns_labels_to_homesounds(predictions: List[Dict], threshold: float = 0
         "baby cry, infant cry": "baby",
         "whimper": "baby",
         "crying, sobbing": "baby",
+        "baby babbling": "baby",
+        "child speech": "baby",
         
         # Speech and person
         "speech": "speech",
@@ -184,6 +201,11 @@ def map_panns_labels_to_homesounds(predictions: List[Dict], threshold: float = 0
         "female speech, woman speaking": "speech",
         "child speech, kid speaking": "speech",
         "narration, monologue": "speech",
+        "human voice": "speech",
+        "shout": "speech",
+        "scream": "speech",
+        "whispering": "speech",
+        "laughter": "speech",
         
         # Cat sounds
         "cat": "cat",
@@ -192,6 +214,7 @@ def map_panns_labels_to_homesounds(predictions: List[Dict], threshold: float = 0
         "hiss": "cat",
         "domestic animals, pets": "cat",
         "caterwaul": "cat",
+        "cat communication": "cat",
         
         # Dog sounds
         "dog": "dog",
@@ -202,11 +225,35 @@ def map_panns_labels_to_homesounds(predictions: List[Dict], threshold: float = 0
         "yip": "dog",
         "whimper (dog)": "dog",
         "domestic animals, pets": "dog",
+        "dog whimpering": "dog",
         
         # Special handling for finger snaps
         "finger snapping": "finger_snap",
         "finger snap": "finger_snap",
         "clapping": "finger_snap",
+        "hands": "finger_snap",
+        
+        # Music categorization (often confused with other sounds)
+        "music": "music",
+        "musical instrument": "music",
+        "singing": "music",
+        "drum": "music",
+        "guitar": "music",
+        "piano": "music",
+        "violin, fiddle": "music",
+        "percussion": "music",
+        "keyboard (musical)": "music",
+        
+        # Vehicle sounds (often confused with appliances)
+        "vehicle": "vehicle",
+        "engine": "vehicle",
+        "car": "vehicle",
+        "traffic noise, roadway noise": "vehicle",
+        "road": "vehicle",
+        "car passing by": "vehicle",
+        "bus": "vehicle",
+        "truck": "vehicle",
+        "motorcycle": "vehicle",
     }
     
     # For fuzzy matching - used for words that appear in labels
@@ -239,16 +286,19 @@ def map_panns_labels_to_homesounds(predictions: List[Dict], threshold: float = 0
         "detector": "alarm",
         "bell": "alarm",
         "emergency": "alarm",
+        "alert": "alarm",
         
         # Phone related terms
         "phone": "phone",
         "telephone": "phone",
         "ringtone": "phone",
         "dial": "phone",
+        "vibrat": "phone",  # Capture vibrating, vibration
         
         # Baby sound terms
         "baby": "baby",
         "infant": "baby",
+        "child": "baby",
         "cry": "baby",
         
         # Speech related terms
@@ -257,41 +307,58 @@ def map_panns_labels_to_homesounds(predictions: List[Dict], threshold: float = 0
         "talk": "speech",
         "speak": "speech",
         "conversation": "speech",
+        "human": "speech",
+        "vocal": "speech",
         
         # Animal sounds
         "cat": "cat",
         "meow": "cat",
         "purr": "cat",
+        "feline": "cat",
         "dog": "dog",
         "bark": "dog",
         "howl": "dog",
+        "canine": "dog",
         
         # Finger snap
         "finger": "finger_snap",
         "snap": "finger_snap",
         "clap": "finger_snap",
+        
+        # Music terms
+        "music": "music",
+        "musical": "music",
+        "instrument": "music",
+        "song": "music",
+        "singing": "music",
+        
+        # Vehicle terms
+        "vehicle": "vehicle",
+        "car": "vehicle",
+        "traffic": "vehicle",
+        "engine": "vehicle",
+        "motor": "vehicle",
+        
+        # Appliance terms
+        "appliance": "appliance",
+        "machine": "appliance",
+        "vacuum": "appliance",
+        "microwave": "microwave",
+        "kitchen": "appliance",
+        "blender": "appliance",
+        "fan": "appliance",
+        "domestic": "appliance",
     }
+    
+    # Print a status message for the mapping process
+    print(f"Mapping {len(predictions)} predictions to homesounds categories (threshold: {threshold})")
     
     # Store the mapped predictions
     mapped_predictions = []
     
-    # Special handling for finger snapping - use a lower threshold
-    finger_snap_detected = False
-    finger_snap_confidence = 0.0
-    
-    # First pass to check for finger snapping with lower threshold
-    for pred in predictions:
-        label = pred["label"].lower()
-        confidence = pred["confidence"]
-        
-        if "finger snapping" in label or "finger snap" in label:
-            if confidence >= 0.008:  # Lower threshold for finger snaps
-                finger_snap_detected = True
-                finger_snap_confidence = confidence
-                break
-    
-    # Print a status message for the mapping process
-    print(f"Mapping {len(predictions)} predictions to homesounds categories (threshold: {threshold})")
+    # Special handling for music - often falsely detected in ambient noise
+    # Only map music if it has very high confidence (0.3+)
+    music_confidence_threshold = 0.3
     
     # Map each prediction to a homesounds category if possible
     for pred in predictions:
@@ -300,8 +367,13 @@ def map_panns_labels_to_homesounds(predictions: List[Dict], threshold: float = 0
         label_lower = original_label.lower()
         confidence = pred["confidence"]
         
-        # Skip if below threshold (except for finger snapping)
-        if confidence < threshold and "finger snap" not in label_lower:
+        # Skip if below threshold (except for special cases)
+        if confidence < threshold:
+            continue
+            
+        # Special handling for music (often false positive)
+        if "music" in label_lower and confidence < music_confidence_threshold:
+            print(f"  Skipping '{original_label}' with confidence {confidence:.4f} (below music threshold {music_confidence_threshold})")
             continue
             
         # Try to map to a homesounds category
@@ -309,10 +381,18 @@ def map_panns_labels_to_homesounds(predictions: List[Dict], threshold: float = 0
         
         # Direct mapping
         for audio_label, home_label in mapping.items():
-            if audio_label.lower() in label_lower:
+            if audio_label.lower() == label_lower:  # Exact match
                 mapped_label = home_label
-                print(f"  Direct mapping: '{original_label}' -> '{home_label}' (confidence: {confidence:.4f})")
+                print(f"  Exact match: '{original_label}' -> '{home_label}' (confidence: {confidence:.4f})")
                 break
+        
+        # If no exact match, try substring matching
+        if mapped_label is None:
+            for audio_label, home_label in mapping.items():
+                if audio_label.lower() in label_lower or label_lower in audio_label.lower():
+                    mapped_label = home_label
+                    print(f"  Substring match: '{original_label}' contains or is contained in '{audio_label}' -> '{home_label}' (confidence: {confidence:.4f})")
+                    break
                 
         # If no mapping was found, try fuzzy matching
         if mapped_label is None:
@@ -322,28 +402,6 @@ def map_panns_labels_to_homesounds(predictions: List[Dict], threshold: float = 0
                     print(f"  Fuzzy matching: '{original_label}' contains '{keyword}' -> '{home_label}' (confidence: {confidence:.4f})")
                     break
         
-        # If no mapping was found, try to use a more general category
-        if mapped_label is None:
-            # Generic mappings based on partial matches
-            if any(word in label_lower for word in ["dog", "bark", "howl"]):
-                mapped_label = "dog"
-            elif any(word in label_lower for word in ["cat", "meow", "purr"]):
-                mapped_label = "cat"
-            elif any(word in label_lower for word in ["door", "knock", "bell"]):
-                mapped_label = "door"
-            elif any(word in label_lower for word in ["water", "drip", "sink", "shower"]):
-                mapped_label = "water"
-            elif any(word in label_lower for word in ["alarm", "siren", "alert"]):
-                mapped_label = "alarm"
-            elif any(word in label_lower for word in ["speech", "voice", "talking", "conversation"]):
-                mapped_label = "speech"
-            elif any(word in label_lower for word in ["phone", "telephone", "ringtone", "cell"]):
-                mapped_label = "phone"
-            elif any(word in label_lower for word in ["baby", "cry", "infant"]):
-                mapped_label = "baby"
-            elif any(word in label_lower for word in ["finger snap", "snap", "clap"]):
-                mapped_label = "finger_snap"
-        
         # Add to mapped predictions if a mapping was found
         if mapped_label:
             mapped_predictions.append({
@@ -352,14 +410,24 @@ def map_panns_labels_to_homesounds(predictions: List[Dict], threshold: float = 0
                 "confidence": confidence
             })
     
-    # Special case: Add finger snap if detected with lower threshold but not already included
-    if finger_snap_detected and not any(p["label"] == "finger_snap" for p in mapped_predictions):
-        mapped_predictions.append({
-            "original_label": "Finger snapping",
-            "label": "finger_snap",
-            "confidence": finger_snap_confidence
-        })
-        print(f"  Special case: Added 'finger_snap' with confidence {finger_snap_confidence:.4f}")
+    # Special handling for finger snapping - look for it with lower threshold
+    has_finger_snap = False
+    for pred in predictions:
+        label_lower = pred["label"].lower()
+        confidence = pred["confidence"]
+        
+        # Add finger snap with a lower threshold (0.008)
+        if ("finger" in label_lower or "snap" in label_lower or "clap" in label_lower) and confidence >= 0.008:
+            has_finger_snap = True
+            # Check if it's already in mapped_predictions
+            if not any(p["label"] == "finger_snap" for p in mapped_predictions):
+                mapped_predictions.append({
+                    "original_label": pred["label"],
+                    "label": "finger_snap",
+                    "confidence": confidence
+                })
+                print(f"  Special case: Added 'finger_snap' from '{pred['label']}' with confidence {confidence:.4f}")
+                break
     
     # Sort by confidence
     mapped_predictions.sort(key=lambda x: x["confidence"], reverse=True)
@@ -423,15 +491,15 @@ def load_panns_model(model_type=DEFAULT_MODEL_TYPE):
         return None, False
 
 
-def predict_sound(audio_data, sample_rate, threshold=0.01, top_k=10):
+def predict_sound(audio_data, sample_rate, threshold=0.05, top_k=10):
     """
     Process audio input and return predictions using PANNs model
     
     Args:
         audio_data: Raw audio data as numpy array
         sample_rate: Sample rate of the audio data
-        threshold: Minimum confidence threshold for predictions (reduced to 0.01)
-        top_k: Number of top predictions to return (increased to 10)
+        threshold: Minimum confidence threshold for predictions
+        top_k: Number of top predictions to return
         
     Returns:
         Dictionary containing predictions
@@ -469,8 +537,7 @@ def predict_sound(audio_data, sample_rate, threshold=0.01, top_k=10):
             print(f"Audio too quiet: {db_level} dB")
             return {"top_predictions": [{"label": "Silence", "confidence": 0.95}], "mapped_predictions": []}
             
-        # Make sure we're using exactly 32kHz sample rate for CNN14 (different from CNN14_16k)
-        # Standard CNN14 model expects 32kHz audio
+        # Make sure we're using exactly 32kHz sample rate for CNN14
         if sample_rate != 32000:
             print(f"Resampling from {sample_rate}Hz to 32000Hz")
             # Use librosa for better quality resampling
@@ -489,18 +556,14 @@ def predict_sound(audio_data, sample_rate, threshold=0.01, top_k=10):
             # Run inference on the audio data
             print("Running PANNs inference...")
             
-            # IMPORTANT FIX: Add batch dimension to audio data
-            # The model expects input in shape (batch_size, segment_samples)
-            # In our case, batch_size=1 since we're processing one audio clip at a time
+            # Add batch dimension as needed by the model (N, T) - exactly like the example
             if len(audio_data.shape) == 1:
                 audio_data = audio_data[np.newaxis, :]  # Add batch dimension: (samples,) -> (1, samples)
             
-            # In panns-inference 0.1.1, AudioTagging.inference() returns (clipwise_output, embedding)
-            # but we only need clipwise_output for predictions
+            # Call inference - returns (clipwise_output, embedding)
             clipwise_output, _ = PANNS_MODEL.inference(audio_data)
             
-            # FIX: Handle output shape correctly - clipwise_output likely has shape [1, n_classes]
-            # We need to squeeze out the batch dimension
+            # Handle output shape correctly
             if isinstance(clipwise_output, torch.Tensor):
                 # If it's a torch tensor, convert to numpy
                 clipwise_output = clipwise_output.squeeze(0).detach().cpu().numpy()
@@ -510,19 +573,6 @@ def predict_sound(audio_data, sample_rate, threshold=0.01, top_k=10):
             
             # Print shape for debugging
             print(f"Clipwise output shape: {clipwise_output.shape}")
-            
-            # Apply sigmoid to outputs if needed - PANNs may output logits rather than probabilities
-            # The CNN14 model uses sigmoid activation in its final layer
-            if np.min(clipwise_output) < 0 or np.max(clipwise_output) > 1:
-                print("Applying sigmoid to model outputs (converting from logits to probabilities)")
-                clipwise_output = 1.0 / (1.0 + np.exp(-clipwise_output))
-            
-            # Apply scaling factor to boost values - based on observed output ranges
-            # The model consistently outputs values with max around 0.138
-            # Scale by 1.5 to help predictions cross threshold
-            scaling_factor = 1.5
-            clipwise_output = np.clip(clipwise_output * scaling_factor, 0.0, 1.0)
-            print(f"Applied scaling factor of {scaling_factor} to outputs")
                 
             # Print min/max values to verify normalization
             print(f"Output range: min={np.min(clipwise_output):.6f}, max={np.max(clipwise_output):.6f}")
@@ -530,38 +580,8 @@ def predict_sound(audio_data, sample_rate, threshold=0.01, top_k=10):
             # Convert predictions to list of dictionaries
             predictions = []
             
-            # Get the class labels
-            # In panns-inference 0.1.1, 'labels' might be a list property instead of a callable method
-            try:
-                # Try to call it as a method first
-                class_labels = PANNS_MODEL.labels()
-            except TypeError:
-                # If that fails, try to access it as a property/attribute
-                if hasattr(PANNS_MODEL, 'labels'):
-                    class_labels = PANNS_MODEL.labels
-                else:
-                    # If all else fails, load the labels manually
-                    # AudioSet has 527 classes
-                    print("Loading AudioSet labels from file...")
-                    import os
-                    import json
-                    # Check for labels file in current directory or home directory
-                    label_paths = [
-                        'audioset_labels.json', 
-                        os.path.join(os.path.expanduser('~'), 'panns_data', 'audioset_labels.json')
-                    ]
-                    
-                    class_labels = None
-                    for path in label_paths:
-                        if os.path.exists(path):
-                            with open(path, 'r') as f:
-                                class_labels = json.load(f)
-                            break
-                    
-                    # If we can't find labels file, create with generic labels
-                    if class_labels is None:
-                        print("Creating generic labels...")
-                        class_labels = [f"class_{i}" for i in range(527)]  # AudioSet has 527 classes
+            # Get the class labels directly from the model
+            class_labels = PANNS_MODEL.labels
             
             # Sort predictions by confidence
             sorted_indices = np.argsort(clipwise_output)[::-1]
@@ -592,7 +612,7 @@ def predict_sound(audio_data, sample_rate, threshold=0.01, top_k=10):
                 print("  No predictions above threshold")
             
             # Map PANNs labels to homesounds categories
-            mapped_predictions = map_panns_labels_to_homesounds(predictions, 0.05)
+            mapped_predictions = map_panns_labels_to_homesounds(predictions, threshold)
             
             # If there are mapped predictions, print them
             print("===== MAPPED PREDICTIONS =====")
@@ -615,127 +635,72 @@ def predict_sound(audio_data, sample_rate, threshold=0.01, top_k=10):
             return {"top_predictions": [{"label": "Error", "confidence": 0.0}], "mapped_predictions": []}
         
     except Exception as e:
-        print(f"Error in PANNs predict_sound: {str(e)}")
+        print(f"Error in predict_sound: {str(e)}")
         traceback.print_exc()
         return {"top_predictions": [{"label": "Error", "confidence": 0.0}], "mapped_predictions": []}
 
 
 def initialize():
     """
-    Initialize the PANNs model for sound recognition
+    Initialize PANNs model and resources
     
     Returns:
-        bool: True if model was successfully loaded, False otherwise
+        bool: True if initialization was successful, False otherwise
     """
-    global PANNS_MODEL, PANNS_MODEL_TYPE, MODEL_INITIALIZED
-    
-    if MODEL_INITIALIZED:
-        print("PANNs model already initialized")
-        return True
+    global PANNS_MODEL, MODEL_LOADED
     
     try:
-        print("Checking PANNs availability...")
-        if not check_panns_availability():
-            print("PANNs package not available - won't use PANNs model")
-            return False
-            
-        print("Loading PANNs model: CNN14")
+        # Check if model is already loaded
+        if MODEL_LOADED:
+            print("PANNs model already loaded")
+            return True
         
-        # Determine device
+        # Make sure we've got the required packages
+        if not check_panns_availability():
+            print("PANNs dependencies not available")
+            return False
+        
+        print("Initializing PANNs model...")
+        # Import here to avoid loading PyTorch until needed
+        from panns_inference import AudioTagging
+        
+        # Determine device (CPU or CUDA)
+        import torch
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
         print(f"Using device: {device}")
         
-        # Ensure we have the AudioSet labels file available
-        ensure_audioset_labels_available()
+        # Load the AudioTagging model exactly like the example
+        # This automatically handles downloading the checkpoint if needed
+        print("Loading PANNs model... this may take a moment.")
+        PANNS_MODEL = AudioTagging(checkpoint_path=None, device=device)
         
-        # Set model type - Always use CNN14 for the regular CNN14 model
-        PANNS_MODEL_TYPE = "CNN14"
-        
-        # Get the CNN14 model checkpoint path
-        home_dir = os.path.expanduser("~")
-        panns_data_dir = os.path.join(home_dir, "panns_data")
-        os.makedirs(panns_data_dir, exist_ok=True)
-        
-        # Get the CNN14 model checkpoint path
-        checkpoint_path = os.path.join(panns_data_dir, "Cnn14_mAP=0.431.pth")
-        print(f"Checkpoint path: {checkpoint_path}")
-        
-        # Check if the model file exists, download if it doesn't
-        if not os.path.exists(checkpoint_path):
-            print("Downloading PANNs model checkpoint...")
-            model_url = "https://zenodo.org/record/3987831/files/Cnn14_mAP%3D0.431.pth?download=1"
-            wget.download(model_url, checkpoint_path)
-            print(f"\nDownloaded checkpoint to {checkpoint_path}")
-        
-        # In version 0.1.1, AudioTagging expects the checkpoint_path and device
-        # Create an AudioTagging instance with proper parameters
-        PANNS_MODEL = AudioTagging(checkpoint_path=checkpoint_path, device=device)
-        
-        # Test inference with a dummy input
-        print("Testing PANNs inference with dummy input...")
-        dummy_audio = np.zeros((1, 32000), dtype=np.float32)  # 1 second of silence with batch dimension
-        with torch.no_grad():
-            _, _ = PANNS_MODEL.inference(dummy_audio)
-        
-        print(f"PANNs model loaded successfully: {PANNS_MODEL_TYPE}")
-        MODEL_INITIALIZED = True
-        return True
-        
+        # Verify the model loaded successfully
+        if PANNS_MODEL is not None:
+            MODEL_LOADED = True
+            print("PANNs model loaded successfully")
+            
+            # Print model information
+            model_type = PANNS_MODEL.__class__.__name__
+            print(f"Model type: {model_type}")
+            
+            # Print number of available labels
+            try:
+                num_classes = len(PANNS_MODEL.labels)
+                print(f"Number of classes: {num_classes}")
+                print(f"Sample classes: {PANNS_MODEL.labels[:5]} ...")
+            except Exception as e:
+                print(f"Could not get labels: {e}")
+                
+            return True
+        else:
+            print("Failed to load PANNs model")
+            return False
+            
     except Exception as e:
         print(f"Error initializing PANNs model: {e}")
+        import traceback
         traceback.print_exc()
-        PANNS_MODEL = None
-        MODEL_INITIALIZED = False
         return False
-
-
-def ensure_audioset_labels_available():
-    """
-    Make sure the AudioSet labels file is available.
-    If not, create it using the list of AudioSet labels.
-    """
-    import json
-    
-    # AudioSet labels paths
-    home_dir = os.path.expanduser("~")
-    panns_data_dir = os.path.join(home_dir, "panns_data")
-    os.makedirs(panns_data_dir, exist_ok=True)
-    
-    labels_path = os.path.join(panns_data_dir, "audioset_labels.json")
-    
-    # If labels file doesn't exist, create it
-    if not os.path.exists(labels_path):
-        print("Creating AudioSet labels file...")
-        
-        # Full list of AudioSet labels (527 classes)
-        # First few classes shown here - the full list should be imported or defined
-        try:
-            # Try to import from the labels file we created earlier
-            from create_labels_file import AUDIOSET_LABELS
-            labels = AUDIOSET_LABELS
-        except ImportError:
-            # If that fails, use a basic set of common labels
-            labels = [
-                'Speech', 'Male speech, man speaking', 'Female speech, woman speaking',
-                'Child speech, kid speaking', 'Conversation', 'Narration, monologue',
-                'Babbling', 'Speech synthesizer', 'Shout', 'Bellow', 'Whoop', 'Yell',
-                # ... abbreviated for brevity ...
-                'Alarm', 'Telephone', 'Telephone bell ringing',
-                'Ringtone', 'Door', 'Doorbell', 'Ding-dong', 'Knock',
-                'Water', 'Rain', 'Stream', 'Waterfall'
-            ]
-            # Extend to 527 classes with generic labels
-            num_missing = 527 - len(labels)
-            if num_missing > 0:
-                labels.extend([f"class_{i+len(labels)}" for i in range(num_missing)])
-        
-        # Save labels to disk
-        with open(labels_path, 'w') as f:
-            json.dump(labels, f, indent=2)
-            
-        print(f"Created AudioSet labels file at: {labels_path}")
-    else:
-        print(f"AudioSet labels file already exists at: {labels_path}")
 
 
 if __name__ == "__main__":
