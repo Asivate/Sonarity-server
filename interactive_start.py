@@ -89,6 +89,9 @@ def main():
     if settings["Sound Recognition Model"] == "AST":
         env["USE_AST_MODEL"] = "1"
         print("Using AST model (via environment variable)")
+    else:
+        env["USE_AST_MODEL"] = "0"  # Explicitly disable AST model when TensorFlow is selected
+        print("Using TensorFlow model (via environment variable)")
     
     # Add speech recognition flag if Google is selected
     if settings["Speech Recognition System"] == "Google Cloud":
