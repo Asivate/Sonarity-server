@@ -186,21 +186,11 @@ class GoogleSpeechToText:
         # Boost low volume audio for better recognition
         if rms < 0.05:  # If audio is very quiet
             # Calculate boost factor (more boost for quieter audio)
-            boost_factor = min(0.1 / rms if rms > 0 else 10, 10)  # Cap at 10x boost
+            boost_factor = min(0.1 / rms if rms > 0 else 10, 5)  # Cap at 5x boost (reduced from 10x)
             processed_audio = processed_audio * boost_factor
             logger.info(f"Boosted quiet audio by factor of {boost_factor:.2f}")
         
-        # Apply noise reduction if signal is noisy
-        # This is a simple high-pass filter to reduce low-frequency noise
-        if sample_rate > 1000:  # Only apply if we have enough frequency resolution
-            try:
-                # High-pass filter to reduce background noise (cutoff at 80Hz)
-                b, a = signal.butter(4, 80/(sample_rate/2), 'highpass')
-                processed_audio = signal.filtfilt(b, a, processed_audio)
-                logger.info("Applied high-pass filter for noise reduction")
-            except Exception as e:
-                logger.warning(f"Could not apply filter: {str(e)}")
-        
+        # Skip filtering for faster processing
         # Normalize audio to 16-bit range for LINEAR16 encoding
         max_val = np.max(np.abs(processed_audio))
         if max_val > 0:

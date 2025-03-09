@@ -427,7 +427,6 @@ def predict_sound(audio_data, sample_rate, model, feature_extractor, threshold=0
                     # First check the dtype and device before conversion to avoid unnecessary operations
                     if inputs[key].dtype != torch.float32:
                         try:
-                            print(f"Converting input tensor {key} from {inputs[key].dtype} to float32")
                             inputs[key] = inputs[key].to(dtype=torch.float32)
                         except Exception as e:
                             print(f"Error converting {key} to float32: {str(e)}")
@@ -437,7 +436,6 @@ def predict_sound(audio_data, sample_rate, model, feature_extractor, threshold=0
                     # Move to the model's device if needed
                     if inputs[key].device != device:
                         try:
-                            print(f"Moving input tensor {key} from {inputs[key].device} to {device}")
                             inputs[key] = inputs[key].to(device=device)
                         except Exception as e:
                             print(f"Error moving {key} to device {device}: {str(e)}")
@@ -449,12 +447,6 @@ def predict_sound(audio_data, sample_rate, model, feature_extractor, threshold=0
             # Run inference with no gradient tracking for efficiency
             with torch.no_grad():
                 try:
-                    # Verify model parameters are float32
-                    for name, param in model.named_parameters():
-                        if param.dtype != torch.float32:
-                            print(f"Warning: Parameter {name} has dtype {param.dtype}, converting to float32")
-                            param.data = param.data.to(torch.float32)
-                    
                     # Run the model with the prepared inputs, explicit cast to float32
                     outputs = model(**inputs)
                     logits = outputs.logits.float()  # Ensure logits are float32

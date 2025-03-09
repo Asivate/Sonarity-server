@@ -1334,7 +1334,7 @@ def process_speech_with_sentiment(audio_data):
         Dictionary with transcription and sentiment
     """
     # Settings for improved speech processing
-    SPEECH_MAX_BUFFER_SIZE = 8  # Number of audio chunks to keep in buffer for speech only
+    SPEECH_MAX_BUFFER_SIZE = 5  # Number of audio chunks to keep in buffer for speech only
     MIN_WORD_COUNT = 3   # Minimum number of meaningful words for valid transcription
     MIN_CONFIDENCE = 0.7  # Minimum confidence level for speech detection
     
@@ -1351,7 +1351,7 @@ def process_speech_with_sentiment(audio_data):
     
     # For better transcription, use concatenated audio from multiple chunks if available
     if len(process_speech_with_sentiment.recent_audio_buffer) > 1:
-        # Use up to 8 chunks for speech recognition
+        # Use up to 5 chunks for speech recognition
         num_chunks = min(SPEECH_MAX_BUFFER_SIZE, len(process_speech_with_sentiment.recent_audio_buffer))
         logger.info(f"Using concatenated audio from {num_chunks} chunks for speech transcription")
         
