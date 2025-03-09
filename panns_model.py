@@ -357,9 +357,11 @@ def predict_sound(audio_data, sample_rate, threshold=0.05, top_k=5):
             # Run inference on the audio data
             print("Running PANNs inference...")
             
-            # In panns-inference 0.1.1, AudioTagging.inference() expects audio data only
-            # It automatically handles the sample rate internally
-            clipwise_output = PANNS_MODEL.inference(audio_data)
+            # In panns-inference 0.1.1, AudioTagging.inference() expects:
+            # 1. audio_path OR 
+            # 2. (audio, sample_rate) tuple
+            # We'll use the second approach
+            clipwise_output = PANNS_MODEL.inference(audio=audio_data, sample_rate=32000)
             
             # Convert predictions to list of dictionaries
             predictions = []
@@ -430,7 +432,7 @@ def initialize():
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
         print(f"Using device: {device}")
         
-        # Set model type - Always use the standard CNN14 model
+        # Set model type - Always use the 16kHz variant
         PANNS_MODEL_TYPE = "CNN14"
         
         # Set up data directory
@@ -438,27 +440,13 @@ def initialize():
         panns_data_dir = os.path.join(home_dir, "panns_data")
         os.makedirs(panns_data_dir, exist_ok=True)
         
-        # Download checkpoint path if not exists
-        checkpoint_path = os.path.join(panns_data_dir, f"Cnn14_mAP=0.431.pth")
-        print(f"Checkpoint path: {checkpoint_path}")
-        
-        if not os.path.exists(checkpoint_path):
-            print("Downloading model checkpoint...")
-            url = "https://zenodo.org/record/3987831/files/Cnn14_mAP%3D0.431.pth?download=1"
-            wget.download(url, checkpoint_path)
-            print("\nDownload complete")
-            
         # In version 0.1.1, AudioTagging doesn't accept model_type directly
         # Instead we need to create an AudioTagging instance without parameters
-        # and it will download the model if needed
         PANNS_MODEL = AudioTagging()
         
         # Move the model to the correct device
         if device == 'cuda' and torch.cuda.is_available():
-            print("Setting model to use CUDA")
             PANNS_MODEL.cuda()
-        else:
-            print("Using CPU.")
         
         print(f"PANNs model loaded successfully: {PANNS_MODEL_TYPE}")
         MODEL_INITIALIZED = True
