@@ -383,6 +383,18 @@ def predict_sound(audio_data, sample_rate, threshold=0.05, top_k=5):
             # but we only need clipwise_output for predictions
             clipwise_output, _ = PANNS_MODEL.inference(audio_data)
             
+            # FIX: Handle output shape correctly - clipwise_output likely has shape [1, n_classes]
+            # We need to squeeze out the batch dimension
+            if isinstance(clipwise_output, torch.Tensor):
+                # If it's a torch tensor, convert to numpy
+                clipwise_output = clipwise_output.squeeze(0).detach().cpu().numpy()
+            elif isinstance(clipwise_output, np.ndarray) and clipwise_output.shape[0] == 1:
+                # If it's a numpy array with a batch dimension
+                clipwise_output = clipwise_output.squeeze(0)
+            
+            # Print shape for debugging
+            print(f"Clipwise output shape: {clipwise_output.shape}")
+            
             # Convert predictions to list of dictionaries
             predictions = []
             
