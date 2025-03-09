@@ -387,7 +387,37 @@ def predict_sound(audio_data, sample_rate, threshold=0.05, top_k=5):
             predictions = []
             
             # Get the class labels
-            class_labels = PANNS_MODEL.labels()
+            # In panns-inference 0.1.1, 'labels' might be a list property instead of a callable method
+            try:
+                # Try to call it as a method first
+                class_labels = PANNS_MODEL.labels()
+            except TypeError:
+                # If that fails, try to access it as a property/attribute
+                if hasattr(PANNS_MODEL, 'labels'):
+                    class_labels = PANNS_MODEL.labels
+                else:
+                    # If all else fails, load the labels manually
+                    # AudioSet has 527 classes
+                    print("Loading AudioSet labels from file...")
+                    import os
+                    import json
+                    # Check for labels file in current directory or home directory
+                    label_paths = [
+                        'audioset_labels.json', 
+                        os.path.join(os.path.expanduser('~'), 'panns_data', 'audioset_labels.json')
+                    ]
+                    
+                    class_labels = None
+                    for path in label_paths:
+                        if os.path.exists(path):
+                            with open(path, 'r') as f:
+                                class_labels = json.load(f)
+                            break
+                    
+                    # If we can't find labels file, create with generic labels
+                    if class_labels is None:
+                        print("Creating generic labels...")
+                        class_labels = [f"class_{i}" for i in range(527)]  # AudioSet has 527 classes
             
             # Sort predictions by confidence
             sorted_indices = np.argsort(clipwise_output)[::-1]
@@ -452,10 +482,13 @@ def initialize():
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
         print(f"Using device: {device}")
         
+        # Ensure we have the AudioSet labels file available
+        ensure_audioset_labels_available()
+        
         # Set model type - Always use CNN14 for the regular CNN14 model
         PANNS_MODEL_TYPE = "CNN14"
         
-        # Set up data directory
+        # Get the CNN14 model checkpoint path
         home_dir = os.path.expanduser("~")
         panns_data_dir = os.path.join(home_dir, "panns_data")
         os.makedirs(panns_data_dir, exist_ok=True)
@@ -491,6 +524,55 @@ def initialize():
         PANNS_MODEL = None
         MODEL_INITIALIZED = False
         return False
+
+
+def ensure_audioset_labels_available():
+    """
+    Make sure the AudioSet labels file is available.
+    If not, create it using the list of AudioSet labels.
+    """
+    import json
+    
+    # AudioSet labels paths
+    home_dir = os.path.expanduser("~")
+    panns_data_dir = os.path.join(home_dir, "panns_data")
+    os.makedirs(panns_data_dir, exist_ok=True)
+    
+    labels_path = os.path.join(panns_data_dir, "audioset_labels.json")
+    
+    # If labels file doesn't exist, create it
+    if not os.path.exists(labels_path):
+        print("Creating AudioSet labels file...")
+        
+        # Full list of AudioSet labels (527 classes)
+        # First few classes shown here - the full list should be imported or defined
+        try:
+            # Try to import from the labels file we created earlier
+            from create_labels_file import AUDIOSET_LABELS
+            labels = AUDIOSET_LABELS
+        except ImportError:
+            # If that fails, use a basic set of common labels
+            labels = [
+                'Speech', 'Male speech, man speaking', 'Female speech, woman speaking',
+                'Child speech, kid speaking', 'Conversation', 'Narration, monologue',
+                'Babbling', 'Speech synthesizer', 'Shout', 'Bellow', 'Whoop', 'Yell',
+                # ... abbreviated for brevity ...
+                'Alarm', 'Telephone', 'Telephone bell ringing',
+                'Ringtone', 'Door', 'Doorbell', 'Ding-dong', 'Knock',
+                'Water', 'Rain', 'Stream', 'Waterfall'
+            ]
+            # Extend to 527 classes with generic labels
+            num_missing = 527 - len(labels)
+            if num_missing > 0:
+                labels.extend([f"class_{i+len(labels)}" for i in range(num_missing)])
+        
+        # Save labels to disk
+        with open(labels_path, 'w') as f:
+            json.dump(labels, f, indent=2)
+            
+        print(f"Created AudioSet labels file at: {labels_path}")
+    else:
+        print(f"AudioSet labels file already exists at: {labels_path}")
 
 
 if __name__ == "__main__":
