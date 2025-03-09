@@ -79,12 +79,13 @@ def load_ast_model(model_name="MIT/ast-finetuned-audioset-10-10-0.4593", **kwarg
 
 # Map AST model labels to homesounds labels
 # This mapping is based on semantic similarity between the labels from both systems
-def map_ast_labels_to_homesounds(predictions):
+def map_ast_labels_to_homesounds(predictions, threshold=0.05):
     """
     Map AST model predictions to homesounds labels
     
     Args:
         predictions: List of prediction dictionaries from AST model
+        threshold: Confidence threshold for predictions (default: 0.05)
         
     Returns:
         list: Mapped predictions with homesounds labels
@@ -277,10 +278,24 @@ def map_ast_labels_to_homesounds(predictions):
     # Map predictions to homesounds categories
     mapped_predictions = []
     
+    # Special handling for finger snapping with lower threshold
+    finger_snap_prediction = None
+    finger_snap_confidence = 0
+    
     for pred in predictions:
         # Extract label and confidence
         ast_label = pred["label"]
         confidence = pred["confidence"]
+        
+        # Special case for finger snapping
+        if ast_label == "Finger snapping" or ast_label == "Snap":
+            if confidence > finger_snap_confidence:
+                finger_snap_prediction = {
+                    "original_label": ast_label,
+                    "label": "finger-snap",
+                    "confidence": confidence
+                }
+                finger_snap_confidence = confidence
         
         # Check if this label is mapped
         if ast_label in ast_to_homesounds:
@@ -291,8 +306,18 @@ def map_ast_labels_to_homesounds(predictions):
                 "confidence": confidence
             })
     
+    # Add finger snapping if detected, even with lower confidence
+    if finger_snap_prediction and finger_snap_confidence > 0.03:  # Lower threshold just for finger snapping
+        # If already in mapped_predictions, remove it (to avoid duplicates)
+        mapped_predictions = [p for p in mapped_predictions if p["label"] != "finger-snap"]
+        mapped_predictions.append(finger_snap_prediction)
+    
+    # Filter by threshold (except for the special case handled above)
+    mapped_predictions = [p for p in mapped_predictions if p["confidence"] >= threshold or p["label"] == "finger-snap"]
+    
     # Sort by confidence
     mapped_predictions = sorted(mapped_predictions, key=lambda x: x["confidence"], reverse=True)
+    
     return mapped_predictions
 
 def preprocess_audio_for_ast(audio_data, sample_rate, feature_extractor):
@@ -439,7 +464,7 @@ def predict_sound(audio_data, sample_rate, model, feature_extractor, threshold=0
                     predictions = process_predictions(probs_np, id2label, threshold, top_k)
                     
                     # Also map AST predictions to the homesounds categories if possible
-                    mapped_predictions = map_ast_labels_to_homesounds(predictions["top_predictions"])
+                    mapped_predictions = map_ast_labels_to_homesounds(predictions["top_predictions"], threshold)
                     
                     # Include the raw probability vector for aggregation
                     predictions["raw_predictions"] = raw_predictions
@@ -471,7 +496,7 @@ def predict_sound(audio_data, sample_rate, model, feature_extractor, threshold=0
                         probs_np = probs[0].cpu().numpy()
                         raw_predictions = probs_np
                         predictions = process_predictions(probs_np, id2label, threshold, top_k)
-                        mapped_predictions = map_ast_labels_to_homesounds(predictions["top_predictions"])
+                        mapped_predictions = map_ast_labels_to_homesounds(predictions["top_predictions"], threshold)
                         predictions["raw_predictions"] = raw_predictions
                         predictions["mapped_predictions"] = mapped_predictions
                         
@@ -530,52 +555,15 @@ def process_predictions(probs_np, id2label, threshold=0.05, top_k=5):
         })
     
     # Map AST labels to homesounds labels
-    ast_to_homesounds = map_ast_labels_to_homesounds()
-    mapped_predictions = []
+    mapped_predictions = map_ast_labels_to_homesounds(top_predictions, threshold)
     
-    # Special handling for finger snapping with lower threshold
-    finger_snap_prediction = None
-    finger_snap_confidence = 0
-    
-    for pred in top_predictions:
-        ast_label = pred["label"]
-        confidence = pred["confidence"]
-        
-        # Special case for finger snapping
-        if ast_label == "Finger snapping" or ast_label == "Snap":
-            if confidence > finger_snap_confidence:
-                finger_snap_prediction = {
-                    "original_label": ast_label,
-                    "label": "finger-snap",
-                    "confidence": confidence
-                }
-                finger_snap_confidence = confidence
-        
-        # Try to map the AST label to a homesounds label
-        if ast_label in ast_to_homesounds:
-            homesounds_label = ast_to_homesounds[ast_label]
-            mapped_predictions.append({
-                "original_label": ast_label,
-                "label": homesounds_label,
-                "confidence": confidence
-            })
-    
-    # Add finger snapping if detected, even with lower confidence
-    if finger_snap_prediction and finger_snap_confidence > 0.03:  # Lower threshold just for finger snapping
-        # If already in mapped_predictions, remove it (to avoid duplicates)
-        mapped_predictions = [p for p in mapped_predictions if p["label"] != "finger-snap"]
-        mapped_predictions.append(finger_snap_prediction)
-    
-    # Filter by threshold (except for the special case handled above)
-    mapped_predictions = [p for p in mapped_predictions if p["confidence"] >= threshold]
-    
-    # Sort by confidence
-    mapped_predictions.sort(key=lambda x: x["confidence"], reverse=True)
-    
-    return {
+    # Output the results
+    result = {
         "top_predictions": top_predictions,
         "mapped_predictions": mapped_predictions
     }
+    
+    return result
 
 # Make class labels available at module level for aggregation
 class_labels = []
