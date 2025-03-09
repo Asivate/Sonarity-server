@@ -357,11 +357,24 @@ def predict_sound(audio_data, sample_rate, threshold=0.05, top_k=5):
             # Run inference on the audio data
             print("Running PANNs inference...")
             
-            # In panns-inference 0.1.1, AudioTagging.inference() expects:
-            # 1. audio_path OR 
-            # 2. (audio, sample_rate) tuple
-            # We'll use the second approach
-            clipwise_output = PANNS_MODEL.inference(audio=audio_data, sample_rate=32000)
+            # Save original data type for reference
+            original_type = type(audio_data)
+            print(f"Audio data type before inference: {original_type}")
+            
+            # Make a copy to avoid modifying the original data
+            inference_audio = audio_data.copy()
+            
+            # In version 0.1.1, AudioTagging expects numpy array, not torch tensor
+            if isinstance(inference_audio, torch.Tensor):
+                inference_audio = inference_audio.cpu().numpy()
+            
+            # In panns-inference 0.1.1, AudioTagging.inference() accepts audio 
+            # as a plain positional argument (no named parameters)
+            clipwise_output = PANNS_MODEL.inference(inference_audio)
+            
+            # Convert from torch tensor to numpy if needed
+            if isinstance(clipwise_output, torch.Tensor):
+                clipwise_output = clipwise_output.cpu().numpy()
             
             # Convert predictions to list of dictionaries
             predictions = []
@@ -383,8 +396,11 @@ def predict_sound(audio_data, sample_rate, threshold=0.05, top_k=5):
             
             # Print top predictions for debugging
             print("===== PANNS MODEL PREDICTIONS =====")
-            for pred in predictions[:5]:  # Print top 5 for debugging
-                print(f"  {pred['label']}: {pred['confidence']:.6f}")
+            if predictions:
+                for pred in predictions[:5]:  # Print top 5 for debugging
+                    print(f"  {pred['label']}: {pred['confidence']:.6f}")
+            else:
+                print("  No predictions above threshold")
             
             # Map PANNs labels to homesounds categories
             mapped_predictions = map_panns_labels_to_homesounds(predictions, threshold)
@@ -432,21 +448,31 @@ def initialize():
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
         print(f"Using device: {device}")
         
-        # Set model type - Always use the 16kHz variant
+        # Set model type - Always use CNN14 for v0.1.1
         PANNS_MODEL_TYPE = "CNN14"
         
-        # Set up data directory
+        # Set up data directory - this is where PANNs will download the model checkpoint
         home_dir = os.path.expanduser("~")
         panns_data_dir = os.path.join(home_dir, "panns_data")
         os.makedirs(panns_data_dir, exist_ok=True)
         
-        # In version 0.1.1, AudioTagging doesn't accept model_type directly
-        # Instead we need to create an AudioTagging instance without parameters
+        # In version 0.1.1, AudioTagging class loads CNN14 by default
+        # No parameters are needed for initialization
         PANNS_MODEL = AudioTagging()
         
-        # Move the model to the correct device
+        # In version 0.1.1, AudioTagging uses cuda() method to move to GPU
         if device == 'cuda' and torch.cuda.is_available():
+            print("Using CUDA for PANNs model")
             PANNS_MODEL.cuda()
+        else:
+            print("Using CPU for PANNs model")
+        
+        # Verify model is loaded by checking if labels() function works
+        try:
+            test_labels = PANNS_MODEL.labels()
+            print(f"Model loaded with {len(test_labels)} label classes")
+        except Exception as e:
+            print(f"Warning: Couldn't verify model labels: {e}")
         
         print(f"PANNs model loaded successfully: {PANNS_MODEL_TYPE}")
         MODEL_INITIALIZED = True

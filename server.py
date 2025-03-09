@@ -360,7 +360,7 @@ try:
         )
         # Initialize class labels for aggregation
         ast_model.initialize_class_labels(models["ast"])
-        print("AST model loaded successfully")
+    print("AST model loaded successfully")
 except Exception as e:
     print(f"Error loading AST model: {e}")
     traceback.print_exc()
@@ -527,7 +527,7 @@ def handle_source(json_data):
                         # Debug the aggregated predictions
                         print("===== AGGREGATED AST MODEL PREDICTIONS =====")
                         for pred in ast_predictions["top_predictions"][:5]:  # Show top 5 for brevity
-                            print(f"  {pred['label']}: {pred['confidence']:.6f}")
+                        print(f"  {pred['label']}: {pred['confidence']:.6f}")
                     
                     # Special check for finger snapping
                     finger_snap_detected = False
@@ -671,7 +671,7 @@ def handle_source(json_data):
                     print("Making prediction with TensorFlow model...")
                     with tf_graph.as_default():
                         with tf_session.as_default():
-                            predictions = models["tensorflow"].predict(np_data)
+                    predictions = models["tensorflow"].predict(np_data)
                     
                     # Debug all predictions before applying threshold
                     if np.ndim(predictions) > 0 and len(predictions) > 0:
@@ -744,10 +744,10 @@ def handle_source(json_data):
                                             if isinstance(sentiment_result, dict) and 'sentiment' in sentiment_result and isinstance(sentiment_result['sentiment'], dict) and 'category' in sentiment_result['sentiment']:
                                                 # Emit with sentiment information - fixed to match actual structure
                                                 label = f"Speech {sentiment_result['sentiment']['category']}"
-                                                socketio.emit('audio_label', {
+                                            socketio.emit('audio_label', {
                                                     'label': label,
                                                     'accuracy': str(sentiment_result['sentiment']['confidence']),
-                                                    'db': str(db),
+                                                'db': str(db),
                                                     'emoji': sentiment_result['sentiment']['emoji'],
                                                     'transcription': sentiment_result['text'],
                                                     'emotion': sentiment_result['sentiment']['original_emotion'],
@@ -792,16 +792,16 @@ def handle_source(json_data):
                                                     print("EMITTING BASIC SPEECH DETECTION (no sentiment)")
                                                 # Cleanup memory
                                                 cleanup_memory()
-                                                return
-                                        # Normal sound emission (non-speech or sentiment analysis failed)
-                                        socketio.emit('audio_label', {
-                                            'label': human_label,
-                                            'accuracy': str(pred_max_val),
-                                            'db': str(db)
-                                        })
+                                            return
+                                    # Normal sound emission (non-speech or sentiment analysis failed)
+                                    socketio.emit('audio_label', {
+                                        'label': human_label,
+                                        'accuracy': str(pred_max_val),
+                                        'db': str(db)
+                                    })
                                         # Cleanup memory
                                         cleanup_memory()
-                                        break
+                                    break
                         else:
                             print(f"No prediction above threshold: {pred_max_val:.4f}")
                             socketio.emit('audio_label', {
@@ -1014,8 +1014,8 @@ def handle_audio(data):
                         
                         # Debug the aggregated predictions
                         print("===== AGGREGATED AST MODEL PREDICTIONS =====")
-                        for pred in ast_predictions["top_predictions"][:5]:  # Show top 5 for brevity
-                            print(f"  {pred['label']}: {pred['confidence']:.6f}")
+                    for pred in ast_predictions["top_predictions"][:5]:  # Show top 5 for brevity
+                        print(f"  {pred['label']}: {pred['confidence']:.6f}")
                     
                     # Special check for finger snapping
                     finger_snap_detected = False
@@ -1067,10 +1067,10 @@ def handle_audio(data):
                                 if isinstance(sentiment_result, dict) and 'sentiment' in sentiment_result and isinstance(sentiment_result['sentiment'], dict) and 'category' in sentiment_result['sentiment']:
                                     # Emit with sentiment information - fixed to match actual structure
                                     label = f"Speech {sentiment_result['sentiment']['category']}"
-                                    socketio.emit('audio_label', {
+                                socketio.emit('audio_label', {
                                         'label': label,
                                         'accuracy': str(sentiment_result['sentiment']['confidence']),
-                                        'db': str(db),
+                                    'db': str(db),
                                         'emoji': sentiment_result['sentiment']['emoji'],
                                         'transcription': sentiment_result['text'],
                                         'emotion': sentiment_result['sentiment']['original_emotion'],
@@ -1115,7 +1115,7 @@ def handle_audio(data):
                                         print("EMITTING BASIC SPEECH DETECTION (no sentiment)")
                                     # Cleanup memory
                                     cleanup_memory()
-                                    return
+                                return
                         
                         # Emit the prediction if confidence is above threshold or it's a finger snap
                         if top_confidence > PREDICTION_THRES or (top_label == "finger-snap" and top_confidence > FINGER_SNAP_THRES):
@@ -1285,10 +1285,10 @@ def process_with_tensorflow_model(np_wav, db):
                                     if isinstance(sentiment_result, dict) and 'sentiment' in sentiment_result and isinstance(sentiment_result['sentiment'], dict) and 'category' in sentiment_result['sentiment']:
                                         # Emit with sentiment information - fixed to match actual structure
                                         label = f"Speech {sentiment_result['sentiment']['category']}"
-                                        socketio.emit('audio_label', {
+                                    socketio.emit('audio_label', {
                                             'label': label,
                                             'accuracy': str(sentiment_result['sentiment']['confidence']),
-                                            'db': str(db),
+                                        'db': str(db),
                                             'emoji': sentiment_result['sentiment']['emoji'],
                                             'transcription': sentiment_result['text'],
                                             'emotion': sentiment_result['sentiment']['original_emotion'],
@@ -1334,15 +1334,15 @@ def process_with_tensorflow_model(np_wav, db):
                                         # Cleanup memory
                                         cleanup_memory()
                                         return
-                                # Normal sound emission (non-speech or sentiment analysis failed)
-                                socketio.emit('audio_label', {
-                                    'label': human_label,
-                                    'accuracy': str(pred_max_val),
-                                    'db': str(db)
-                                })
+                            # Normal sound emission (non-speech or sentiment analysis failed)
+                            socketio.emit('audio_label', {
+                                'label': human_label,
+                                'accuracy': str(pred_max_val),
+                                'db': str(db)
+                            })
                                 # Cleanup memory
                                 cleanup_memory()
-                                break
+                            break
                 else:
                     print(f"No prediction above threshold: {pred_max_val:.4f}")
                     socketio.emit('audio_label', {
@@ -1467,7 +1467,7 @@ def process_speech_with_sentiment(audio_data):
         logger.info(f"Used Google Cloud Speech-to-Text for transcription")
     else:
         # Use Whisper (default)
-        transcription = speech_processor.transcribe(concatenated_audio, RATE)
+    transcription = speech_processor.transcribe(concatenated_audio, RATE)
         logger.info(f"Used Whisper for transcription")
     
     # Check for valid transcription with sufficient content
