@@ -25,9 +25,13 @@ import wget
 logger = logging.getLogger(__name__)
 
 try:
-    # Import PANNs libraries
+    # Import PANNs libraries - use the classes available in 0.1.1
     from panns_inference.inference import AudioTagging
-    from panns_inference.models import Cnn14, Cnn14_16k, Wavegram_Logmel_Cnn14
+    from panns_inference.models import Cnn14  # Cnn14 is available in 0.1.1
+    import librosa
+    
+    # Flag indicating PANNs is available
+    PANNS_AVAILABLE = True
 except ImportError as e:
     print(f"PANNs import error: {e}")
     PANNS_AVAILABLE = False
@@ -42,7 +46,7 @@ MODEL_INITIALIZED = False  # Flag to check if the model is initialized
 # CNN10 - Lighter, faster model with good performance
 # CNN14 - Larger model with better accuracy
 # CNN14_16k - 16kHz variant compatible with SoundWatch's 16kHz audio
-DEFAULT_MODEL_TYPE = "CNN14_16k"  # Default model type
+DEFAULT_MODEL_TYPE = "CNN14"  # The default model in 0.1.1
 
 
 def check_panns_availability():
@@ -57,7 +61,7 @@ def check_panns_availability():
     try:
         # Try to import PANNs-related packages
         from panns_inference.inference import AudioTagging
-        from panns_inference.models import Cnn14, Cnn14_16k, Wavegram_Logmel_Cnn14
+        from panns_inference.models import Cnn14  # Only check for Cnn14 which is in 0.1.1
         import librosa
         
         # If we got here, PANNs is available
@@ -304,40 +308,31 @@ def predict_sound(audio_data, sample_rate, threshold=0.05, top_k=5):
             print(f"Audio too quiet: {db_level} dB")
             return {"top_predictions": [{"label": "Silence", "confidence": 0.95}], "mapped_predictions": []}
             
-        # Ensure audio length is at least 1 second (16000 samples)
-        # This is critical for the PANNs model to avoid dimension errors
-        min_audio_length = 16000  # 1 second at 16kHz
-        
+        # Make sure we're using exactly 32kHz sample rate for CNN14 (different from CNN14_16k)
+        # Standard CNN14 model expects 32kHz audio
+        if sample_rate != 32000:
+            print(f"Resampling from {sample_rate}Hz to 32000Hz")
+            # Use librosa for better quality resampling
+            audio_data = librosa.resample(audio_data, orig_sr=sample_rate, target_sr=32000)
+            
+        # Ensure audio length is sufficient - CNN14 needs at least 1 second at 32kHz
+        min_audio_length = 32000  # 1 second at 32kHz
         if len(audio_data) < min_audio_length:
             # Pad the audio to minimum length
             padding = min_audio_length - len(audio_data)
             audio_data = np.pad(audio_data, (0, padding), 'constant')
             print(f"Padded audio from {len(audio_data) - padding} to {len(audio_data)} samples")
         
-        # Make sure we're using exactly 16kHz sample rate for CNN14_16k
-        if sample_rate != 16000:
-            print(f"Resampling from {sample_rate}Hz to 16000Hz")
-            # Use librosa for better quality resampling
-            import librosa
-            audio_data = librosa.resample(audio_data, orig_sr=sample_rate, target_sr=16000)
-            
         # Make prediction with PANNs model
         try:
             # Run inference on the audio data
             print("Running PANNs inference...")
-            # For PANNs 0.1.1, we need to ensure the audio has a batch dimension
-            if len(audio_data.shape) == 1:
-                audio_data = audio_data[np.newaxis, :]
-                
-            clipwise_output, _ = PANNS_MODEL.inference(audio_data)
+            # For PANNs 0.1.1, no need to add batch dimension, AudioTagging handles it
+            clipwise_output = PANNS_MODEL.inference(audio_data)
             
             # Convert to numpy array if it's a tensor
             if isinstance(clipwise_output, torch.Tensor):
                 clipwise_output = clipwise_output.cpu().numpy()
-                
-            # Extract the first item if it's batched
-            if len(clipwise_output.shape) > 1:
-                clipwise_output = clipwise_output[0]
             
             # Convert predictions to list of dictionaries
             predictions = []
@@ -402,21 +397,21 @@ def initialize():
             print("PANNs package not available - won't use PANNs model")
             return False
             
-        print("Loading PANNs model: CNN14_16k")
+        print("Loading PANNs model: CNN14")
         
         # Determine device
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
         print(f"Using device: {device}")
         
         # Set model type - Always use the 16kHz variant
-        PANNS_MODEL_TYPE = "CNN14_16k"
+        PANNS_MODEL_TYPE = "CNN14"
         
         # Set up data directory
         home_dir = os.path.expanduser("~")
         panns_data_dir = os.path.join(home_dir, "panns_data")
         os.makedirs(panns_data_dir, exist_ok=True)
         
-        # Initialize the Audio Tagging model with the CNN14_16k architecture
+        # Initialize the Audio Tagging model with the CNN14 architecture
         PANNS_MODEL = AudioTagging(
             model_type=PANNS_MODEL_TYPE,
             checkpoint_path=None,  # Will be downloaded automatically
