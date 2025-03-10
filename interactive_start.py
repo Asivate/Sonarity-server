@@ -53,6 +53,7 @@ def main():
     parser = argparse.ArgumentParser(description="Interactive startup for SoundWatch Server")
     parser.add_argument('--host', default="0.0.0.0", help="Host to bind to")
     parser.add_argument('--port', type=int, default=5000, help="Port to bind to")
+    parser.add_argument('--debug', action='store_true', help="Enable debug mode")
     args = parser.parse_args()
     
     while True:
@@ -74,17 +75,14 @@ def main():
             settings["Recognition Model"] = "AST (Audio Spectrogram Transformer)"
             os.environ["USE_AST_MODEL"] = "1"
             os.environ["USE_PANNS_MODEL"] = "0"
-            model_cmd_args = ["--use-ast-model=1", "--use-panns-model=0"]
         elif model_choice == 2:
             settings["Recognition Model"] = "PANNs (Pretrained Audio Neural Networks)"
             os.environ["USE_AST_MODEL"] = "0"
             os.environ["USE_PANNS_MODEL"] = "1"
-            model_cmd_args = ["--use-ast-model=0", "--use-panns-model=1"]
         else:
             settings["Recognition Model"] = "TensorFlow (Legacy)"
             os.environ["USE_AST_MODEL"] = "0"
             os.environ["USE_PANNS_MODEL"] = "0"
-            model_cmd_args = ["--use-ast-model=0", "--use-panns-model=0"]
         
         # Step 2: Select speech recognition
         speech_choice = get_choice(
@@ -92,23 +90,27 @@ def main():
             ["Yes - Whisper (local, private)", "Yes - Google Cloud (requires API key)", "No"]
         )
         
+        # Initialize command line arguments list with just port
+        cmd_args = [f"--port={args.port}"]
+        
+        if args.debug:
+            cmd_args.append("--debug")
+        
         if speech_choice == 1:
             settings["Speech Recognition"] = "Whisper (local)"
-            speech_cmd_args = ["--use-speech=1", "--google-speech=0"]
             os.environ["USE_SPEECH"] = "1"
             os.environ["USE_GOOGLE_SPEECH"] = "0"
         elif speech_choice == 2:
             settings["Speech Recognition"] = "Google Cloud"
-            speech_cmd_args = ["--use-speech=1", "--use-google-speech"]
             os.environ["USE_SPEECH"] = "1"
             os.environ["USE_GOOGLE_SPEECH"] = "1"
+            # Add the Google Speech flag to command line args
+            cmd_args.append("--use-google-speech")
         else:
             settings["Speech Recognition"] = "Disabled"
-            speech_cmd_args = ["--use-speech=0"]
             os.environ["USE_SPEECH"] = "0"
         
         # Step 3: Select sentiment analysis (if speech is enabled)
-        sentiment_cmd_args = []
         if speech_choice != 3:  # If speech is enabled
             sentiment_choice = get_choice(
                 "😊 Enable sentiment analysis on speech?",
@@ -117,15 +119,12 @@ def main():
             
             if sentiment_choice == 1:
                 settings["Sentiment Analysis"] = "Enabled"
-                sentiment_cmd_args = ["--use-sentiment=1"]
                 os.environ["USE_SENTIMENT"] = "1"
             else:
                 settings["Sentiment Analysis"] = "Disabled"
-                sentiment_cmd_args = ["--use-sentiment=0"]
                 os.environ["USE_SENTIMENT"] = "0"
         else:
             settings["Sentiment Analysis"] = "Disabled (Speech recognition is off)"
-            sentiment_cmd_args = ["--use-sentiment=0"]
             os.environ["USE_SENTIMENT"] = "0"
         
         # Step 4: Select memory optimization
@@ -140,36 +139,39 @@ def main():
         
         if memory_choice == 1:
             settings["Memory Optimization"] = "None"
-            memory_cmd_args = ["--memory-optimization=0"]
             os.environ["MEMORY_OPTIMIZATION"] = "0"
         elif memory_choice == 2:
             settings["Memory Optimization"] = "Moderate"
-            memory_cmd_args = ["--memory-optimization=1"]
             os.environ["MEMORY_OPTIMIZATION"] = "1"
         else:
             settings["Memory Optimization"] = "Aggressive"
-            memory_cmd_args = ["--memory-optimization=2"]
             os.environ["MEMORY_OPTIMIZATION"] = "2"
         
         # Confirm settings
         if confirm_settings(settings):
             break
     
-    # Prepare the command
-    host_port_args = [f"--host={args.host}", f"--port={args.port}"]
-    all_args = model_cmd_args + speech_cmd_args + sentiment_cmd_args + memory_cmd_args + host_port_args
+    # Add host if specified and different from default
+    if args.host != "0.0.0.0":
+        cmd_args.append(f"--host={args.host}")
     
-    cmd = [sys.executable, "server.py"] + all_args
+    cmd = [sys.executable, "server.py"] + cmd_args
     
     print("\n" + "=" * 80)
     print("  STARTING SERVER  ".center(80))
     print("=" * 80)
     print(f"\nRunning command: {' '.join(cmd)}")
+    print("\nEnvironment variables set:")
+    for key in ["USE_AST_MODEL", "USE_PANNS_MODEL", "USE_SPEECH", "USE_GOOGLE_SPEECH", 
+                "USE_SENTIMENT", "MEMORY_OPTIMIZATION"]:
+        print(f"  {key}={os.environ.get(key, 'not set')}")
     print("\nPress Ctrl+C to stop the server\n")
     
-    # Run the server
+    # Run the server with the environment variables set
     try:
-        subprocess.run(cmd)
+        # Create a new environment with the updated variables
+        env = os.environ.copy()
+        subprocess.run(cmd, env=env)
     except KeyboardInterrupt:
         print("\nServer stopped by user.")
 

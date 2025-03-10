@@ -277,21 +277,72 @@ See `DEBUGGING.md` for common issues and solutions.
 
 See the LICENSE file for details.
 
-### Command-line Configuration
+### Configuration
 
-You can also configure the server using command-line arguments:
+The server can be configured in several ways:
+
+#### 1. Interactive Configuration (Recommended)
+
+The easiest way to configure the server is using the interactive startup script:
 
 ```bash
-python server.py --port=5000 --use-ast-model=1 --use-panns-model=0 --use-speech=1 --use-google-speech
+python interactive_start.py
 ```
 
-### Environment Variables
+This provides a user-friendly menu to:
+- Select which sound recognition model to use
+- Enable/disable speech recognition
+- Choose speech recognition backend
+- Set memory optimization level
 
-Set these environment variables before starting the server:
+#### 2. Environment Variables
 
+Most settings are controlled through environment variables:
+
+```bash
+# Set environment variables
+export USE_AST_MODEL=1
+export USE_PANNS_MODEL=0
+export USE_SPEECH=1
+export USE_GOOGLE_SPEECH=0
+export USE_SENTIMENT=1
+export MEMORY_OPTIMIZATION=1
+
+# Then run the server
+python server.py
+```
+
+Available environment variables:
 - `USE_AST_MODEL`: Set to "1" to use AST model, "0" to disable
 - `USE_PANNS_MODEL`: Set to "1" to use PANNs model, "0" to disable
 - `USE_SPEECH`: Set to "1" to enable speech recognition
 - `USE_GOOGLE_SPEECH`: Set to "1" to use Google Cloud Speech instead of Whisper
 - `USE_SENTIMENT`: Set to "1" to enable sentiment analysis on transcribed speech
 - `MEMORY_OPTIMIZATION`: Set to "0" for none, "1" for moderate, "2" for aggressive
+
+#### 3. Command-line Arguments
+
+The server supports a limited set of command-line arguments:
+
+```bash
+python server.py --port=5000 --use-google-speech
+```
+
+Available arguments:
+- `--port`: Specify the port to listen on (default: 5000)
+- `--use-google-speech`: Use Google Cloud Speech-to-Text instead of Whisper
+- `--debug`: Enable debug mode
+
+#### 4. Toggle Scripts
+
+Use these scripts to quickly enable/disable specific models:
+
+```bash
+# Toggle AST model
+python toggle_ast.py on  # Enable
+python toggle_ast.py off  # Disable
+
+# Toggle PANNs model
+python toggle_panns.py on  # Enable
+python toggle_panns.py off  # Disable
+```
