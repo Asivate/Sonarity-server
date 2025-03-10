@@ -250,8 +250,8 @@ To use the PANNs model:
    ```
    This script will:
    - Download the CNN9 model weights (~150MB) from Zenodo
-   - Copy the class labels from the `assets` directory
-   - Copy the scalar file from the `assets` directory for feature normalization
+   - Copy the class labels from the `csv files` directory
+   - Create the necessary scalar file for feature normalization
 
 2. Enable the PANNs model:
    ```bash
@@ -276,3 +276,22 @@ See `DEBUGGING.md` for common issues and solutions.
 ## License
 
 See the LICENSE file for details.
+
+### Command-line Configuration
+
+You can also configure the server using command-line arguments:
+
+```bash
+python server.py --port=5000 --use-ast-model=1 --use-panns-model=0 --use-speech=1 --use-google-speech
+```
+
+### Environment Variables
+
+Set these environment variables before starting the server:
+
+- `USE_AST_MODEL`: Set to "1" to use AST model, "0" to disable
+- `USE_PANNS_MODEL`: Set to "1" to use PANNs model, "0" to disable
+- `USE_SPEECH`: Set to "1" to enable speech recognition
+- `USE_GOOGLE_SPEECH`: Set to "1" to use Google Cloud Speech instead of Whisper
+- `USE_SENTIMENT`: Set to "1" to enable sentiment analysis on transcribed speech
+- `MEMORY_OPTIMIZATION`: Set to "0" for none, "1" for moderate, "2" for aggressive

@@ -74,17 +74,17 @@ def main():
             settings["Recognition Model"] = "AST (Audio Spectrogram Transformer)"
             os.environ["USE_AST_MODEL"] = "1"
             os.environ["USE_PANNS_MODEL"] = "0"
-            model_cmd_args = ["--use_ast_model=1", "--use_panns_model=0"]
+            model_cmd_args = ["--use-ast-model=1", "--use-panns-model=0"]
         elif model_choice == 2:
             settings["Recognition Model"] = "PANNs (Pretrained Audio Neural Networks)"
             os.environ["USE_AST_MODEL"] = "0"
             os.environ["USE_PANNS_MODEL"] = "1"
-            model_cmd_args = ["--use_ast_model=0", "--use_panns_model=1"]
+            model_cmd_args = ["--use-ast-model=0", "--use-panns-model=1"]
         else:
             settings["Recognition Model"] = "TensorFlow (Legacy)"
             os.environ["USE_AST_MODEL"] = "0"
             os.environ["USE_PANNS_MODEL"] = "0"
-            model_cmd_args = ["--use_ast_model=0", "--use_panns_model=0"]
+            model_cmd_args = ["--use-ast-model=0", "--use-panns-model=0"]
         
         # Step 2: Select speech recognition
         speech_choice = get_choice(
@@ -94,17 +94,17 @@ def main():
         
         if speech_choice == 1:
             settings["Speech Recognition"] = "Whisper (local)"
-            speech_cmd_args = ["--use_speech=1", "--google_speech=0"]
+            speech_cmd_args = ["--use-speech=1", "--google-speech=0"]
             os.environ["USE_SPEECH"] = "1"
             os.environ["USE_GOOGLE_SPEECH"] = "0"
         elif speech_choice == 2:
             settings["Speech Recognition"] = "Google Cloud"
-            speech_cmd_args = ["--use_speech=1", "--google_speech=1"]
+            speech_cmd_args = ["--use-speech=1", "--use-google-speech"]
             os.environ["USE_SPEECH"] = "1"
             os.environ["USE_GOOGLE_SPEECH"] = "1"
         else:
             settings["Speech Recognition"] = "Disabled"
-            speech_cmd_args = ["--use_speech=0"]
+            speech_cmd_args = ["--use-speech=0"]
             os.environ["USE_SPEECH"] = "0"
         
         # Step 3: Select sentiment analysis (if speech is enabled)
@@ -117,15 +117,15 @@ def main():
             
             if sentiment_choice == 1:
                 settings["Sentiment Analysis"] = "Enabled"
-                sentiment_cmd_args = ["--use_sentiment=1"]
+                sentiment_cmd_args = ["--use-sentiment=1"]
                 os.environ["USE_SENTIMENT"] = "1"
             else:
                 settings["Sentiment Analysis"] = "Disabled"
-                sentiment_cmd_args = ["--use_sentiment=0"]
+                sentiment_cmd_args = ["--use-sentiment=0"]
                 os.environ["USE_SENTIMENT"] = "0"
         else:
             settings["Sentiment Analysis"] = "Disabled (Speech recognition is off)"
-            sentiment_cmd_args = ["--use_sentiment=0"]
+            sentiment_cmd_args = ["--use-sentiment=0"]
             os.environ["USE_SENTIMENT"] = "0"
         
         # Step 4: Select memory optimization
@@ -140,15 +140,15 @@ def main():
         
         if memory_choice == 1:
             settings["Memory Optimization"] = "None"
-            memory_cmd_args = ["--memory_optimization=0"]
+            memory_cmd_args = ["--memory-optimization=0"]
             os.environ["MEMORY_OPTIMIZATION"] = "0"
         elif memory_choice == 2:
             settings["Memory Optimization"] = "Moderate"
-            memory_cmd_args = ["--memory_optimization=1"]
+            memory_cmd_args = ["--memory-optimization=1"]
             os.environ["MEMORY_OPTIMIZATION"] = "1"
         else:
             settings["Memory Optimization"] = "Aggressive"
-            memory_cmd_args = ["--memory_optimization=2"]
+            memory_cmd_args = ["--memory-optimization=2"]
             os.environ["MEMORY_OPTIMIZATION"] = "2"
         
         # Confirm settings

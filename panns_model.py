@@ -30,9 +30,8 @@ SCALAR_FN = os.path.join(MODEL_DIR, 'scalar.h5')
 CSV_FNAME = os.path.join(MODEL_DIR, 'validate_meta.csv')
 
 # Alternative paths for labels file (fallback locations)
-ASSETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'assets')
-ASSETS_CSV = os.path.join(ASSETS_DIR, 'validate_meta.csv')
-ASSETS_SCALAR = os.path.join(ASSETS_DIR, 'scalar.h5')
+CSV_FILES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'csv files')
+CSV_FILES_FNAME = os.path.join(CSV_FILES_DIR, 'validate_meta.csv')
 
 # Default audio parameters
 SAMPLE_RATE = 32000
@@ -178,30 +177,32 @@ class PANNsModelInference:
             # Load class labels
             if not os.path.exists(CSV_FNAME):
                 logger.error(f"Labels file not found at {CSV_FNAME}")
-                # Check if it exists in assets directory
-                if os.path.exists(ASSETS_CSV):
-                    logger.info(f"Found labels file in assets directory. Copying to models directory...")
+                # Check alternative locations
+                if os.path.exists(CSV_FILES_FNAME):
+                    logger.info(f"Found labels file in 'csv files' directory. Copying to models directory...")
                     import shutil
-                    shutil.copy(ASSETS_CSV, CSV_FNAME)
-                    logger.info(f"Copied labels file from assets directory to models directory")
+                    shutil.copy(CSV_FILES_FNAME, CSV_FNAME)
+                    logger.info(f"Copied labels file from {CSV_FILES_FNAME} to {CSV_FNAME}")
                 else:
-                    logger.error("Cannot find labels file in assets directory.")
-                    logger.error("Please run 'python download_panns_model.py' to set up the required files.")
-                    return False
+                    # Use reference labels from the demo repository
+                    ref_csv = os.path.join(os.path.dirname(os.path.abspath(__file__)), 
+                                          'General-Purpose-Sound-Recognition-Demo',
+                                          'General-Purpose-Sound-Recognition-Demo-2019',
+                                          'models',
+                                          'validate_meta.csv')
+                    if os.path.exists(ref_csv):
+                        logger.info(f"Copying reference labels from {ref_csv}")
+                        import shutil
+                        shutil.copy(ref_csv, CSV_FNAME)
+                    else:
+                        logger.error("Cannot find reference labels. Please run 'python download_panns_model.py' to set up the required files.")
+                        return False
             
             # Load scalar
             if not os.path.exists(SCALAR_FN):
                 logger.error(f"Scalar file not found at {SCALAR_FN}")
-                # Check if it exists in assets directory
-                if os.path.exists(ASSETS_SCALAR):
-                    logger.info(f"Found scalar file in assets directory. Copying to models directory...")
-                    import shutil
-                    shutil.copy(ASSETS_SCALAR, SCALAR_FN)
-                    logger.info(f"Copied scalar file from assets directory to models directory")
-                else:
-                    logger.error("Cannot find scalar file in assets directory.")
-                    logger.error("Please run 'python download_panns_model.py' to set up the required files.")
-                    return False
+                logger.error("Please run 'python download_panns_model.py' to set up the required files.")
+                return False
             
             # Load audio labels
             logger.info(f"Loading class labels from {CSV_FNAME}")

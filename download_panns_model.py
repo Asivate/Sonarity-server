@@ -22,10 +22,17 @@ MODEL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'models')
 MODEL_URL = "https://zenodo.org/record/3576599/files/Cnn9_GMP_64x64_300000_iterations_mAP%3D0.37.pth?download=1"
 MODEL_PATH = os.path.join(MODEL_DIR, 'Cnn9_GMP_64x64_300000_iterations_mAP=0.37.pth')
 
-# Reference paths for copying files from assets directory
-ASSETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'assets')
-REF_CSV = os.path.join(ASSETS_DIR, 'validate_meta.csv')
-REF_SCALAR = os.path.join(ASSETS_DIR, 'scalar.h5')
+# Reference paths for copying files from csv files directory
+CSV_FILES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'csv files')
+REF_CSV = os.path.join(CSV_FILES_DIR, 'validate_meta.csv')
+
+# Alternative reference paths (fallback)
+REF_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 
+                      'General-Purpose-Sound-Recognition-Demo',
+                      'General-Purpose-Sound-Recognition-Demo-2019',
+                      'models')
+ALT_REF_CSV = os.path.join(REF_DIR, 'validate_meta.csv')
+REF_SCALAR = os.path.join(REF_DIR, 'scalar.h5')
 
 # Target paths
 CSV_PATH = os.path.join(MODEL_DIR, 'validate_meta.csv')
@@ -91,28 +98,49 @@ def main():
     # Copy label CSV file
     if not os.path.exists(CSV_PATH) or args.force:
         logger.info("Copying class labels file...")
+        # First try to copy from csv files directory
         if os.path.exists(REF_CSV):
-            logger.info(f"Using labels file from assets directory: {REF_CSV}")
+            logger.info(f"Using labels file from csv files directory: {REF_CSV}")
             if not copy_file(REF_CSV, CSV_PATH):
                 success = False
+        # Fall back to alternative location if available
+        elif os.path.exists(ALT_REF_CSV):
+            logger.info(f"Using labels file from alternative location: {ALT_REF_CSV}")
+            if not copy_file(ALT_REF_CSV, CSV_PATH):
+                success = False
         else:
-            logger.error(f"Labels file not found: {REF_CSV}")
-            logger.error("Please ensure validate_meta.csv is in the assets directory.")
+            logger.error(f"Labels file not found in any location. Please place validate_meta.csv in the 'csv files' directory.")
             success = False
     else:
         logger.info(f"Labels file already exists: {CSV_PATH}")
     
-    # Copy scalar file
+    # Handle scalar file - create it if it doesn't exist
     if not os.path.exists(SCALAR_PATH) or args.force:
-        logger.info("Copying scalar file...")
+        logger.info("Handling scalar file...")
+        # Try to copy from reference location if available
         if os.path.exists(REF_SCALAR):
-            logger.info(f"Using scalar file from assets directory: {REF_SCALAR}")
+            logger.info(f"Copying scalar file from: {REF_SCALAR}")
             if not copy_file(REF_SCALAR, SCALAR_PATH):
                 success = False
         else:
-            logger.error(f"Scalar file not found: {REF_SCALAR}")
-            logger.error("Please ensure scalar.h5 is in the assets directory.")
-            success = False
+            # Generate a default scalar file
+            logger.info("Reference scalar file not found. Creating a default scalar file...")
+            try:
+                import h5py
+                import numpy as np
+                
+                # Default scalar values from the PANNs implementation
+                mean = np.array([-6.6268077], dtype=np.float32)
+                std = np.array([5.358466], dtype=np.float32)
+                
+                with h5py.File(SCALAR_PATH, 'w') as f:
+                    f.create_dataset('mean', data=mean)
+                    f.create_dataset('std', data=std)
+                
+                logger.info(f"Created default scalar file: {SCALAR_PATH}")
+            except Exception as e:
+                logger.error(f"Error creating default scalar file: {str(e)}")
+                success = False
     else:
         logger.info(f"Scalar file already exists: {SCALAR_PATH}")
     
