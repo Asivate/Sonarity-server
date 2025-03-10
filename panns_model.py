@@ -43,7 +43,7 @@ logger = logging.getLogger(__name__)
 
 # Global variables
 MODEL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'models')
-MODEL_PATH = os.path.join(MODEL_DIR, 'Cnn13_mAP=0.423.pth')
+MODEL_PATH = os.path.join(MODEL_DIR, 'Cnn13_GMP_64x64_520000_iterations_mAP=0.42.pth')
 SCALAR_FN = os.path.join(MODEL_DIR, 'scalar.h5')
 CSV_FNAME = os.path.join(MODEL_DIR, 'validate_meta.csv')
 

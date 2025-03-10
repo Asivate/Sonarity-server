@@ -2,7 +2,7 @@
 """
 Setup Script for PANNs CNN13 Model
 
-This script downloads and sets up the larger CNN13 model with better accuracy (mAP=0.423)
+This script downloads and sets up the larger CNN13 model with better accuracy (mAP=0.42)
 for SoundWatch. It also configures CPU optimizations for Debian 12.
 
 Usage:
@@ -24,8 +24,8 @@ logger = logging.getLogger(__name__)
 
 # Global variables
 MODEL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'models')
-MODEL_URL = "https://zenodo.org/records/3987831/files/Cnn13_mAP%3D0.423.pth?download=1"
-MODEL_PATH = os.path.join(MODEL_DIR, 'Cnn13_mAP=0.423.pth')
+MODEL_URL = "https://zenodo.org/records/3576599/files/Cnn13_GMP_64x64_520000_iterations_mAP=0.42.pth?download=1"
+MODEL_PATH = os.path.join(MODEL_DIR, 'Cnn13_GMP_64x64_520000_iterations_mAP=0.42.pth')
 CSV_PATH = os.path.join(MODEL_DIR, 'validate_meta.csv')
 SCALAR_PATH = os.path.join(MODEL_DIR, 'scalar.h5')
 
@@ -243,7 +243,7 @@ def main():
         logger.info("="*60)
         logger.info("Model file: " + MODEL_PATH)
         logger.info("Model size: 1.3GB")
-        logger.info("mAP score: 0.423 (higher than CNN9's 0.37)")
+        logger.info("mAP score: 0.42 (higher than CNN9's 0.37)")
         logger.info("")
         logger.info("Next steps:")
         logger.info("1. Restart your SoundWatch server with:")
@@ -259,7 +259,7 @@ def main():
         logger.error("="*60)
         logger.error("Please check the error messages above and try again.")
         logger.error("You may need to manually download the model from:")
-        logger.error("https://zenodo.org/record/3987831/files/Cnn13_mAP%3D0.423.pth")
+        logger.error("https://zenodo.org/records/3576599/files/Cnn13_GMP_64x64_520000_iterations_mAP=0.42.pth")
         logger.error("And place it in the models directory.")
         logger.error("="*60)
         return 1
