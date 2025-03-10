@@ -527,13 +527,14 @@ class PANNsModelInference:
         logger.info(f"Log-mel tensor shape: {log_mel_tensor.shape}")
         return log_mel_tensor
     
-    def predict(self, audio, top_k=5, threshold=0.2):
+    def predict(self, audio, top_k=5, threshold=0.2, boost_other_categories=True):
         """Predict sound classes from audio waveform.
         
         Args:
             audio: Audio waveform as numpy array
             top_k: Number of top predictions to return
             threshold: Confidence threshold for predictions
+            boost_other_categories: Whether to boost non-speech/music categories
             
         Returns:
             List of (label, confidence) tuples for top K predictions
@@ -559,11 +560,23 @@ class PANNsModelInference:
                 logger.info(f"Normalizing audio with max value {max_abs:.4f}")
                 audio = audio / max_abs
             
+            # Apply pre-emphasis filter to improve higher frequency detection
+            audio = np.append(audio[0], audio[1:] - 0.97 * audio[:-1])
+            
             # Make sure audio is long enough - PANNs model expects at least a few frames of audio
-            if len(audio) < 32000:  # at least 1 second at 32kHz
-                logger.info(f"Audio too short ({len(audio)} samples). Padding to 32000 samples.")
-                padded_audio = np.zeros(32000, dtype=np.float32)  # Pre-allocate with correct dtype
-                padded_audio[:len(audio)] = audio
+            min_length = 32000  # 1 second at 32kHz
+            if len(audio) < min_length:
+                logger.info(f"Audio too short ({len(audio)} samples). Padding to {min_length} samples.")
+                # Smart padding: if audio is very short, repeat it to fill the buffer
+                if len(audio) < min_length / 4:
+                    # For very short sounds, repeat them to fill the buffer
+                    repeats = int(np.ceil(min_length / len(audio)))
+                    padded_audio = np.tile(audio, repeats)[:min_length]
+                    logger.info(f"Using repetition padding for very short audio ({repeats} repeats)")
+                else:
+                    # For longer sounds, use zero padding
+                    padded_audio = np.zeros(min_length, dtype=np.float32)  # Pre-allocate with correct dtype
+                    padded_audio[:len(audio)] = audio
                 audio = padded_audio
             
             # Extract log-mel features - this will enforce correct shape for model
@@ -648,7 +661,38 @@ class PANNsModelInference:
             
             # Get top-k indices
             try:
-                top_indices = np.argsort(prediction)[::-1][:top_k]
+                # Apply category boosting if enabled
+                if boost_other_categories:
+                    # Create a copy of the prediction array
+                    boosted_prediction = prediction.copy()
+                    
+                    # Find indices for speech and music
+                    speech_idx = -1
+                    music_idx = -1
+                    
+                    # Find the indices based on labels
+                    for idx, row in self.labels.iterrows():
+                        label_name = row['display_name'].lower()
+                        if 'speech' in label_name:
+                            speech_idx = idx
+                        elif 'music' in label_name:
+                            music_idx = idx
+                    
+                    # Apply boosting to all categories except speech and music
+                    boost_factor = 1.2  # 20% boost
+                    for idx in range(len(boosted_prediction)):
+                        if idx != speech_idx and idx != music_idx:
+                            boosted_prediction[idx] = min(1.0, boosted_prediction[idx] * boost_factor)
+                    
+                    logger.info(f"Applied category boosting (factor: {boost_factor}) to non-speech/music categories")
+                    top_indices = np.argsort(boosted_prediction)[::-1][:top_k]
+                    
+                    # Log the effect of boosting on top predictions
+                    orig_top_indices = np.argsort(prediction)[::-1][:top_k]
+                    if not np.array_equal(orig_top_indices, top_indices):
+                        logger.info("Category boosting changed top predictions order")
+                else:
+                    top_indices = np.argsort(prediction)[::-1][:top_k]
             except Exception as e:
                 logger.error(f"Error getting top indices: {str(e)}")
                 return []
@@ -835,7 +879,7 @@ def load_panns_model():
     """Public function to load the PANNs model."""
     return panns_inference.initialize()
 
-def predict_with_panns(audio_data, top_k=5, threshold=0.2, map_to_homesounds_format=False):
+def predict_with_panns(audio_data, top_k=5, threshold=0.2, map_to_homesounds_format=False, boost_other_categories=True):
     """
     Public function to make predictions using the PANNs model.
     
@@ -844,12 +888,13 @@ def predict_with_panns(audio_data, top_k=5, threshold=0.2, map_to_homesounds_for
         top_k: Number of top predictions to return
         threshold: Confidence threshold for predictions
         map_to_homesounds_format: Whether to map results to homesounds categories
+        boost_other_categories: Whether to boost non-speech/music categories
         
     Returns:
         If map_to_homesounds_format is True: Dictionary with homesounds format
         Otherwise: List of (label, confidence) tuples
     """
-    results = panns_inference.predict(audio_data, top_k=top_k, threshold=threshold)
+    results = panns_inference.predict(audio_data, top_k=top_k, threshold=threshold, boost_other_categories=boost_other_categories)
     
     if map_to_homesounds_format:
         return panns_inference.map_to_homesounds(results, threshold=threshold)

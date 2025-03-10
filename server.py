@@ -140,19 +140,20 @@ context = homesounds.everything
 active_context = homesounds.everything
 
 # thresholds
-PREDICTION_THRES = 0.15  # Increased from 0.05 to reduce false positives 
+PREDICTION_THRES = 0.12  # Decreased from 0.15 to optimize for CNN13 model
 FINGER_SNAP_THRES = 0.03  # Special lower threshold for finger snapping
-DBLEVEL_THRES = -60  # Adjusted from -65 to -60 to filter out more background noise
+DBLEVEL_THRES = -65  # Adjusted from -60 to -65 to capture more meaningful audio
 SILENCE_THRES = -75  # Threshold for silence detection
 SPEECH_SENTIMENT_THRES = 0.35  # Increased from 0.12 to 0.35 to reduce false positives
 CHOPPING_THRES = 0.70  # Higher threshold for chopping sounds to prevent false positives
 SPEECH_PREDICTION_THRES = 0.70  # Higher threshold for speech to reduce false positives
-SPEECH_DETECTION_THRES = 0.30  # Lower threshold just for detecting potential speech (0.3 = 30%)
+SPEECH_DETECTION_THRES = 0.20  # Lower threshold for detecting potential speech with CNN13 model
 
 CHANNELS = 1
 RATE = 16000
-CHUNK = RATE  # 1 second chunks
+CHUNK = RATE * 2  # 2 second chunks, increased from 1 second for better model performance
 SPEECH_CHUNK_MULTIPLIER = 4.0  # Increased from 2.5 to 4.0 for better speech recognition
+MINIMUM_AUDIO_LENGTH = 16000  # Minimum number of samples for processing (1 second at 16kHz)
 MICROPHONES_DESCRIPTION = []
 FPS = 60.0
 
@@ -945,20 +946,30 @@ def process_with_panns_model(np_wav, record_time=None, db=None):
             # Normalize if needed
             np_wav = np_wav / np.abs(np_wav).max()
             print(f"Audio normalized. New range: [{np_wav.min():.6f}, {np_wav.max():.6f}]")
+        
+        # Apply noise gate to reduce background noise
+        np_wav = noise_gate(np_wav, threshold=0.005, attack=0.01, release=0.1, rate=RATE)
             
         # Ensure audio is long enough for processing
-        if len(np_wav) < 8000:  # At least 0.5 seconds at 16kHz
-            print(f"Audio too short ({len(np_wav)} samples). Padding to 16000 samples.")
-            padded = np.zeros(16000)
-            padded[:len(np_wav)] = np_wav
+        if len(np_wav) < MINIMUM_AUDIO_LENGTH:  # Use our new minimum size constant
+            print(f"Audio too short ({len(np_wav)} samples). Padding to {MINIMUM_AUDIO_LENGTH} samples.")
+            if len(np_wav) < MINIMUM_AUDIO_LENGTH / 4:
+                # For very short sounds, repeat them
+                repeats = int(np.ceil(MINIMUM_AUDIO_LENGTH / len(np_wav)))
+                padded = np.tile(np_wav, repeats)[:MINIMUM_AUDIO_LENGTH]
+                print(f"Using repetition padding ({repeats} repeats)")
+            else:
+                padded = np.zeros(MINIMUM_AUDIO_LENGTH)
+                padded[:len(np_wav)] = np_wav
             np_wav = padded
         
-        # Start processing with original audio
+        # Start processing with enhanced audio
         panns_results = panns_model.predict_with_panns(
             np_wav, 
             top_k=10, 
             threshold=PREDICTION_THRES,
-            map_to_homesounds_format=True
+            map_to_homesounds_format=True,
+            boost_other_categories=True
         )
         
         # Check if we got any results
@@ -1307,13 +1318,35 @@ def predict(message):
     audio_data = np.array(message['audio_data'])
     timestamp = message['timestamp']
 
+    # Apply pre-emphasis and noise gate to improve audio quality
+    if len(audio_data) > 1:  # Don't apply pre-emphasis to very short audio
+        audio_data = pre_emphasis(audio_data)
+    audio_data = noise_gate(audio_data, threshold=0.005, attack=0.01, release=0.1, rate=RATE)
+
+    # Ensure proper length
+    if len(audio_data) < MINIMUM_AUDIO_LENGTH:
+        if len(audio_data) < MINIMUM_AUDIO_LENGTH / 4:
+            # For very short sounds, repeat them
+            repeats = int(np.ceil(MINIMUM_AUDIO_LENGTH / len(audio_data)))
+            padded = np.tile(audio_data, repeats)[:MINIMUM_AUDIO_LENGTH]
+        else:
+            padded = np.zeros(MINIMUM_AUDIO_LENGTH)
+            padded[:len(audio_data)] = audio_data
+        audio_data = padded
+
     if USE_AST_MODEL:
         print("Using AST model for prediction")
         pass
     elif USE_PANNS_MODEL:
         print("Using PANNs model for prediction")
         try:
-            panns_results = panns_model.predict_with_panns(audio_data, top_k=10, threshold=0.1, map_to_homesounds_format=True)
+            panns_results = panns_model.predict_with_panns(
+                audio_data, 
+                top_k=10, 
+                threshold=PREDICTION_THRES, 
+                map_to_homesounds_format=True,
+                boost_other_categories=True
+            )
             panns_results["timestamp"] = timestamp
             emit('prediction', panns_results)
             cleanup_memory()
@@ -1336,12 +1369,29 @@ def predict_raw(message):
     sample_rate = int(message.get('sample_rate', 32000))
     timestamp = message['timestamp']
     
+    # Apply pre-emphasis and noise gate to improve audio quality
+    if len(audio_data) > 1:  # Don't apply pre-emphasis to very short audio 
+        audio_data = pre_emphasis(audio_data)
+    audio_data = noise_gate(audio_data, threshold=0.005, attack=0.01, release=0.1, rate=sample_rate)
+    
+    # Ensure proper length
+    if len(audio_data) < MINIMUM_AUDIO_LENGTH:
+        if len(audio_data) < MINIMUM_AUDIO_LENGTH / 4:
+            # For very short sounds, repeat them
+            repeats = int(np.ceil(MINIMUM_AUDIO_LENGTH / len(audio_data)))
+            padded = np.tile(audio_data, repeats)[:MINIMUM_AUDIO_LENGTH]
+        else:
+            padded = np.zeros(MINIMUM_AUDIO_LENGTH)
+            padded[:len(audio_data)] = audio_data
+        audio_data = padded
+    
     try:
         results = panns_model.predict_with_panns(
             audio_data, 
             top_k=10, 
-            threshold=0.1, 
-            map_to_homesounds_format=False
+            threshold=PREDICTION_THRES, 
+            map_to_homesounds_format=False,
+            boost_other_categories=True
         )
         output = {
             "timestamp": timestamp,
@@ -1678,6 +1728,74 @@ def process_speech(audio_data, record_time=None, confidence=0.0):
     finally:
         # Clean up memory
         cleanup_memory()
+
+# Add pre-emphasis filter to improve speech detection
+def pre_emphasis(audio_data, emphasis=0.97):
+    """Apply pre-emphasis filter to boost higher frequencies for better speech recognition"""
+    return np.append(audio_data[0], audio_data[1:] - emphasis * audio_data[:-1])
+
+# Add noise gate function
+def noise_gate(audio_data, threshold=0.005, attack=0.01, release=0.1, rate=16000):
+    """Apply a noise gate to filter out very quiet sounds"""
+    # Calculate the RMS of audio chunks
+    chunk_size = int(rate * 0.01)  # 10ms chunks
+    num_chunks = len(audio_data) // chunk_size
+    
+    # If audio is too short, return it unchanged
+    if num_chunks < 2:
+        return audio_data
+    
+    # Calculate the envelope
+    envelope = np.zeros_like(audio_data)
+    for i in range(num_chunks):
+        start = i * chunk_size
+        end = min(start + chunk_size, len(audio_data))
+        rms = np.sqrt(np.mean(np.square(audio_data[start:end])))
+        envelope[start:end] = rms
+    
+    # Apply threshold with attack/release
+    gate = np.zeros_like(audio_data)
+    gate_value = 0
+    attack_coef = 1.0 - np.exp(-1.0 / (rate * attack))
+    release_coef = 1.0 - np.exp(-1.0 / (rate * release))
+    
+    for i in range(len(audio_data)):
+        if envelope[i] > threshold:
+            gate_value += (1.0 - gate_value) * attack_coef
+        else:
+            gate_value -= gate_value * release_coef
+        gate[i] = gate_value
+    
+    # Apply the gate
+    return audio_data * gate
+
+# Function to boost non-speech/music categories
+def boost_other_categories(predictions, boost_factor=1.2):
+    """Boost non-speech/music categories to counteract model bias"""
+    if isinstance(predictions, dict):
+        boosted = predictions.copy()
+        for label, score in boosted.items():
+            if label.lower() not in ['speech', 'music']:
+                boosted[label] = min(1.0, score * boost_factor)
+        return boosted
+    elif isinstance(predictions, np.ndarray):
+        boosted = predictions.copy()
+        # Find indices for speech and music if available
+        speech_idx = -1
+        music_idx = -1
+        if hasattr(ast_model, 'class_labels'):
+            for idx, label in enumerate(ast_model.class_labels):
+                if 'speech' in label.lower():
+                    speech_idx = idx
+                if 'music' in label.lower():
+                    music_idx = idx
+        
+        # Boost all except speech and music
+        for i in range(len(boosted)):
+            if i != speech_idx and i != music_idx:
+                boosted[i] = min(1.0, boosted[i] * boost_factor)
+        return boosted
+    return predictions
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Sonarity Audio Analysis Server')
