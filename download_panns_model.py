@@ -2,7 +2,7 @@
 """
 Download Script for PANNs Model
 
-This script downloads the PANNs CNN9 model and required files for SoundWatch.
+This script downloads the PANNs CNN13 model and required files for SoundWatch.
 """
 
 import os
@@ -19,8 +19,9 @@ logger = logging.getLogger(__name__)
 
 # Global variables
 MODEL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'models')
-MODEL_URL = "https://zenodo.org/record/3576599/files/Cnn9_GMP_64x64_300000_iterations_mAP%3D0.37.pth?download=1"
-MODEL_PATH = os.path.join(MODEL_DIR, 'Cnn9_GMP_64x64_300000_iterations_mAP=0.37.pth')
+# Updated to use the larger CNN13 model (1.3GB) with better accuracy (mAP=0.42)
+MODEL_URL = "https://zenodo.org/record/3987831/files/Cnn13_mAP%3D0.423.pth?download=1"
+MODEL_PATH = os.path.join(MODEL_DIR, 'Cnn13_mAP=0.423.pth')
 
 # Reference paths for copying files from csv files directory
 CSV_FILES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'csv files')
@@ -164,7 +165,7 @@ def main():
     
     # Download or copy model file
     if not os.path.exists(MODEL_PATH) or args.force:
-        logger.info("Downloading PANNs CNN9 model...")
+        logger.info("Downloading PANNs CNN13 model (this is a large 1.3GB file, please be patient)...")
         if not download_file(MODEL_URL, MODEL_PATH):
             success = False
     else:

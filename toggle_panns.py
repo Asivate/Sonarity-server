@@ -135,7 +135,7 @@ def main():
 
         # Check if model files exist
         model_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
-        model_path = os.path.join(model_dir, "Cnn9_GMP_64x64_300000_iterations_mAP=0.37.pth")
+        model_path = os.path.join(model_dir, "Cnn13_mAP=0.423.pth")
         if not os.path.exists(model_path):
             print("""
 ⚠️  WARNING: PANNs model file not found.

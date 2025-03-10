@@ -1,7 +1,7 @@
 """
 PANNs Model Module for SoundWatch
 
-This module integrates the CNN9 model from the PANNs (Pretrained Audio Neural Networks)
+This module integrates the CNN13 model from the PANNs (Pretrained Audio Neural Networks)
 for audio recognition. It is based on the General-Purpose-Sound-Recognition-Demo project
 by Yin Cao, Qiuqiang Kong, et al.
 
@@ -20,6 +20,22 @@ import h5py
 import logging
 import math
 from scipy.interpolate import interp1d
+import time
+import gc
+import psutil
+
+# CPU optimization - set number of threads to use all cores
+# Get the number of CPU cores and set torch to use all of them
+try:
+    num_cores = psutil.cpu_count(logical=True)
+    if num_cores:
+        torch.set_num_threads(num_cores)
+        torch.set_num_interop_threads(num_cores)
+        os.environ['OMP_NUM_THREADS'] = str(num_cores)
+        os.environ['MKL_NUM_THREADS'] = str(num_cores)
+        print(f"PyTorch configured to use {num_cores} CPU cores")
+except Exception as e:
+    print(f"Warning: Could not optimize CPU threads: {e}")
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -27,7 +43,7 @@ logger = logging.getLogger(__name__)
 
 # Global variables
 MODEL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'models')
-MODEL_PATH = os.path.join(MODEL_DIR, 'Cnn9_GMP_64x64_300000_iterations_mAP=0.37.pth')
+MODEL_PATH = os.path.join(MODEL_DIR, 'Cnn13_mAP=0.423.pth')
 SCALAR_FN = os.path.join(MODEL_DIR, 'scalar.h5')
 CSV_FNAME = os.path.join(MODEL_DIR, 'validate_meta.csv')
 
@@ -59,7 +75,7 @@ def init_bn(bn):
     bn.weight.data.fill_(1.)
     bn.running_var.data.fill_(1.)
 
-# CNN9 model architecture
+# CNN model architecture
 class ConvBlock(nn.Module):
     def __init__(self, in_channels, out_channels):
         super(ConvBlock, self).__init__()
@@ -97,6 +113,111 @@ class ConvBlock(nn.Module):
             raise Exception('Incorrect argument!')
         return x
 
+# CNN13 model architecture for better accuracy (mAP=0.423)
+class Cnn13(nn.Module):
+    def __init__(self, classes_num, strong_target_training=False):
+        super(Cnn13, self).__init__()
+
+        # CNN architecture with 13 convolutional layers
+        self.conv_block1 = ConvBlock(in_channels=1, out_channels=64)
+        self.conv_block2 = ConvBlock(in_channels=64, out_channels=128)
+        self.conv_block3 = ConvBlock(in_channels=128, out_channels=256)
+        self.conv_block4 = ConvBlock(in_channels=256, out_channels=512)
+        self.conv_block5 = ConvBlock(in_channels=512, out_channels=1024)
+        self.conv_block6 = ConvBlock(in_channels=1024, out_channels=2048)
+        
+        # Fully connected layers
+        self.fc1 = nn.Linear(2048, 2048, bias=True)
+        self.fc_audioset = nn.Linear(2048, classes_num, bias=True)
+        
+        self.init_weights()
+        
+    def init_weights(self):
+        init_layer(self.fc1)
+        init_layer(self.fc_audioset)
+        
+    def get_bottleneck(self, input):
+        """Process input through convolutional layers to get bottleneck features.
+        
+        Args:
+            input: Tensor with shape [batch_size, channels, mel_bins, time]
+        
+        Returns:
+            Tensor with shape [batch_size, 2048]
+        """
+        # Debug input shape
+        logger.info(f"get_bottleneck input shape: {input.shape}")
+        
+        # Ensure the input has the right shape for the CNN
+        # CNN13 expects [batch, channels, mel_bins, time] where time is at least 64
+        if input.shape[3] < 64:
+            # Pad the time dimension to at least 64 frames
+            padding_needed = 64 - input.shape[3]
+            logger.info(f"Padding time dimension by {padding_needed} frames to reach 64")
+            padding = torch.zeros(input.shape[0], input.shape[1], input.shape[2], padding_needed, device=input.device)
+            input = torch.cat([input, padding], dim=3)
+        
+        # Use smaller pooling sizes to preserve more spatial features
+        # for small spectrograms
+        
+        # First conv block with reduced pooling
+        x = self.conv_block1(input, pool_size=(2, 2), pool_type='avg')
+        logger.info(f"After conv_block1: {x.shape}")
+        x = F.dropout(x, p=0.2)
+        
+        # Second conv block with reduced pooling
+        x = self.conv_block2(x, pool_size=(2, 2), pool_type='avg')
+        logger.info(f"After conv_block2: {x.shape}")
+        x = F.dropout(x, p=0.2)
+        
+        # Third conv block with reduced pooling
+        x = self.conv_block3(x, pool_size=(2, 2), pool_type='avg')
+        logger.info(f"After conv_block3: {x.shape}")
+        x = F.dropout(x, p=0.2)
+        
+        # Fourth conv block with reduced pooling
+        x = self.conv_block4(x, pool_size=(2, 2), pool_type='avg')
+        logger.info(f"After conv_block4: {x.shape}")
+        x = F.dropout(x, p=0.2)
+        
+        # Fifth conv block with reduced pooling (CNN13 specific)
+        x = self.conv_block5(x, pool_size=(2, 2), pool_type='avg')
+        logger.info(f"After conv_block5: {x.shape}")
+        x = F.dropout(x, p=0.2)
+        
+        # Sixth conv block with reduced pooling (CNN13 specific)
+        x = self.conv_block6(x, pool_size=(1, 1), pool_type='avg')
+        logger.info(f"After conv_block6: {x.shape}")
+        x = F.dropout(x, p=0.2)
+        
+        # Reshape features if needed
+        if x.shape[2] * x.shape[3] < 1:
+            logger.warning(f"Feature dimensions too small: {x.shape}")
+            # Create a minimum viable feature map
+            device = x.device
+            x = torch.zeros(x.shape[0], x.shape[1], 1, 1, device=device)
+            
+        # Global pooling
+        x = torch.mean(x, dim=3)
+        logger.info(f"After mean pooling: {x.shape}")
+        x = torch.mean(x, dim=2)
+        logger.info(f"After global pooling: {x.shape}")
+        
+        # Final FC layer
+        x = F.dropout(x, p=0.5)
+        x = F.relu_(self.fc1(x))
+        logger.info(f"Final bottleneck features: {x.shape}")
+        
+        return x
+        
+    def forward(self, input):
+        x = self.get_bottleneck(input)
+        x = F.dropout(x, p=0.5)
+        x = self.fc_audioset(x)
+        x = torch.sigmoid(x)
+        return x
+
+# Keep CNN9 for backward compatibility
 class Cnn9_GMP_64x64(nn.Module):
     def __init__(self, classes_num, strong_target_training=False):
         super(Cnn9_GMP_64x64, self).__init__()
@@ -226,7 +347,7 @@ class PANNsModelInference:
             os.makedirs(MODEL_DIR, exist_ok=True)
             
             # Load model
-            logger.info(f"Loading PANNs CNN9 model from {MODEL_PATH}")
+            logger.info(f"Loading PANNs CNN13 model from {MODEL_PATH}")
             
             # Check if model exists, if not provide instructions
             if not os.path.exists(MODEL_PATH):
@@ -277,7 +398,7 @@ class PANNsModelInference:
             # Initialize model
             classes_num = len(self.labels)
             logger.info(f"Creating model with {classes_num} classes")
-            self.model = Cnn9_GMP_64x64(classes_num)
+            self.model = Cnn13(classes_num)
             
             # Load trained weights
             checkpoint = torch.load(MODEL_PATH, map_location=self.device)
@@ -421,6 +542,9 @@ class PANNsModelInference:
             if not self.initialize():
                 return []
         
+        # Start timing
+        start_time = time.time()
+        
         try:
             # Log input audio properties
             logger.info(f"Processing audio for prediction: shape={audio.shape}, min={audio.min():.4f}, max={audio.max():.4f}")
@@ -438,20 +562,27 @@ class PANNsModelInference:
             # Make sure audio is long enough - PANNs model expects at least a few frames of audio
             if len(audio) < 32000:  # at least 1 second at 32kHz
                 logger.info(f"Audio too short ({len(audio)} samples). Padding to 32000 samples.")
-                padded_audio = np.zeros(32000)
+                padded_audio = np.zeros(32000, dtype=np.float32)  # Pre-allocate with correct dtype
                 padded_audio[:len(audio)] = audio
                 audio = padded_audio
             
             # Extract log-mel features - this will enforce correct shape for model
+            feature_extraction_start = time.time()
             log_mel = self.logmel_extract(audio)
+            feature_extraction_time = time.time() - feature_extraction_start
+            logger.info(f"Feature extraction took {feature_extraction_time:.3f}s")
             
             # Move tensor to the correct device
             log_mel = log_mel.to(self.device)
             
             # Run model inference with error catching and retries
             logger.info("Running model inference...")
+            inference_start = time.time()
+            
+            # Use PyTorch's inference mode which is more efficient than no_grad
+            # for inference-only workloads
             try:
-                with torch.no_grad():
+                with torch.inference_mode():
                     # Try normal prediction
                     prediction = self.model(log_mel)
                     
@@ -462,6 +593,9 @@ class PANNsModelInference:
                     # Process first sample if batched
                     if len(prediction.shape) > 1:
                         prediction = prediction[0]
+                    
+                inference_time = time.time() - inference_start
+                logger.info(f"Model inference took {inference_time:.3f}s")
             except RuntimeError as e:
                 # Provide detailed diagnostic information
                 logger.error(f"RuntimeError in model prediction: {str(e)}")
@@ -487,8 +621,12 @@ class PANNsModelInference:
                             logger.info(f"New padded shape: {log_mel_padded.shape}")
                             
                             # Try prediction with heavily padded input
-                            with torch.no_grad():
+                            with torch.inference_mode():
+                                inference_start = time.time()
                                 prediction = self.model(log_mel_padded)
+                                inference_time = time.time() - inference_start
+                                logger.info(f"Alternative inference took {inference_time:.3f}s")
+                                
                                 if isinstance(prediction, torch.Tensor):
                                     prediction = prediction.detach().cpu().numpy()
                                 if len(prediction.shape) > 1:
@@ -533,6 +671,16 @@ class PANNsModelInference:
                 except Exception as e:
                     logger.error(f"Error processing prediction for index {idx}: {str(e)}")
             
+            # Calculate and log total prediction time
+            total_time = time.time() - start_time
+            logger.info(f"Total prediction time: {total_time:.3f}s")
+            
+            # Clean up memory
+            del log_mel
+            if 'log_mel_padded' in locals():
+                del log_mel_padded
+            torch.cuda.empty_cache() if torch.cuda.is_available() else gc.collect()
+            
             return results
                 
         except Exception as e:
@@ -540,6 +688,9 @@ class PANNsModelInference:
             import traceback
             traceback.print_exc()
             return []
+        finally:
+            # Final cleanup to free memory
+            gc.collect()
     
     def map_to_homesounds(self, results, threshold=0.2):
         """
