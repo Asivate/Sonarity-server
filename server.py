@@ -31,6 +31,9 @@ import logging
 # Import our AST model implementation
 import ast_model
 
+# Import our PANNs model implementation
+import panns_model
+
 # Import our sentiment analysis modules
 from sentiment_analyzer import analyze_sentiment
 from speech_to_text import transcribe_audio, SpeechToText
@@ -203,7 +206,8 @@ EMOTION_GROUPS = {
 models = {
     "tensorflow": None,
     "ast": None,
-    "feature_extractor": None
+    "feature_extractor": None,
+    "panns": None
 }
 
 # Initialize speech recognition systems
@@ -213,7 +217,7 @@ google_speech_processor = None  # Will be lazy-loaded when needed
 # Load models
 def load_models():
     """Load all required models for sound recognition and speech processing."""
-    global models, USE_AST_MODEL
+    global models, USE_AST_MODEL, USE_PANNS_MODEL
     
     # Initialize models dictionary
     models = {
@@ -221,12 +225,15 @@ def load_models():
         "ast": None,
         "feature_extractor": None,
         "sentiment_analyzer": None,
-        "speech_processor": None
+        "speech_processor": None,
+        "panns": None
     }
     
     # Flag to determine which model to use
     USE_AST_MODEL = os.environ.get('USE_AST_MODEL', '1') == '1'  # Default to enabled
+    USE_PANNS_MODEL = os.environ.get('USE_PANNS_MODEL', '0') == '1'  # Default to disabled
     print(f"AST model {'enabled' if USE_AST_MODEL else 'disabled'} based on environment settings")
+    print(f"PANNs model {'enabled' if USE_PANNS_MODEL else 'disabled'} based on environment settings")
     
     # TensorFlow model settings
     MODEL_URL = "https://www.dropbox.com/s/cq1d7uqg0l28211/example_model.hdf5?dl=1"
@@ -323,6 +330,26 @@ def load_models():
         print(f"Error loading Whisper model: {e}")
         traceback.print_exc()
 
+    # Load PANNs model if enabled
+    if USE_PANNS_MODEL:
+        try:
+            print("Loading PANNs model...")
+            panns_loaded = panns_model.load_panns_model()
+            if panns_loaded:
+                models["panns"] = True
+                print("PANNs model loaded successfully")
+            else:
+                print("Failed to load PANNs model")
+                USE_PANNS_MODEL = False
+        except Exception as e:
+            print(f"Error loading PANNs model: {e}")
+            traceback.print_exc()
+            USE_PANNS_MODEL = False
+            
+    # If neither AST nor PANNs model is enabled, fall back to TensorFlow model
+    if not USE_AST_MODEL and not USE_PANNS_MODEL:
+        print("Both AST and PANNs models are disabled, using TensorFlow model as primary model")
+
 # Add a comprehensive debug function
 def debug_predictions(predictions, label_list):
     print("===== DEBUGGING ALL PREDICTIONS (BEFORE THRESHOLD) =====")
@@ -343,7 +370,9 @@ print("Setting up sound recognition models...")
 
 # Flag to determine which model to use
 USE_AST_MODEL = os.environ.get('USE_AST_MODEL', '1') == '1'  # Default to enabled
+USE_PANNS_MODEL = os.environ.get('USE_PANNS_MODEL', '0') == '1'  # Default to disabled
 print(f"AST model {'enabled' if USE_AST_MODEL else 'disabled'} based on environment settings")
+print(f"PANNs model {'enabled' if USE_PANNS_MODEL else 'disabled'} based on environment settings")
 
 # Load the AST model
 try:
@@ -1283,7 +1312,7 @@ def process_with_tensorflow_model(np_wav, db):
                                             print("EMITTING BASIC SPEECH DETECTION (no sentiment)")
                                         # Cleanup memory
                                         cleanup_memory()
-                                        return
+                                    return
                             # Normal sound emission (non-speech or sentiment analysis failed)
                             socketio.emit('audio_label', {
                                 'label': human_label,
@@ -1649,6 +1678,89 @@ def aggregate_predictions(new_prediction, label_list, is_speech=False):
             logger.info(f"Aggregation kept same top prediction: {label}, confidence: {new_prediction[orig_top_idx]:.4f} -> {aggregated[orig_top_idx]:.4f}")
         
         return aggregated
+
+# Socket.io event handlers
+@socketio.on('predict')
+def predict(message):
+    """Main socket.io handler for sound predictions"""
+    # Get the audio data from the message
+    audio_data = np.array(message['audio_data'])
+    timestamp = message['timestamp']
+
+    # Perform prediction
+    if USE_AST_MODEL:
+        # Use AST model
+        print("Using AST model for prediction")
+        # Call existing AST prediction code
+        pass  # Replace with actual call
+    elif USE_PANNS_MODEL:
+        # Use PANNs model
+        print("Using PANNs model for prediction")
+        try:
+            # Get predictions with PANNs model
+            panns_results = panns_model.predict_with_panns(audio_data, top_k=10, threshold=0.1, map_to_homesounds_format=True)
+            
+            # Add timestamp
+            panns_results["timestamp"] = timestamp
+            
+            # Send results back to client
+            emit('prediction', panns_results)
+            
+            # Perform periodic memory cleanup
+            cleanup_memory()
+        except Exception as e:
+            print(f"Error with PANNs prediction: {e}")
+            traceback.print_exc()
+            # Fall back to TensorFlow model
+            print("Falling back to TensorFlow model due to PANNs error")
+            # Call TensorFlow prediction
+            pass  # Replace with actual call
+    else:
+        # Fall back to TensorFlow model
+        print("Using TensorFlow model for prediction")
+        # Call TensorFlow prediction
+        pass  # Replace with actual call
+
+@socketio.on('predict_raw')
+def predict_raw(message):
+    """Process raw audio for prediction (used by PANNs model)"""
+    if not USE_PANNS_MODEL:
+        print("PANNs model is not enabled, ignoring predict_raw request")
+        return
+
+    # Get the audio data
+    audio_data = np.array(message['audio_data'])
+    sample_rate = int(message.get('sample_rate', 32000))  # Default to 32kHz
+    timestamp = message['timestamp']
+    
+    try:
+        # Get predictions directly from PANNs model
+        results = panns_model.predict_with_panns(
+            audio_data, 
+            top_k=10, 
+            threshold=0.1, 
+            map_to_homesounds_format=False
+        )
+        
+        # Format results for client
+        output = {
+            "timestamp": timestamp,
+            "output": [{"label": label, "score": float(score)} for label, score in results]
+        }
+        
+        # Send results back to client
+        emit('prediction_raw', output)
+        
+        # Perform periodic memory cleanup
+        cleanup_memory()
+    except Exception as e:
+        print(f"Error with PANNs raw prediction: {e}")
+        traceback.print_exc()
+        emit('prediction_raw', {
+            "timestamp": timestamp,
+            "output": [],
+            "error": str(e)
+        })
 
 if __name__ == '__main__':
     # Parse command-line arguments for port configuration
