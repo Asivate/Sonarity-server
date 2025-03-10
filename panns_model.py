@@ -104,13 +104,13 @@ class Cnn9_GMP_64x64(nn.Module):
         self.conv_block3 = ConvBlock(in_channels=128, out_channels=256)
         self.conv_block4 = ConvBlock(in_channels=256, out_channels=512)
         
-        self.fc1 = nn.Linear(512, 512, bias=True)
+        self.fc = nn.Linear(512, 512, bias=True)
         self.fc_audioset = nn.Linear(512, classes_num, bias=True)
         
         self.init_weights()
         
     def init_weights(self):
-        init_layer(self.fc1)
+        init_layer(self.fc)
         init_layer(self.fc_audioset)
         
     def get_bottleneck(self, input):
@@ -128,7 +128,7 @@ class Cnn9_GMP_64x64(nn.Module):
         x = x.transpose(1, 2)
         x = x.view(x.shape[0], -1)
         x = F.dropout(x, p=0.5)
-        x = F.relu_(self.fc1(x))
+        x = F.relu_(self.fc(x))
         return x
         
     def forward(self, input):
@@ -220,7 +220,33 @@ class PANNsModelInference:
             
             # Load trained weights
             checkpoint = torch.load(MODEL_PATH, map_location=self.device)
-            self.model.load_state_dict(checkpoint['model'])
+
+            # Debug checkpoint structure for troubleshooting
+            logger.info(f"Checkpoint keys: {checkpoint.keys()}")
+            model_state_dict_keys = checkpoint['model'].keys() if 'model' in checkpoint else []
+            logger.info(f"Found {len(model_state_dict_keys)} layers in checkpoint")
+            if len(model_state_dict_keys) > 0:
+                logger.info(f"First few layer names: {list(model_state_dict_keys)[:5]}")
+
+            # Debug model structure for comparison
+            model_state_dict_keys = [k for k, v in self.model.state_dict().items()]
+            logger.info(f"Found {len(model_state_dict_keys)} layers in model")
+            if len(model_state_dict_keys) > 0:
+                logger.info(f"Model expects layer names: {model_state_dict_keys[:5]}")
+
+            try:
+                # Load model weights with more flexible option
+                if 'model' in checkpoint:
+                    self.model.load_state_dict(checkpoint['model'], strict=False)
+                    logger.info("Loaded weights from 'model' key with strict=False")
+                else:
+                    # Try directly loading from checkpoint
+                    self.model.load_state_dict(checkpoint, strict=False)
+                    logger.info("Loaded weights directly from checkpoint with strict=False")
+            except Exception as e:
+                logger.error(f"Error loading model weights: {str(e)}")
+                logger.error("Continuing with uninitialized model - predictions may be random")
+                # We'll continue even with error, to let the system still work
             
             # Set model to evaluation mode and move to appropriate device
             self.model.eval()

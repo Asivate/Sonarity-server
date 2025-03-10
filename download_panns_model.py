@@ -77,13 +77,88 @@ def copy_file(source, destination):
         logger.error(f"Error copying file: {str(e)}")
         return False
 
+def analyze_model_file(model_path):
+    """Analyze the structure of the model file to help with debugging"""
+    try:
+        import torch
+        logger.info(f"Analyzing model file: {model_path}")
+        
+        # Load the model file
+        checkpoint = torch.load(model_path, map_location='cpu')
+        
+        # Basic info
+        logger.info(f"Checkpoint type: {type(checkpoint)}")
+        
+        # Check if it's a dictionary
+        if isinstance(checkpoint, dict):
+            logger.info(f"Checkpoint keys: {list(checkpoint.keys())}")
+            
+            # Check for 'model' key
+            if 'model' in checkpoint:
+                state_dict = checkpoint['model']
+                logger.info(f"Model state_dict type: {type(state_dict)}")
+                logger.info(f"Number of layers: {len(state_dict)}")
+                
+                # Print some layer names to help with debugging
+                if len(state_dict) > 0:
+                    logger.info("First 10 layer names:")
+                    for i, (key, _) in enumerate(list(state_dict.items())[:10]):
+                        logger.info(f"  {i+1}. {key}")
+                
+                # Check for fc layer naming patterns
+                fc_layers = [key for key in state_dict.keys() if 'fc' in key]
+                logger.info(f"Found {len(fc_layers)} FC layer keys: {fc_layers}")
+                
+                # Analyze shapes
+                logger.info("Layer shapes:")
+                for key, tensor in state_dict.items():
+                    if 'fc' in key:  # Focus on fully connected layers
+                        logger.info(f"  {key}: {tensor.shape}")
+                
+            else:
+                logger.info("No 'model' key found in checkpoint")
+                
+                # Maybe it's directly a state dict?
+                if any(isinstance(v, torch.Tensor) for v in checkpoint.values()):
+                    logger.info("Checkpoint appears to be a direct state_dict")
+                    state_dict = checkpoint
+                    logger.info(f"Number of layers: {len(state_dict)}")
+                    
+                    # Print some layer names
+                    if len(state_dict) > 0:
+                        logger.info("First 10 layer names:")
+                        for i, (key, _) in enumerate(list(state_dict.items())[:10]):
+                            logger.info(f"  {i+1}. {key}")
+                    
+                    # Check for fc layer naming patterns
+                    fc_layers = [key for key in state_dict.keys() if 'fc' in key]
+                    logger.info(f"Found {len(fc_layers)} FC layer keys: {fc_layers}")
+        else:
+            logger.info("Checkpoint is not a dictionary")
+            
+        logger.info("Analysis complete")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Error analyzing model file: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return False
+
 def main():
     parser = argparse.ArgumentParser(description="Download PANNs model files")
     parser.add_argument('--force', action='store_true', help="Force download even if files already exist")
+    parser.add_argument('--diagnose', action='store_true', help="Run diagnostics on the model file")
     args = parser.parse_args()
     
     # Create model directory if it doesn't exist
     os.makedirs(MODEL_DIR, exist_ok=True)
+    
+    # If diagnose mode is enabled, just analyze the model file
+    if args.diagnose and os.path.exists(MODEL_PATH):
+        logger.info("Running model diagnostics...")
+        analyze_model_file(MODEL_PATH)
+        return 0
     
     success = True
     
@@ -150,6 +225,12 @@ def main():
         logger.info(f"Model file: {MODEL_PATH}")
         logger.info(f"Labels file: {CSV_PATH}")
         logger.info(f"Scalar file: {SCALAR_PATH}")
+        
+        # Run diagnostics if requested
+        if args.diagnose or os.path.exists(MODEL_PATH):
+            logger.info("Running model diagnostics...")
+            analyze_model_file(MODEL_PATH)
+            
         return 0
     else:
         logger.error("Some files could not be downloaded or copied.")

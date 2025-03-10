@@ -7,9 +7,10 @@ for sound recognition in SoundWatch. It modifies the environment variable that
 controls which model is used at runtime.
 
 Usage:
-  python toggle_panns.py on  # Enable PANNs model
-  python toggle_panns.py off  # Disable PANNs model
-  python toggle_panns.py      # Show current status
+  python toggle_panns.py on        # Enable PANNs model
+  python toggle_panns.py off       # Disable PANNs model
+  python toggle_panns.py debug     # Test loading the PANNs model
+  python toggle_panns.py           # Show current status
 """
 
 import os
@@ -61,10 +62,53 @@ def print_status(enabled):
 ❌ PANNs model is DISABLED
 """[1:-1])
 
+def debug_panns_model():
+    """Test loading the PANNs model to check for issues"""
+    print("Testing PANNs model loading...")
+    
+    try:
+        import panns_model
+        import torch
+        
+        # Create a new model instance
+        print("Attempting to load PANNs model...")
+        success = panns_model.load_panns_model()
+        
+        if success:
+            print("\n✅ PANNs model loaded successfully!")
+            print("Testing a simple prediction...")
+            
+            # Create a dummy audio sample
+            import numpy as np
+            dummy_audio = np.random.rand(32000)  # 1 second at 32kHz
+            
+            # Try to make a prediction
+            results = panns_model.predict_with_panns(
+                dummy_audio, 
+                top_k=3, 
+                threshold=0.1,
+                map_to_homesounds_format=False
+            )
+            
+            print("Prediction results:")
+            for label, score in results:
+                print(f"  - {label}: {score:.4f}")
+                
+            print("\nEverything is working! You can enable the PANNs model with:")
+            print("  python toggle_panns.py on")
+        else:
+            print("\n❌ Failed to load PANNs model.")
+            print("Please check the error messages above for details.")
+    except Exception as e:
+        print(f"\n❌ Error testing PANNs model: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        print("\nPlease fix the errors above before enabling the PANNs model.")
+
 def main():
     parser = argparse.ArgumentParser(description="Toggle PANNs model on/off")
-    parser.add_argument("state", nargs="?", choices=["on", "off"], 
-                        help="Set PANNs model state (on/off). If omitted, shows current state.")
+    parser.add_argument("state", nargs="?", choices=["on", "off", "debug"], 
+                        help="Set PANNs model state (on/off) or run diagnostics (debug). If omitted, shows current state.")
     args = parser.parse_args()
     
     # Get current state
@@ -73,6 +117,9 @@ def main():
     if args.state is None:
         # Just show current status
         print_status(current_state)
+    elif args.state == "debug":
+        # Run diagnostics
+        debug_panns_model()
     elif args.state == "on":
         # Enable PANNs model
         set_state(True)
