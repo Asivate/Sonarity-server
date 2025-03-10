@@ -27,14 +27,6 @@ import threading
 import queue
 from transformers import pipeline
 import logging
-import sys
-import gc
-import json
-import math
-import asyncio
-import warnings
-from io import BytesIO
-from datetime import datetime
 
 # Import our AST model implementation
 import ast_model
@@ -43,13 +35,6 @@ import ast_model
 from sentiment_analyzer import analyze_sentiment
 from speech_to_text import transcribe_audio, SpeechToText
 from google_speech import transcribe_with_google, GoogleSpeechToText
-
-# Import PANNs model (if available)
-try:
-    import panns_model
-except ImportError:
-    panns_model = None
-    print("PANNs model module not found. PANNs will not be available.")
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -227,87 +212,116 @@ google_speech_processor = None  # Will be lazy-loaded when needed
 
 # Load models
 def load_models():
-    """
-    Load machine learning models (TensorFlow, AST, and PANNs) for sound recognition
+    """Load all required models for sound recognition and speech processing."""
+    global models, USE_AST_MODEL
     
-    Returns:
-        Model instances for sound recognition
-    """
-    global models, USE_AST_MODEL, USE_PANNS_MODEL
+    # Initialize models dictionary
+    models = {
+        "tensorflow": None,
+        "ast": None,
+        "feature_extractor": None,
+        "sentiment_analyzer": None,
+        "speech_processor": None
+    }
     
-    models = {}
-    
-    # Load AST model if enabled via environment variable
-    USE_AST_MODEL = os.environ.get('USE_AST_MODEL', '0') == '1'  # Default to disabled
+    # Flag to determine which model to use
+    USE_AST_MODEL = os.environ.get('USE_AST_MODEL', '1') == '1'  # Default to enabled
     print(f"AST model {'enabled' if USE_AST_MODEL else 'disabled'} based on environment settings")
     
-    # Load PANNs model if enabled via environment variable
-    USE_PANNS_MODEL = os.environ.get('USE_PANNS_MODEL', '0') == '1'  # Default to disabled
-    print(f"PANNs model {'enabled' if USE_PANNS_MODEL else 'disabled'} based on environment settings")
-
-    # Load AST model (if available and enabled)
-    if USE_AST_MODEL and ast_model is not None:
+    # TensorFlow model settings
+    MODEL_URL = "https://www.dropbox.com/s/cq1d7uqg0l28211/example_model.hdf5?dl=1"
+    MODEL_PATH = "models/example_model.hdf5"
+    
+    # Load AST model first
+    try:
         print("Loading AST model...")
-        try:
-            # Load AST model (automatically downloads from HuggingFace)
-            ast_model_instance, feature_extractor = ast_model.load_ast_model()
-            models['ast_model'] = ast_model_instance
-            models['feature_extractor'] = feature_extractor
+        with ast_lock:
+            # AST model loading settings
+            ast_kwargs = {
+                "torch_dtype": torch.float32  # Always use float32 for maximum compatibility
+            }
+            
+            # Use SDPA if available for better performance
+            if torch.__version__ >= '2.1.1':
+                ast_kwargs["attn_implementation"] = "sdpa"
+                print("Using Scaled Dot Product Attention (SDPA) for faster inference")
+            
+            print("Using standard precision (float32) for maximum compatibility")
+            
+            # Load model with explicit float32 precision
+            model_name = "MIT/ast-finetuned-audioset-10-10-0.4593"
+            models["ast"], models["feature_extractor"] = ast_model.load_ast_model(
+                model_name=model_name,
+                **ast_kwargs
+            )
+            
+            # Initialize class labels for aggregation
+            ast_model.initialize_class_labels(models["ast"])
             print("AST model loaded successfully")
-        except Exception as e:
-            print(f"Error loading AST model: {e}")
-            traceback.print_exc()
-            USE_AST_MODEL = False  # Fall back to TensorFlow model if AST fails to load
-    
-    # Load PANNs model (if available and enabled)
-    if USE_PANNS_MODEL and panns_model is not None:
-        print("Loading PANNs model...")
-        try:
-            # Initialize PANNs model
-            if panns_model.initialize():
-                USE_PANNS_MODEL = True
-                print("PANNs model loaded successfully")
-            else:
-                USE_PANNS_MODEL = False
-                print("Failed to initialize PANNs model")
-        except Exception as e:
-            print(f"Error loading PANNs model: {e}")
-            traceback.print_exc()
-            USE_PANNS_MODEL = False  # Fall back to other models if PANNs fails to load
-    
-    # Optionally load TensorFlow model (as fallback or if other models are disabled)
-    if not USE_AST_MODEL or not USE_PANNS_MODEL or True:  # We'll load it anyway as backup
+    except Exception as e:
+        print(f"Error loading AST model: {e}")
+        traceback.print_exc()
+        USE_AST_MODEL = False  # Fall back to TensorFlow model if AST fails to load
+
+    # Optionally load TensorFlow model (as fallback or if USE_AST_MODEL is False)
+    model_filename = os.path.abspath(MODEL_PATH)
+    if not USE_AST_MODEL or True:  # We'll load it anyway as backup
         print("Loading TensorFlow model as backup...")
+        os.makedirs(os.path.dirname(model_filename), exist_ok=True)
+        
+        homesounds_model = Path(model_filename)
+        if (not homesounds_model.is_file()):
+            print("Downloading example_model.hdf5 [867MB]: ")
+            wget.download(MODEL_URL, MODEL_PATH)
+        
+        print("Using TensorFlow model: %s" % (model_filename))
+        
         try:
-            model_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models", "example_model.hdf5")
-            print(f"Using TensorFlow model: {model_path}")
-            
-            # Load TensorFlow model
-            tf_model = tf.keras.models.load_model(model_path)
-            models['tf_model'] = tf_model
-            
-            # Initialize with a dummy prediction to avoid lag on first real prediction
-            print("Initializing TensorFlow model with a dummy prediction...")
-            dummy_input = np.zeros((1, 96, 64, 1))
-            tf_model.predict(dummy_input)
-            print("Model prediction function initialized successfully")
-            
+            # Try to load the model with the new API
+            with tf_graph.as_default():
+                with tf_session.as_default():
+                    models["tensorflow"] = keras.models.load_model(model_filename)
+                    # Make a dummy prediction to ensure the predict function is initialized
+                    # This is critical for TensorFlow 1.x compatibility
+                    print("Initializing TensorFlow model with a dummy prediction...")
+                    dummy_input = np.zeros((1, 96, 64, 1))
+                    _ = models["tensorflow"].predict(dummy_input)
+                    print("Model prediction function initialized successfully")
             print("TensorFlow model loaded successfully")
+            if not USE_AST_MODEL:
+                print("TensorFlow model will be used as primary model")
+                models["tensorflow"].summary()
         except Exception as e:
-            print(f"Error loading TensorFlow model: {e}")
-            traceback.print_exc()
-            if not USE_AST_MODEL and not USE_PANNS_MODEL:
-                sys.exit("Failed to load any sound recognition model. Exiting.")
-    
-    # Set the primary model based on what's enabled
-    if USE_AST_MODEL:
-        print("Using AST model as primary model")
-    elif USE_PANNS_MODEL:
-        print("Using PANNs model as primary model")
-    else:
-        print("Using TensorFlow model as primary model")
-    
-    return models
+            print(f"Error loading TensorFlow model with standard method: {e}")
+            # Fallback for older model formats
+            try:
+                with tf_graph.as_default():
+                    with tf_session.as_default():
+                        models["tensorflow"] = tf.keras.models.load_model(model_filename, compile=False)
+                        # Make a dummy prediction to ensure the predict function is initialized
+                        # This is critical for TensorFlow 1.x compatibility
+                        print("Initializing TensorFlow model with a dummy prediction...")
+                        dummy_input = np.zeros((1, 96, 64, 1))
+                        _ = models["tensorflow"].predict(dummy_input)
+                        print("Model prediction function initialized successfully")
+                print("TensorFlow model loaded with compile=False option")
+            except Exception as e2:
+                print(f"Error with fallback method: {e2}")
+                if not USE_AST_MODEL:
+                    raise Exception("Could not load TensorFlow model with any method, and AST model is not enabled")
+
+    print(f"Using {'AST' if USE_AST_MODEL else 'TensorFlow'} model as primary model")
+
+    # Load the Whisper speech recognition model if needed
+    try:
+        if not USE_GOOGLE_SPEECH:
+            print("Loading Whisper model for speech recognition...")
+            speech_processor = SpeechToText()
+            print("Whisper model loaded successfully")
+            models["speech_processor"] = speech_processor
+    except Exception as e:
+        print(f"Error loading Whisper model: {e}")
+        traceback.print_exc()
 
 # Add a comprehensive debug function
 def debug_predictions(predictions, label_list):
@@ -527,7 +541,7 @@ def handle_source(json_data):
                         # Debug the aggregated predictions
                         print("===== AGGREGATED AST MODEL PREDICTIONS =====")
                         for pred in ast_predictions["top_predictions"][:5]:  # Show top 5 for brevity
-                            print(f"  {pred['label']}: {pred['confidence']:.6f}")
+                        print(f"  {pred['label']}: {pred['confidence']:.6f}")
                     
                     # Special check for finger snapping
                     finger_snap_detected = False
@@ -625,8 +639,8 @@ def handle_source(json_data):
                                             'db': str(db)
                                         })
                                         print("EMITTING BASIC SPEECH DETECTION (no sentiment)")
-                                        # Cleanup memory
-                                        cleanup_memory()
+                                    # Cleanup memory
+                                    cleanup_memory()
                                     return
                         
                         # Emit the prediction if confidence is above threshold or it's a finger snap
@@ -671,7 +685,7 @@ def handle_source(json_data):
                     print("Making prediction with TensorFlow model...")
                     with tf_graph.as_default():
                         with tf_session.as_default():
-                            predictions = models["tensorflow"].predict(np_data)
+                    predictions = models["tensorflow"].predict(np_data)
                     
                     # Debug all predictions before applying threshold
                     if np.ndim(predictions) > 0 and len(predictions) > 0:
@@ -744,14 +758,14 @@ def handle_source(json_data):
                                             if isinstance(sentiment_result, dict) and 'sentiment' in sentiment_result and isinstance(sentiment_result['sentiment'], dict) and 'category' in sentiment_result['sentiment']:
                                                 # Emit with sentiment information - fixed to match actual structure
                                                 label = f"Speech {sentiment_result['sentiment']['category']}"
-                                                socketio.emit('audio_label', {
-                                                'label': label,
-                                                'accuracy': str(sentiment_result['sentiment']['confidence']),
+                                            socketio.emit('audio_label', {
+                                                    'label': label,
+                                                    'accuracy': str(sentiment_result['sentiment']['confidence']),
                                                 'db': str(db),
-                                                'emoji': sentiment_result['sentiment']['emoji'],
-                                                'transcription': sentiment_result['text'],
-                                                'emotion': sentiment_result['sentiment']['original_emotion'],
-                                                'sentiment_score': str(sentiment_result['sentiment']['confidence'])
+                                                    'emoji': sentiment_result['sentiment']['emoji'],
+                                                    'transcription': sentiment_result['text'],
+                                                    'emotion': sentiment_result['sentiment']['original_emotion'],
+                                                    'sentiment_score': str(sentiment_result['sentiment']['confidence'])
                                                 })
                                                 print(f"EMITTING SPEECH WITH SENTIMENT: {label} with emoji {sentiment_result['sentiment']['emoji']}")
                                             else:
@@ -777,10 +791,10 @@ def handle_source(json_data):
                                                         'label': label,
                                                         'accuracy': str(confidence),
                                                         'db': str(db),
-                                                'emoji': emoji,
-                                                'transcription': transcription,
-                                                'emotion': emotion,
-                                                'sentiment_score': str(confidence)
+                                                        'emoji': emoji,
+                                                        'transcription': transcription,
+                                                        'emotion': emotion,
+                                                        'sentiment_score': str(confidence)
                                                     })
                                                     print(f"EMITTING SPEECH WITH BASIC SENTIMENT: {label}")
                                                 else:
@@ -790,8 +804,8 @@ def handle_source(json_data):
                                                         'db': str(db)
                                                     })
                                                     print("EMITTING BASIC SPEECH DETECTION (no sentiment)")
-                                                    # Cleanup memory
-                                                    cleanup_memory()
+                                                # Cleanup memory
+                                                cleanup_memory()
                                             return
                                     # Normal sound emission (non-speech or sentiment analysis failed)
                                     socketio.emit('audio_label', {
@@ -799,8 +813,8 @@ def handle_source(json_data):
                                         'accuracy': str(pred_max_val),
                                         'db': str(db)
                                     })
-                                    # Cleanup memory
-                                    cleanup_memory()
+                                        # Cleanup memory
+                                        cleanup_memory()
                                     break
                         else:
                             print(f"No prediction above threshold: {pred_max_val:.4f}")
@@ -902,71 +916,7 @@ def handle_audio(data):
     
     # Check if sound is loud enough to process
     if -db > DBLEVEL_THRES:
-        if USE_PANNS_MODEL:
-            # Process using PANNs model
-            try:
-                print("Processing with PANNs model...")
-                
-                # Run prediction using the PANNs model
-                panns_predictions = panns_model.predict_sound(
-                    np_wav, 
-                    RATE, 
-                    threshold=PREDICTION_THRES,
-                    top_k=10
-                )
-                
-                # Debug all raw predictions from PANNs model
-                print("===== PANNS MODEL PREDICTIONS =====")
-                for pred in panns_predictions["top_predictions"][:5]:  # Show top 5 for brevity
-                    print(f"  {pred['label']}: {pred['confidence']:.6f}")
-                
-                # Get the top prediction
-                if panns_predictions["top_predictions"]:
-                    top_pred = panns_predictions["top_predictions"][0]
-                    top_label = top_pred["label"]
-                    top_confidence = top_pred["confidence"]
-                    
-                    # Check for mapped predictions (to homesounds categories)
-                    if panns_predictions["mapped_predictions"]:
-                        mapped_pred = panns_predictions["mapped_predictions"][0]
-                        label = mapped_pred["label"]
-                        
-                        # Use the mapped label for emission
-                        socketio.emit('audio_label', {
-                            'label': label.capitalize(),
-                            'accuracy': str(mapped_pred["confidence"]),
-                            'db': str(db)
-                        })
-                        print(f"EMITTING PANNS PREDICTION: {label.capitalize()} ({mapped_pred['confidence']:.6f})")
-                    else:
-                        # No mapped predictions found, emit original label
-                        socketio.emit('audio_label', {
-                            'label': f"Unrecognized Sound",
-                            'accuracy': '0.0',
-                            'db': str(db)
-                        })
-                        print(f"Emitting Unrecognized Sound (db: {db})")
-                else:
-                    # No predictions above threshold
-                    socketio.emit('audio_label', {
-                        'label': f"Unrecognized Sound",
-                        'accuracy': '0.0',
-                        'db': str(db)
-                    })
-                    print(f"Emitting Unrecognized Sound (db: {db})")
-                
-                # Run memory cleanup after prediction
-                cleanup_memory()
-                return
-                
-            except Exception as e:
-                print(f"Error processing audio with PANNs model: {str(e)}")
-                traceback.print_exc()
-                
-                # Fall back to AST or TensorFlow model
-                print("Falling back to alternative model...")
-        
-        elif USE_AST_MODEL:
+        if USE_AST_MODEL:
             # Process using AST model
             try:
                 with ast_lock:
@@ -1014,8 +964,8 @@ def handle_audio(data):
                         
                         # Debug the aggregated predictions
                         print("===== AGGREGATED AST MODEL PREDICTIONS =====")
-                        for pred in ast_predictions["top_predictions"][:5]:  # Show top 5 for brevity
-                            print(f"  {pred['label']}: {pred['confidence']:.6f}")
+                    for pred in ast_predictions["top_predictions"][:5]:  # Show top 5 for brevity
+                        print(f"  {pred['label']}: {pred['confidence']:.6f}")
                     
                     # Special check for finger snapping
                     finger_snap_detected = False
@@ -1067,14 +1017,14 @@ def handle_audio(data):
                                 if isinstance(sentiment_result, dict) and 'sentiment' in sentiment_result and isinstance(sentiment_result['sentiment'], dict) and 'category' in sentiment_result['sentiment']:
                                     # Emit with sentiment information - fixed to match actual structure
                                     label = f"Speech {sentiment_result['sentiment']['category']}"
-                                    socketio.emit('audio_label', {
-                                    'label': label,
-                                    'accuracy': str(sentiment_result['sentiment']['confidence']),
+                                socketio.emit('audio_label', {
+                                        'label': label,
+                                        'accuracy': str(sentiment_result['sentiment']['confidence']),
                                     'db': str(db),
-                                    'emoji': sentiment_result['sentiment']['emoji'],
-                                    'transcription': sentiment_result['text'],
-                                    'emotion': sentiment_result['sentiment']['original_emotion'],
-                                    'sentiment_score': str(sentiment_result['sentiment']['confidence'])
+                                        'emoji': sentiment_result['sentiment']['emoji'],
+                                        'transcription': sentiment_result['text'],
+                                        'emotion': sentiment_result['sentiment']['original_emotion'],
+                                        'sentiment_score': str(sentiment_result['sentiment']['confidence'])
                                     })
                                     print(f"EMITTING SPEECH WITH SENTIMENT: {label} with emoji {sentiment_result['sentiment']['emoji']}")
                                 else:
@@ -1113,8 +1063,8 @@ def handle_audio(data):
                                             'db': str(db)
                                         })
                                         print("EMITTING BASIC SPEECH DETECTION (no sentiment)")
-                                        # Cleanup memory
-                                        cleanup_memory()
+                                    # Cleanup memory
+                                    cleanup_memory()
                                 return
                         
                         # Emit the prediction if confidence is above threshold or it's a finger snap
@@ -1212,7 +1162,7 @@ def process_with_tensorflow_model(np_wav, db):
             
             with tf_graph.as_default():
                 with tf_session.as_default():
-                            predictions = models["tensorflow"].predict(np_data)
+                    predictions = models["tensorflow"].predict(np_data)
             
             # Debug all predictions before applying threshold
             if np.ndim(predictions) > 0 and len(predictions) > 0:
@@ -1285,14 +1235,14 @@ def process_with_tensorflow_model(np_wav, db):
                                     if isinstance(sentiment_result, dict) and 'sentiment' in sentiment_result and isinstance(sentiment_result['sentiment'], dict) and 'category' in sentiment_result['sentiment']:
                                         # Emit with sentiment information - fixed to match actual structure
                                         label = f"Speech {sentiment_result['sentiment']['category']}"
-                                        socketio.emit('audio_label', {
-                                        'label': label,
-                                        'accuracy': str(sentiment_result['sentiment']['confidence']),
+                                    socketio.emit('audio_label', {
+                                            'label': label,
+                                            'accuracy': str(sentiment_result['sentiment']['confidence']),
                                         'db': str(db),
-                                        'emoji': sentiment_result['sentiment']['emoji'],
-                                        'transcription': sentiment_result['text'],
-                                        'emotion': sentiment_result['sentiment']['original_emotion'],
-                                        'sentiment_score': str(sentiment_result['sentiment']['confidence'])
+                                            'emoji': sentiment_result['sentiment']['emoji'],
+                                            'transcription': sentiment_result['text'],
+                                            'emotion': sentiment_result['sentiment']['original_emotion'],
+                                            'sentiment_score': str(sentiment_result['sentiment']['confidence'])
                                         })
                                         print(f"EMITTING SPEECH WITH SENTIMENT: {label} with emoji {sentiment_result['sentiment']['emoji']}")
                                     else:
@@ -1331,8 +1281,8 @@ def process_with_tensorflow_model(np_wav, db):
                                                 'db': str(db)
                                             })
                                             print("EMITTING BASIC SPEECH DETECTION (no sentiment)")
-                                            # Cleanup memory
-                                            cleanup_memory()
+                                        # Cleanup memory
+                                        cleanup_memory()
                                         return
                             # Normal sound emission (non-speech or sentiment analysis failed)
                             socketio.emit('audio_label', {
@@ -1340,8 +1290,8 @@ def process_with_tensorflow_model(np_wav, db):
                                 'accuracy': str(pred_max_val),
                                 'db': str(db)
                             })
-                            # Cleanup memory
-                            cleanup_memory()
+                                # Cleanup memory
+                                cleanup_memory()
                             break
                 else:
                     print(f"No prediction above threshold: {pred_max_val:.4f}")
@@ -1467,7 +1417,7 @@ def process_speech_with_sentiment(audio_data):
         logger.info(f"Used Google Cloud Speech-to-Text for transcription")
     else:
         # Use Whisper (default)
-        transcription = speech_processor.transcribe(concatenated_audio, RATE)
+    transcription = speech_processor.transcribe(concatenated_audio, RATE)
         logger.info(f"Used Whisper for transcription")
     
     # Check for valid transcription with sufficient content
