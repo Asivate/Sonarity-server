@@ -124,29 +124,71 @@ class Cnn9_GMP_64x64(nn.Module):
         Returns:
             Tensor with shape [batch_size, 512]
         """
-        # Simple, direct approach without complex reshaping
-        x = self.conv_block1(input, pool_size=(2, 2), pool_type='avg')
+        # Debug input shape
+        logger.info(f"get_bottleneck input shape: {input.shape}")
+        
+        # Ensure the input has the right shape for the CNN
+        # CNN9 expects [batch, channels, mel_bins, time] where time is at least 64
+        if input.shape[3] < 64:
+            # Pad the time dimension to at least 64 frames
+            padding_needed = 64 - input.shape[3]
+            logger.info(f"Padding time dimension by {padding_needed} frames to reach 64")
+            padding = torch.zeros(input.shape[0], input.shape[1], input.shape[2], padding_needed, device=input.device)
+            input = torch.cat([input, padding], dim=3)
+        
+        # Use smaller pooling sizes to preserve more spatial features
+        # Original model uses (2,2) pooling which reduces dimensions too quickly
+        # for our small spectrograms
+        
+        # First conv block with reduced pooling
+        x = self.conv_block1(input, pool_size=(1, 2), pool_type='avg')  # Using (1,2) instead of (2,2)
+        logger.info(f"After conv_block1: {x.shape}")
         x = F.dropout(x, p=0.2)
         
-        x = self.conv_block2(x, pool_size=(2, 2), pool_type='avg')
+        # Second conv block with reduced pooling
+        x = self.conv_block2(x, pool_size=(1, 2), pool_type='avg')  # Using (1,2) instead of (2,2)
+        logger.info(f"After conv_block2: {x.shape}")
         x = F.dropout(x, p=0.2)
         
-        x = self.conv_block3(x, pool_size=(2, 2), pool_type='avg')
+        # Third conv block with smaller pooling
+        x = self.conv_block3(x, pool_size=(1, 2), pool_type='avg')  # Using (1,2) instead of (2,2)
+        logger.info(f"After conv_block3: {x.shape}")
         x = F.dropout(x, p=0.2)
         
-        x = self.conv_block4(x, pool_size=(2, 2), pool_type='avg')
+        # Fourth conv block with smaller pooling
+        x = self.conv_block4(x, pool_size=(1, 2), pool_type='avg')  # Using (1,2) instead of (2,2)
+        logger.info(f"After conv_block4: {x.shape}")
         x = F.dropout(x, p=0.2)
         
-        # Global max pooling
-        x = torch.mean(x, dim=3)
-        x = x.permute(0, 2, 1)
-        x = F.max_pool1d(x, kernel_size=x.shape[2])
-        x = x.permute(0, 2, 1)
-        x = x.view(x.shape[0], -1)
+        # Reshape features to 512 if needed
+        if x.shape[2] * x.shape[3] != 512:
+            logger.info(f"Reshaping features: current shape = {x.shape}")
+            
+            # Flatten and resize to 512 features
+            x_flat = x.view(x.shape[0], x.shape[1], -1)  # Flatten spatial dimensions
+            logger.info(f"Flattened shape: {x_flat.shape}")
+            
+            # Ensure we have at least 512 features
+            if x_flat.shape[2] < 512:
+                # Upsample features to 512
+                x_flat = F.interpolate(x_flat, size=512, mode='linear', align_corners=False)
+                logger.info(f"Upsampled to: {x_flat.shape}")
+            elif x_flat.shape[2] > 512:
+                # Downsample features to 512
+                x_flat = F.adaptive_avg_pool1d(x_flat, 512)
+                logger.info(f"Downsampled to: {x_flat.shape}")
+                
+            # Convert back to expected format for further processing
+            x = x_flat
         
-        # Final FC layers
+        # Global pooling
+        x = torch.mean(x, dim=2)
+        logger.info(f"After global pooling: {x.shape}")
+        
+        # Final FC layer
         x = F.dropout(x, p=0.5)
         x = F.relu_(self.fc(x))
+        logger.info(f"Final bottleneck features: {x.shape}")
         
         return x
         
@@ -339,12 +381,14 @@ class PANNsModelInference:
             # Apply normalization
             log_mel_spectrogram = (log_mel_spectrogram - mean) / std
         
-        # Ensure log_mel_spectrogram has enough frames for the CNN's pooling operations
-        # The network needs at least 64 frames to work correctly due to pooling operations
+        # We need a larger spectrogram for the CNN to extract enough features
+        # PANNs model was trained on 64x500 spectrograms, but we have much smaller ones
+        # Ensure spectrogram is at least 64 frames wide (time dimension)
         min_time_frames = 64
         if log_mel_spectrogram.shape[1] < min_time_frames:
             # Calculate padding required
             pad_size = min_time_frames - log_mel_spectrogram.shape[1]
+            logger.info(f"Padding spectrogram time dimension from {log_mel_spectrogram.shape[1]} to {min_time_frames}")
             # Add padding to the time dimension
             log_mel_spectrogram = np.pad(
                 log_mel_spectrogram, 
@@ -404,42 +448,92 @@ class PANNsModelInference:
             # Move tensor to the correct device
             log_mel = log_mel.to(self.device)
             
-            # Run model prediction
+            # Run model inference with error catching and retries
             logger.info("Running model inference...")
-            with torch.no_grad():
-                prediction = self.model(log_mel)
+            try:
+                with torch.no_grad():
+                    # Try normal prediction
+                    prediction = self.model(log_mel)
+                    
+                    # Convert predictions to numpy array
+                    if isinstance(prediction, torch.Tensor):
+                        prediction = prediction.detach().cpu().numpy()
+                    
+                    # Process first sample if batched
+                    if len(prediction.shape) > 1:
+                        prediction = prediction[0]
+            except RuntimeError as e:
+                # Provide detailed diagnostic information
+                logger.error(f"RuntimeError in model prediction: {str(e)}")
                 
-                # Convert predictions to numpy array
-                if isinstance(prediction, torch.Tensor):
-                    prediction = prediction.detach().cpu().numpy()
-                
-                # Process first sample if batched
-                if len(prediction.shape) > 1:
-                    prediction = prediction[0]
-                
-                # Get top-k indices
+                # Check if this is the matrix multiplication error
+                if "mat1 and mat2 shapes cannot be multiplied" in str(e):
+                    logger.error("Matrix multiplication error detected. This is likely due to tensor shape issues.")
+                    logger.error(f"Input log-mel shape: {log_mel.shape}")
+                    
+                    # Try with a larger padding and different approach
+                    try:
+                        logger.info("Attempting alternative prediction approach...")
+                        
+                        # Create a larger spectrogram by padding more aggressively
+                        if log_mel.shape[3] < 500:  # PANNs models often use 500 time frames
+                            padding_needed = 500 - log_mel.shape[3]
+                            logger.info(f"Adding extensive padding: {padding_needed} frames")
+                            padding = torch.zeros(
+                                log_mel.shape[0], log_mel.shape[1], log_mel.shape[2], 
+                                padding_needed, device=log_mel.device
+                            )
+                            log_mel_padded = torch.cat([log_mel, padding], dim=3)
+                            logger.info(f"New padded shape: {log_mel_padded.shape}")
+                            
+                            # Try prediction with heavily padded input
+                            with torch.no_grad():
+                                prediction = self.model(log_mel_padded)
+                                if isinstance(prediction, torch.Tensor):
+                                    prediction = prediction.detach().cpu().numpy()
+                                if len(prediction.shape) > 1:
+                                    prediction = prediction[0]
+                        else:
+                            # If already large enough, return empty results
+                            logger.error("Cannot fix the prediction, returning empty results")
+                            return []
+                    except Exception as retry_error:
+                        logger.error(f"Alternative prediction approach also failed: {str(retry_error)}")
+                        return []
+                else:
+                    # For other runtime errors, return empty results
+                    return []
+            except Exception as e:
+                # For any other exception, log and return empty results
+                logger.error(f"Error in model prediction: {str(e)}")
+                return []
+            
+            # Get top-k indices
+            try:
                 top_indices = np.argsort(prediction)[::-1][:top_k]
-                
-                # Format results
-                results = []
-                logger.info("Top predictions:")
-                for idx in top_indices:
+            except Exception as e:
+                logger.error(f"Error getting top indices: {str(e)}")
+                return []
+            
+            # Format results
+            results = []
+            logger.info("Top predictions:")
+            for idx in top_indices:
+                try:
                     confidence = float(prediction[idx])
                     if confidence >= threshold:
-                        try:
-                            # Get label based on index
-                            if hasattr(self.labels, 'iloc'):
-                                label = self.labels.iloc[idx]['display_name']
-                            else:
-                                label = f"unknown_{idx}"
-                            
-                            results.append((label, confidence))
-                            logger.info(f"  {label}: {confidence:.6f}")
-                        except Exception as e:
-                            logger.error(f"Error getting label for index {idx}: {str(e)}")
-                            results.append((f"unknown_{idx}", confidence))
-                
-                return results
+                        # Get label based on index
+                        if hasattr(self.labels, 'iloc'):
+                            label = self.labels.iloc[idx]['display_name']
+                        else:
+                            label = f"unknown_{idx}"
+                        
+                        results.append((label, confidence))
+                        logger.info(f"  {label}: {confidence:.6f}")
+                except Exception as e:
+                    logger.error(f"Error processing prediction for index {idx}: {str(e)}")
+            
+            return results
                 
         except Exception as e:
             logger.error(f"Error in prediction: {str(e)}")
