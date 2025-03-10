@@ -1,5 +1,5 @@
 # PowerShell script to set Google Cloud credentials and start the server
-# Usage: ./start_with_credentials.ps1 -CredentialsPath "C:\path\to\your\credentials.json" [-UseGoogleSpeech] [-Port 5000] [-Debug]
+# Usage: ./start_with_credentials.ps1 -CredentialsPath "C:\path\to\your\credentials.json" [-UseGoogleSpeech] [-Port 8080] [-Debug]
 
 param (
     [Parameter(Mandatory=$true)]
@@ -9,7 +9,7 @@ param (
     [switch]$UseGoogleSpeech,
     
     [Parameter(Mandatory=$false)]
-    [int]$Port = 5000,
+    [int]$Port = 8080,
     
     [Parameter(Mandatory=$false)]
     [switch]$Debug
@@ -28,7 +28,7 @@ Write-Host "Set GOOGLE_APPLICATION_CREDENTIALS to: $CredentialsPath" -Foreground
 # Build the command to start the server
 $pythonCmd = "python server.py"
 
-if ($Port -ne 5000) {
+if ($Port -ne 8080) {
     $pythonCmd += " --port $Port"
 }
 

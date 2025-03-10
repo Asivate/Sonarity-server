@@ -208,8 +208,8 @@ This approach keeps your credentials more secure and easier to update without mo
 
 ## Usage
 
-- The server will be available at: `http://<server-ip>:5000`
-- WebSocket endpoint: `ws://<server-ip>:5000`
+- The server will be available at: `http://<server-ip>:8080`
+- WebSocket endpoint: `ws://<server-ip>:8080`
 
 ## Note
 
@@ -325,11 +325,11 @@ Available environment variables:
 The server supports a limited set of command-line arguments:
 
 ```bash
-python server.py --port=5000 --use-google-speech
+python server.py --port=8080 --use-google-speech
 ```
 
 Available arguments:
-- `--port`: Specify the port to listen on (default: 5000)
+- `--port`: Specify the port to listen on (default: 8080)
 - `--use-google-speech`: Use Google Cloud Speech-to-Text instead of Whisper
 - `--debug`: Enable debug mode
 

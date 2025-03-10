@@ -52,7 +52,7 @@ def confirm_settings(settings):
 def main():
     parser = argparse.ArgumentParser(description="Interactive startup for SoundWatch Server")
     parser.add_argument('--host', default="0.0.0.0", help="Host to bind to")
-    parser.add_argument('--port', type=int, default=5000, help="Port to bind to")
+    parser.add_argument('--port', type=int, default=8080, help="Port to bind to")
     parser.add_argument('--debug', action='store_true', help="Enable debug mode")
     args = parser.parse_args()
     

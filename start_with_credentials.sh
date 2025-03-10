@@ -4,13 +4,13 @@
 # Usage: ./start_with_credentials.sh [-c /path/to/credentials.json] [-g] [-p PORT] [-d]
 #   -c: Path to credentials file (default: /home/hirwa0250/asivate-452914-5c12101797af.json)
 #   -g: Use Google Speech-to-Text instead of Whisper
-#   -p: Port number (default: 5000)
+#   -p: Port number (default: 8080)
 #   -d: Enable debug mode
 
 # Default values
 CREDENTIALS_PATH="/home/hirwa0250/asivate-452914-5c12101797af.json"
 USE_GOOGLE_SPEECH=0
-PORT=5000
+PORT=8080
 DEBUG=0
 
 # Parse command line arguments
@@ -48,7 +48,7 @@ echo -e "\e[32mSet GOOGLE_APPLICATION_CREDENTIALS to: $CREDENTIALS_PATH\e[0m"
 # Build the command to start the server
 PYTHON_CMD="python3 server.py"
 
-if [ "$PORT" != "5000" ]; then
+if [ "$PORT" != "8080" ]; then
     PYTHON_CMD="$PYTHON_CMD --port $PORT"
 fi
 

@@ -1155,10 +1155,10 @@ if __name__ == '__main__':
     app.start_time = time.time()
     
     # Get port from environment variable (for App Engine compatibility)
-    port = int(os.environ.get("PORT", 5000))
+    port = int(os.environ.get("PORT", 8080))
     
     # Only print local connection info when running locally
-    if port == 5000:
+    if port == 8080:
         # Get all available IP addresses
         ip_addresses = get_ip_addresses()
         
@@ -1169,21 +1169,21 @@ if __name__ == '__main__':
         if ip_addresses:
             print("Connect your SoundWatch app to one of these addresses:")
             for i, ip in enumerate(ip_addresses):
-                print(f"{i+1}. http://{ip}:5000")
-                print(f"   WebSocket: ws://{ip}:5000")
+                print(f"{i+1}. http://{ip}:8080")
+                print(f"   WebSocket: ws://{ip}:8080")
             
-            print("\nPreferred connection address: http://%s:5000" % ip_addresses[0])
-            print("Preferred WebSocket address: ws://%s:5000" % ip_addresses[0])
+            print("\nPreferred connection address: http://%s:8080" % ip_addresses[0])
+            print("Preferred WebSocket address: ws://%s:8080" % ip_addresses[0])
         else:
             print("Could not determine IP address. Make sure you're connected to a network.")
-            print("Try connecting to your computer's IP address on port 5000")
+            print("Try connecting to your computer's IP address on port 8080")
         
         print("="*60 + "\n")
     else:
         print(f"Starting server on port {port} (App Engine mode)")
     
     # Configure for production if running on App Engine
-    debug_mode = port == 5000
+    debug_mode = port == 8080
     
     # Run the server on all network interfaces (0.0.0.0)
     socketio.run(app, host='0.0.0.0', port=port, debug=debug_mode)
