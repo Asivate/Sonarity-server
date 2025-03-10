@@ -289,10 +289,38 @@ class PANNsModelInference:
         # Convert to log mel spectrogram
         log_mel_spectrogram = librosa.power_to_db(mel_spectrogram, ref=1.0, amin=1e-10, top_db=None)
         
-        # Normalize with pre-computed scalars
+        # Debug the shapes before normalization
         if self.scalar is not None:
-            log_mel_spectrogram -= self.scalar['mean']
-            log_mel_spectrogram /= self.scalar['std']
+            # Fix the broadcasting issue by reshaping the mean and std for proper broadcasting
+            mean = self.scalar['mean']
+            std = self.scalar['std']
+            
+            # Print shapes for debugging
+            logger.debug(f"Log mel spectrogram shape: {log_mel_spectrogram.shape}")
+            logger.debug(f"Mean shape: {mean.shape}")
+            logger.debug(f"Std shape: {std.shape}")
+            
+            # Reshape mean and std for proper broadcasting if needed
+            if log_mel_spectrogram.shape[1] != mean.shape[0]:
+                logger.warning(f"Shape mismatch: mel={log_mel_spectrogram.shape}, mean={mean.shape}. Reshaping...")
+                # For broadcasting to work correctly, we need to pad or truncate the mean/std arrays
+                if mean.shape[0] > log_mel_spectrogram.shape[1]:
+                    # Truncate mean/std to match the time dimension
+                    mean = mean[:log_mel_spectrogram.shape[1]]
+                    std = std[:log_mel_spectrogram.shape[1]]
+                else:
+                    # Pad mean/std with zeros to match time dimension (less accurate but better than crashing)
+                    padded_mean = np.zeros(log_mel_spectrogram.shape[1])
+                    padded_std = np.ones(log_mel_spectrogram.shape[1])
+                    padded_mean[:mean.shape[0]] = mean
+                    padded_std[:std.shape[0]] = std
+                    mean = padded_mean
+                    std = padded_std
+            
+            # Apply normalization using proper broadcasting
+            # mean and std are 1D arrays, so we need to reshape them for broadcasting
+            log_mel_spectrogram = log_mel_spectrogram - mean.reshape(1, -1)
+            log_mel_spectrogram = log_mel_spectrogram / std.reshape(1, -1)
         
         # Reshape for model input
         # (channel, mel_bins, time_steps)
