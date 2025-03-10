@@ -270,11 +270,18 @@ class PANNsModelInference:
             audio: Audio waveform as numpy array
             
         Returns:
-            Log-mel features as numpy array
+            Log-mel features as torch tensor with proper shape for CNN input
         """
         # Ensure audio is properly shaped and normalized
         if audio.ndim > 1:
             audio = np.mean(audio, axis=1)
+            
+        # Ensure audio is at least 1 second long (32000 samples at 32kHz)
+        if len(audio) < SAMPLE_RATE:
+            logger.info(f"Audio too short: {len(audio)} samples. Padding to {SAMPLE_RATE} samples.")
+            padded_audio = np.zeros(SAMPLE_RATE)
+            padded_audio[:len(audio)] = audio
+            audio = padded_audio
         
         # Calculate spectrogram
         stft = librosa.stft(y=audio, n_fft=N_FFT, hop_length=HOP_LENGTH, 
@@ -289,57 +296,36 @@ class PANNsModelInference:
         # Convert to log mel spectrogram
         log_mel_spectrogram = librosa.power_to_db(mel_spectrogram, ref=1.0, amin=1e-10, top_db=None)
         
-        # Debug the shapes before normalization
+        # Debug the shapes
+        logger.debug(f"Log mel spectrogram shape before normalization: {log_mel_spectrogram.shape}")
+        
+        # Normalize with pre-computed scalars
         if self.scalar is not None:
-            # Fix the broadcasting issue by reshaping the mean and std for proper broadcasting
+            # Fix the broadcasting issue by using the correct shapes
             mean = self.scalar['mean']
             std = self.scalar['std']
-            
-            # Print shapes for debugging
-            logger.debug(f"Log mel spectrogram shape: {log_mel_spectrogram.shape}")
-            logger.debug(f"Mean shape: {mean.shape}")
-            logger.debug(f"Std shape: {std.shape}")
             
             # Reshape mean and std for proper broadcasting if needed
             if log_mel_spectrogram.shape[1] != mean.shape[0]:
                 logger.warning(f"Shape mismatch: mel={log_mel_spectrogram.shape}, mean={mean.shape}. Reshaping...")
-                # For broadcasting to work correctly, we need to pad or truncate the mean/std arrays
-                if mean.shape[0] > log_mel_spectrogram.shape[1]:
-                    # Truncate mean/std to match the time dimension
-                    mean = mean[:log_mel_spectrogram.shape[1]]
-                    std = std[:log_mel_spectrogram.shape[1]]
-                else:
-                    # Pad mean/std with zeros to match time dimension (less accurate but better than crashing)
-                    padded_mean = np.zeros(log_mel_spectrogram.shape[1])
-                    padded_std = np.ones(log_mel_spectrogram.shape[1])
-                    padded_mean[:mean.shape[0]] = mean
-                    padded_std[:std.shape[0]] = std
-                    mean = padded_mean
-                    std = padded_std
+                # For broadcasting to work correctly, repeat the mean/std to match time dimension
+                if len(mean.shape) == 1:  # If mean is just a 1D array
+                    # Reshape mean to broadcast across time dimension
+                    mean = np.tile(mean.reshape(-1, 1), (1, log_mel_spectrogram.shape[1]))
+                    std = np.tile(std.reshape(-1, 1), (1, log_mel_spectrogram.shape[1]))
+                
+            # Apply normalization
+            log_mel_spectrogram = (log_mel_spectrogram - mean) / std
             
-            # Apply normalization using proper broadcasting
-            # mean and std are 1D arrays, so we need to reshape them for broadcasting
-            log_mel_spectrogram = log_mel_spectrogram - mean.reshape(1, -1)
-            log_mel_spectrogram = log_mel_spectrogram / std.reshape(1, -1)
+        # Reshape for PyTorch CNN model input: [batch_size, channels, height, width]
+        # log_mel_spectrogram shape is currently [n_mels, time]
         
-        # Reshape for PyTorch CNN model input
-        # For PyTorch, shape should be: [batch_size, channels, height, width]
-        # In audio context: [batch_size, 1, mel_bins, time_frames]
-        # Current shape is [mel_bins, time_frames]
+        # Convert to tensor with shape [1, 1, n_mels, time]
+        tensor = torch.tensor(log_mel_spectrogram[np.newaxis, np.newaxis, :, :], dtype=torch.float32)
         
-        # First transpose if needed (depends on whether mel_bins is first or second dimension)
-        if log_mel_spectrogram.shape[0] != MEL_BINS:
-            log_mel_spectrogram = log_mel_spectrogram.T
-            
-        # Now reshape to 4D: [batch_size=1, channels=1, mel_bins, time_frames]
-        log_mel_spectrogram = log_mel_spectrogram.reshape(1, 1, log_mel_spectrogram.shape[0], log_mel_spectrogram.shape[1])
+        logger.debug(f"Final tensor shape: {tensor.shape}")
         
-        # Convert to torch tensor
-        log_mel_spectrogram = torch.tensor(log_mel_spectrogram, dtype=torch.float32)
-        
-        logger.debug(f"Final log mel spectrogram tensor shape: {log_mel_spectrogram.shape}")
-        
-        return log_mel_spectrogram
+        return tensor
     
     def predict(self, audio, top_k=5, threshold=0.2):
         """
@@ -358,20 +344,42 @@ class PANNsModelInference:
                 return []
         
         try:
-            # Extract features
+            # Extract features and convert to tensor
+            logger.info(f"Processing audio for prediction: shape={audio.shape}, min={audio.min():.4f}, max={audio.max():.4f}")
+            
+            # Make sure audio is in float32 format and properly normalized
+            if audio.dtype != np.float32:
+                audio = audio.astype(np.float32)
+            
+            # Ensure audio is normalized to [-1, 1]
+            max_abs = np.max(np.abs(audio))
+            if max_abs > 1.0:
+                logger.warning(f"Audio contains values outside [-1,1] range. Normalizing. Max abs value: {max_abs:.4f}")
+                audio = audio / max_abs
+            
+            # Extract log-mel features
             logmel = self.logmel_extract(audio)
             
-            # Make sure tensor is on the correct device
+            # Move tensor to the correct device
             logmel = logmel.to(self.device)
             
-            # Debugging
-            logger.debug(f"Input tensor shape before model: {logmel.shape}, type: {type(logmel)}, device: {logmel.device}")
+            # Log tensor properties for debugging
+            logger.debug(f"Input tensor: shape={logmel.shape}, min={logmel.min().item():.4f}, max={logmel.max().item():.4f}")
             
             # Make prediction
+            self.model.eval()  # Ensure model is in evaluation mode
             with torch.no_grad():
-                self.model.eval()  # Ensure model is in evaluation mode
                 prediction = self.model(logmel)
                 prediction = prediction.cpu().numpy()[0]  # Get first batch item and convert to numpy
+            
+            # Log raw predictions for debugging
+            if len(prediction) > 0:
+                top_indices = np.argsort(prediction)[::-1][:5]  # Get indices of top 5 predictions
+                logger.debug(f"Top 5 raw predictions:")
+                for i in top_indices:
+                    if i < len(self.labels):
+                        label = self.labels.iloc[i]['display_name']
+                        logger.debug(f"  {label}: {prediction[i]:.6f}")
             
             # Filter by threshold and get top k
             above_threshold = prediction >= threshold

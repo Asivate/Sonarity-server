@@ -332,18 +332,15 @@ def debug_predictions(predictions, label_list):
                 print(f"Prediction {idx}: {pred:.6f}")
         elif isinstance(label_list, dict):
             # Handle dictionary labels (e.g., {label: index})
-            # Create a list representation for easier indexing
-            max_idx = max(label_list.values()) if label_list else 0
-            label_array = ["Unknown"] * (max_idx + 1)
-            for label, idx in label_list.items():
-                if 0 <= idx < len(label_array):
-                    label_array[idx] = label
-            
-            # Print predictions with labels
+            # For dictionaries, try to find the matching label for each index
             for idx, pred in enumerate(predictions):
-                if idx < len(label_array):
-                    print(f"{label_array[idx]}: {pred:.6f}")
-                else:
+                label_found = False
+                for label, label_idx in label_list.items():
+                    if label_idx == idx:
+                        print(f"{label}: {pred:.6f}")
+                        label_found = True
+                        break
+                if not label_found:
                     print(f"Unknown({idx}): {pred:.6f}")
         elif isinstance(label_list, (list, tuple, np.ndarray)):
             # Handle list, tuple, or array of labels
@@ -355,7 +352,10 @@ def debug_predictions(predictions, label_list):
                 # Normal case with labels
                 for idx, pred in enumerate(predictions):
                     if idx < len(label_list):
-                        print(f"{label_list[idx]}: {pred:.6f}")
+                        try:
+                            print(f"{label_list[idx]}: {pred:.6f}")
+                        except Exception as e:
+                            print(f"Prediction {idx}: {pred:.6f} (Error accessing label: {e})")
                     else:
                         print(f"Unknown({idx}): {pred:.6f}")
         else:
@@ -735,10 +735,10 @@ def handle_source(json_data):
                                                     print(f"EMITTING SPEECH WITH BASIC SENTIMENT: {label}")
                                                 else:
                                                     socketio.emit('audio_label', {
-                                                        'label': 'Speech',
-                                                        'accuracy': '0.6',
-                                                        'db': str(db)
-                                                    })
+                                                    'label': 'Speech',
+                                                    'accuracy': '0.6',
+                                                    'db': str(db)
+                                                })
                                                     print("EMITTING BASIC SPEECH DETECTION (no sentiment)")
                                                 cleanup_memory()
                                             return
@@ -1262,11 +1262,42 @@ def aggregate_predictions(new_prediction, label_list, is_speech=False, num_sampl
         agg_top_idx = np.argmax(aggregated)
         
         if orig_top_idx != agg_top_idx:
-            orig_label = label_list[orig_top_idx] if orig_top_idx < len(label_list) else "unknown"
-            agg_label = label_list[agg_top_idx] if agg_top_idx < len(label_list) else "unknown"
+            # Handle different label_list types
+            if isinstance(label_list, dict):
+                # Dictionary type - find label by index value
+                orig_label = "unknown"
+                agg_label = "unknown"
+                for label, idx in label_list.items():
+                    if idx == orig_top_idx:
+                        orig_label = label
+                    if idx == agg_top_idx:
+                        agg_label = label
+            elif isinstance(label_list, (list, tuple, np.ndarray)) and len(label_list) > 0:
+                # List type - use direct indexing if in range
+                orig_label = label_list[orig_top_idx] if orig_top_idx < len(label_list) else f"unknown({orig_top_idx})"
+                agg_label = label_list[agg_top_idx] if agg_top_idx < len(label_list) else f"unknown({agg_top_idx})"
+            else:
+                # Other types or empty label_list - just use index values
+                orig_label = f"index_{orig_top_idx}"
+                agg_label = f"index_{agg_top_idx}"
+                
             logger.info(f"Aggregation changed top prediction: {orig_label} ({new_prediction[orig_top_idx]:.4f}) -> {agg_label} ({aggregated[agg_top_idx]:.4f})")
         else:
-            label = label_list[orig_top_idx] if orig_top_idx < len(label_list) else "unknown"
+            # Same handling for unchanged prediction
+            if isinstance(label_list, dict):
+                # Dictionary type
+                label = "unknown"
+                for lbl, idx in label_list.items():
+                    if idx == orig_top_idx:
+                        label = lbl
+                        break
+            elif isinstance(label_list, (list, tuple, np.ndarray)) and len(label_list) > 0:
+                # List type
+                label = label_list[orig_top_idx] if orig_top_idx < len(label_list) else f"unknown({orig_top_idx})"
+            else:
+                # Other types
+                label = f"index_{orig_top_idx}"
+                
             logger.info(f"Aggregation kept same top prediction: {label}, confidence: {new_prediction[orig_top_idx]:.4f} -> {aggregated[agg_top_idx]:.4f}")
         
         return aggregated
