@@ -22,13 +22,40 @@ MODEL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'models')
 MODEL_URL = "https://zenodo.org/record/3576599/files/Cnn9_GMP_64x64_300000_iterations_mAP%3D0.37.pth?download=1"
 MODEL_PATH = os.path.join(MODEL_DIR, 'Cnn9_GMP_64x64_300000_iterations_mAP=0.37.pth')
 
-# Reference paths for copying from demo directory
-REF_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 
-                      'General-Purpose-Sound-Recognition-Demo',
-                      'General-Purpose-Sound-Recognition-Demo-2019',
-                      'models')
-REF_CSV = os.path.join(REF_DIR, 'validate_meta.csv')
-REF_SCALAR = os.path.join(REF_DIR, 'scalar.h5')
+# Reference paths for the required files - multiple possible locations
+CSV_PATHS = [
+    # Check the "csv files" directory first
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), 'csv files', 'validate_meta.csv'),
+    # Original reference location
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), 
+                'General-Purpose-Sound-Recognition-Demo',
+                'General-Purpose-Sound-Recognition-Demo-2019',
+                'models',
+                'validate_meta.csv'),
+    # Alternative reference location
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), 
+                'General-Purpose-Sound-Recognition-Demo',
+                'General-Purpose-Sound-Recognition-Demo-main',
+                'models',
+                'validate_meta.csv')
+]
+
+SCALAR_PATHS = [
+    # Check the "csv files" directory first
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), 'csv files', 'scalar.h5'),
+    # Original reference location
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), 
+                'General-Purpose-Sound-Recognition-Demo',
+                'General-Purpose-Sound-Recognition-Demo-2019',
+                'models',
+                'scalar.h5'),
+    # Alternative reference location 
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), 
+                'General-Purpose-Sound-Recognition-Demo',
+                'General-Purpose-Sound-Recognition-Demo-main',
+                'models',
+                'scalar.h5')
+]
 
 # Target paths
 CSV_PATH = os.path.join(MODEL_DIR, 'validate_meta.csv')
@@ -73,6 +100,24 @@ def copy_file(source, destination):
         logger.error(f"Error copying file: {str(e)}")
         return False
 
+def find_existing_file(paths):
+    """Find the first existing file from a list of paths"""
+    for path in paths:
+        if os.path.exists(path):
+            return path
+    return None
+
+def download_scalar_from_github():
+    """Download scalar.h5 file from GitHub if not found locally"""
+    try:
+        logger.info("Attempting to download scalar.h5 file from GitHub...")
+        # URL for the scalar.h5 file (placeholder - replace with actual URL if available)
+        url = "https://github.com/yinkalario/General-Purpose-Sound-Recognition-Demo/raw/demo2019/models/scalar.h5"
+        return download_file(url, SCALAR_PATH)
+    except Exception as e:
+        logger.error(f"Error downloading scalar.h5 from GitHub: {str(e)}")
+        return False
+
 def main():
     parser = argparse.ArgumentParser(description="Download PANNs model files")
     parser.add_argument('--force', action='store_true', help="Force download even if files already exist")
@@ -93,25 +138,34 @@ def main():
     
     # Copy label CSV file
     if not os.path.exists(CSV_PATH) or args.force:
-        logger.info("Copying class labels file...")
-        if os.path.exists(REF_CSV):
-            if not copy_file(REF_CSV, CSV_PATH):
+        logger.info("Looking for class labels file...")
+        csv_ref = find_existing_file(CSV_PATHS)
+        if csv_ref:
+            logger.info(f"Found labels file at: {csv_ref}")
+            if not copy_file(csv_ref, CSV_PATH):
                 success = False
         else:
-            logger.error(f"Reference labels file not found: {REF_CSV}")
+            logger.error("Could not find validate_meta.csv in any of the expected locations")
+            logger.info("Please copy validate_meta.csv manually to the models directory")
             success = False
     else:
         logger.info(f"Labels file already exists: {CSV_PATH}")
     
     # Copy scalar file
     if not os.path.exists(SCALAR_PATH) or args.force:
-        logger.info("Copying scalar file...")
-        if os.path.exists(REF_SCALAR):
-            if not copy_file(REF_SCALAR, SCALAR_PATH):
+        logger.info("Looking for scalar file...")
+        scalar_ref = find_existing_file(SCALAR_PATHS)
+        if scalar_ref:
+            logger.info(f"Found scalar file at: {scalar_ref}")
+            if not copy_file(scalar_ref, SCALAR_PATH):
                 success = False
         else:
-            logger.error(f"Reference scalar file not found: {REF_SCALAR}")
-            success = False
+            logger.warning("Could not find scalar.h5 in any of the expected locations")
+            logger.info("Attempting to download scalar.h5 from GitHub...")
+            if not download_scalar_from_github():
+                logger.error("Failed to download scalar.h5")
+                logger.info("You'll need to create a scalar.h5 file manually")
+                success = False
     else:
         logger.info(f"Scalar file already exists: {SCALAR_PATH}")
     
