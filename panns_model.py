@@ -322,9 +322,22 @@ class PANNsModelInference:
             log_mel_spectrogram = log_mel_spectrogram - mean.reshape(1, -1)
             log_mel_spectrogram = log_mel_spectrogram / std.reshape(1, -1)
         
-        # Reshape for model input
-        # (channel, mel_bins, time_steps)
-        log_mel_spectrogram = log_mel_spectrogram[np.newaxis, :, :]
+        # Reshape for PyTorch CNN model input
+        # For PyTorch, shape should be: [batch_size, channels, height, width]
+        # In audio context: [batch_size, 1, mel_bins, time_frames]
+        # Current shape is [mel_bins, time_frames]
+        
+        # First transpose if needed (depends on whether mel_bins is first or second dimension)
+        if log_mel_spectrogram.shape[0] != MEL_BINS:
+            log_mel_spectrogram = log_mel_spectrogram.T
+            
+        # Now reshape to 4D: [batch_size=1, channels=1, mel_bins, time_frames]
+        log_mel_spectrogram = log_mel_spectrogram.reshape(1, 1, log_mel_spectrogram.shape[0], log_mel_spectrogram.shape[1])
+        
+        # Convert to torch tensor
+        log_mel_spectrogram = torch.tensor(log_mel_spectrogram, dtype=torch.float32)
+        
+        logger.debug(f"Final log mel spectrogram tensor shape: {log_mel_spectrogram.shape}")
         
         return log_mel_spectrogram
     
@@ -347,12 +360,18 @@ class PANNsModelInference:
         try:
             # Extract features
             logmel = self.logmel_extract(audio)
-            logmel = torch.Tensor(logmel).to(self.device)
+            
+            # Make sure tensor is on the correct device
+            logmel = logmel.to(self.device)
+            
+            # Debugging
+            logger.debug(f"Input tensor shape before model: {logmel.shape}, type: {type(logmel)}, device: {logmel.device}")
             
             # Make prediction
             with torch.no_grad():
+                self.model.eval()  # Ensure model is in evaluation mode
                 prediction = self.model(logmel)
-                prediction = prediction.cpu().numpy()[0]
+                prediction = prediction.cpu().numpy()[0]  # Get first batch item and convert to numpy
             
             # Filter by threshold and get top k
             above_threshold = prediction >= threshold

@@ -937,6 +937,21 @@ def process_with_panns_model(np_wav, record_time=None, db=None):
     try:
         # Use PANNs model for prediction
         print("Processing with PANNs model...")
+        print(f"Audio shape: {np_wav.shape}, min: {np_wav.min():.6f}, max: {np_wav.max():.6f}, mean: {np_wav.mean():.6f}")
+        
+        # Ensure audio is normalized properly
+        if np.abs(np_wav).max() > 1.0:
+            print(f"Warning: Audio data exceeds normalized range [-1.0, 1.0]. Max value: {np.abs(np_wav).max():.6f}")
+            # Normalize if needed
+            np_wav = np_wav / np.abs(np_wav).max()
+            print(f"Audio normalized. New range: [{np_wav.min():.6f}, {np_wav.max():.6f}]")
+            
+        # Ensure audio is long enough for processing
+        if len(np_wav) < 8000:  # At least 0.5 seconds at 16kHz
+            print(f"Audio too short ({len(np_wav)} samples). Padding to 16000 samples.")
+            padded = np.zeros(16000)
+            padded[:len(np_wav)] = np_wav
+            np_wav = padded
         
         # Start processing with original audio
         panns_results = panns_model.predict_with_panns(
@@ -985,6 +1000,11 @@ def process_with_panns_model(np_wav, record_time=None, db=None):
                     print(f"EMITTING: {top_label} ({top_score:.2f})")
                 else:
                     print(f"Top prediction {top_label} ({top_score:.4f}) below threshold, not emitting")
+                    socketio.emit('audio_label', {
+                        'label': 'Unrecognized Sound',
+                        'accuracy': '0.2',
+                        'db': str(db)
+                    })
         else:
             print("No valid predictions from PANNs model")
             # Fall back to TensorFlow model
@@ -1187,8 +1207,15 @@ def handle_connect():
 def handle_disconnect():
     print(f"Client disconnected: {request.sid}")
 
-def aggregate_predictions(new_prediction, label_list, is_speech=False):
-    """Aggregate predictions from multiple overlapping segments to improve accuracy."""
+def aggregate_predictions(new_prediction, label_list, is_speech=False, num_samples=None):
+    """Aggregate predictions from multiple overlapping segments to improve accuracy.
+    
+    Args:
+        new_prediction: The new prediction array to add to history
+        label_list: List of class labels
+        is_speech: Whether to use speech-specific aggregation
+        num_samples: Optional number of samples to consider (if None, use all available)
+    """
     global recent_predictions, speech_predictions
     
     with prediction_lock:
@@ -1205,6 +1232,11 @@ def aggregate_predictions(new_prediction, label_list, is_speech=False):
                 recent_predictions = recent_predictions[-MAX_PREDICTIONS_HISTORY:]
             predictions_list = recent_predictions
             history_len = MAX_PREDICTIONS_HISTORY
+        
+        # If num_samples is specified, limit the number of predictions to use
+        if num_samples is not None and num_samples > 0 and num_samples < len(predictions_list):
+            predictions_list = predictions_list[-num_samples:]
+            logger.info(f"Using most recent {num_samples} samples for aggregation")
         
         if len(predictions_list) > 1:
             expected_shape = predictions_list[0].shape
