@@ -32,10 +32,11 @@ python3 interactive_start.py
 
 ### Sound Recognition Models
 
-The server supports two sound recognition models:
+The server supports three sound recognition models:
 
-1. **TensorFlow Model** (Default): The traditional model used for general sound recognition
-2. **AST (Audio Spectrogram Transformer)**: A newer model that may perform better for some specific sounds
+1. **TensorFlow Model (Legacy)**: The original model used in SoundWatch, better for older devices.
+2. **AST Model**: Audio Spectrogram Transformer model from HuggingFace, with improved performance.
+3. **PANNs Model**: CNN9 model from Google's AudioSet, with 527 sound classes for more comprehensive audio recognition.
 
 #### Using the AST Model
 
@@ -221,3 +222,33 @@ The speech recognition has been improved:
 - Uses longer minimum audio duration (1.5 seconds instead of 0.5)
 - Google Speech-to-Text now uses the "video" model which handles shorter utterances better
 - Added speech adaptation for common phrases
+
+## PANNs Model Integration
+
+The PANNs (Pretrained Audio Neural Networks) model is based on the work by Qiuqiang Kong, Yin Cao, et al. It uses a CNN9 architecture trained on Google's AudioSet dataset and can recognize 527 different sound categories.
+
+### Key Features
+
+- Comprehensive sound recognition with 527 classes
+- Good performance on CPU
+- Mature, well-tested model with proven accuracy
+
+### Model Information
+
+- Architecture: CNN9 with global max pooling
+- Training dataset: AudioSet (2 million audio clips)
+- Input: Log-mel spectrogram (64 mel bands)
+- Output: Multilabel classification of 527 sound categories
+
+### References
+
+- Paper: [PANNs: Large-Scale Pretrained Audio Neural Networks for Audio Pattern Recognition](https://arxiv.org/abs/1912.10211)
+- Original Repository: [General-Purpose-Sound-Recognition-Demo](https://github.com/yinkalario/General-Purpose-Sound-Recognition-Demo)
+
+## Troubleshooting
+
+See `DEBUGGING.md` for common issues and solutions.
+
+## License
+
+See the LICENSE file for details.

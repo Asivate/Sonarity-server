@@ -50,69 +50,128 @@ def confirm_settings(settings):
     return input("Press Enter to continue or 'n' to restart: ").lower() != 'n'
 
 def main():
-    print_header()
+    parser = argparse.ArgumentParser(description="Interactive startup for SoundWatch Server")
+    parser.add_argument('--host', default="0.0.0.0", help="Host to bind to")
+    parser.add_argument('--port', type=int, default=5000, help="Port to bind to")
+    args = parser.parse_args()
     
-    # Initial settings - always use port 8080 and no debug mode
-    settings = {
-        "Sound Recognition Model": "TensorFlow (default)",
-        "Speech Recognition System": "Whisper (default)",
-        "Server Port": 8080,
-        "Debug Mode": "Disabled"
-    }
+    while True:
+        print_header()
+        
+        settings = {}
+        
+        # Step 1: Select recognition model
+        model_choice = get_choice(
+            "📦 Select sound recognition model:",
+            [
+                "AST (Audio Spectrogram Transformer) - Recommended for modern devices",
+                "PANNs (Pretrained Audio Neural Networks) - Alternative model with more classes",
+                "TensorFlow (Legacy) - Better for older devices"
+            ]
+        )
+        
+        if model_choice == 1:
+            settings["Recognition Model"] = "AST (Audio Spectrogram Transformer)"
+            os.environ["USE_AST_MODEL"] = "1"
+            os.environ["USE_PANNS_MODEL"] = "0"
+            model_cmd_args = ["--use_ast_model=1", "--use_panns_model=0"]
+        elif model_choice == 2:
+            settings["Recognition Model"] = "PANNs (Pretrained Audio Neural Networks)"
+            os.environ["USE_AST_MODEL"] = "0"
+            os.environ["USE_PANNS_MODEL"] = "1"
+            model_cmd_args = ["--use_ast_model=0", "--use_panns_model=1"]
+        else:
+            settings["Recognition Model"] = "TensorFlow (Legacy)"
+            os.environ["USE_AST_MODEL"] = "0"
+            os.environ["USE_PANNS_MODEL"] = "0"
+            model_cmd_args = ["--use_ast_model=0", "--use_panns_model=0"]
+        
+        # Step 2: Select speech recognition
+        speech_choice = get_choice(
+            "🗣️ Enable speech recognition?",
+            ["Yes - Whisper (local, private)", "Yes - Google Cloud (requires API key)", "No"]
+        )
+        
+        if speech_choice == 1:
+            settings["Speech Recognition"] = "Whisper (local)"
+            speech_cmd_args = ["--use_speech=1", "--google_speech=0"]
+            os.environ["USE_SPEECH"] = "1"
+            os.environ["USE_GOOGLE_SPEECH"] = "0"
+        elif speech_choice == 2:
+            settings["Speech Recognition"] = "Google Cloud"
+            speech_cmd_args = ["--use_speech=1", "--google_speech=1"]
+            os.environ["USE_SPEECH"] = "1"
+            os.environ["USE_GOOGLE_SPEECH"] = "1"
+        else:
+            settings["Speech Recognition"] = "Disabled"
+            speech_cmd_args = ["--use_speech=0"]
+            os.environ["USE_SPEECH"] = "0"
+        
+        # Step 3: Select sentiment analysis (if speech is enabled)
+        sentiment_cmd_args = []
+        if speech_choice != 3:  # If speech is enabled
+            sentiment_choice = get_choice(
+                "😊 Enable sentiment analysis on speech?",
+                ["Yes", "No"]
+            )
+            
+            if sentiment_choice == 1:
+                settings["Sentiment Analysis"] = "Enabled"
+                sentiment_cmd_args = ["--use_sentiment=1"]
+                os.environ["USE_SENTIMENT"] = "1"
+            else:
+                settings["Sentiment Analysis"] = "Disabled"
+                sentiment_cmd_args = ["--use_sentiment=0"]
+                os.environ["USE_SENTIMENT"] = "0"
+        else:
+            settings["Sentiment Analysis"] = "Disabled (Speech recognition is off)"
+            sentiment_cmd_args = ["--use_sentiment=0"]
+            os.environ["USE_SENTIMENT"] = "0"
+        
+        # Step 4: Select memory optimization
+        memory_choice = get_choice(
+            "🧠 Memory optimization level:",
+            [
+                "None - For powerful computers with plenty of RAM",
+                "Moderate - Recommended for most computers",
+                "Aggressive - For computers with limited RAM"
+            ]
+        )
+        
+        if memory_choice == 1:
+            settings["Memory Optimization"] = "None"
+            memory_cmd_args = ["--memory_optimization=0"]
+            os.environ["MEMORY_OPTIMIZATION"] = "0"
+        elif memory_choice == 2:
+            settings["Memory Optimization"] = "Moderate"
+            memory_cmd_args = ["--memory_optimization=1"]
+            os.environ["MEMORY_OPTIMIZATION"] = "1"
+        else:
+            settings["Memory Optimization"] = "Aggressive"
+            memory_cmd_args = ["--memory_optimization=2"]
+            os.environ["MEMORY_OPTIMIZATION"] = "2"
+        
+        # Confirm settings
+        if confirm_settings(settings):
+            break
     
-    # Get sound recognition model choice
-    model_choice = get_choice(
-        "Which sound recognition model would you like to use?",
-        ["TensorFlow (default, best for general sound recognition)", 
-         "AST (Audio Spectrogram Transformer, better for some specific sounds)"]
-    )
-    settings["Sound Recognition Model"] = "TensorFlow" if model_choice == 1 else "AST"
+    # Prepare the command
+    host_port_args = [f"--host={args.host}", f"--port={args.port}"]
+    all_args = model_cmd_args + speech_cmd_args + sentiment_cmd_args + memory_cmd_args + host_port_args
     
-    # Get speech recognition system choice
-    speech_choice = get_choice(
-        "Which speech recognition system would you like to use?",
-        ["Whisper (default, works offline, no internet needed)",
-         "Google Cloud Speech-to-Text (better accuracy, requires internet)"]
-    )
-    settings["Speech Recognition System"] = "Whisper" if speech_choice == 1 else "Google Cloud"
+    cmd = [sys.executable, "server.py"] + all_args
     
-    # Show summary and confirm
-    if not confirm_settings(settings):
-        return main()  # Restart if user wants to change settings
-    
-    # Build the command to start the server
-    cmd = ["python3" if platform.system() != "Windows" else "python", "server.py"]
-    
-    # For the AST model, we use an environment variable instead of a command line flag
-    # since the server.py doesn't have an --use-ast command line option
-    env = os.environ.copy()
-    if settings["Sound Recognition Model"] == "AST":
-        env["USE_AST_MODEL"] = "1"
-        print("Using AST model (via environment variable)")
-    else:
-        env["USE_AST_MODEL"] = "0"  # Explicitly disable AST model when TensorFlow is selected
-        print("Using TensorFlow model (via environment variable)")
-    
-    # Add speech recognition flag if Google is selected
-    if settings["Speech Recognition System"] == "Google Cloud":
-        cmd.append("--use-google-speech")
-    
-    # Always use port 8080
-    cmd.append("--port=8080")
-    
-    # Show the command
     print("\n" + "=" * 80)
     print("  STARTING SERVER  ".center(80))
     print("=" * 80)
-    print(f"\nExecuting: {' '.join(cmd)}\n")
+    print(f"\nRunning command: {' '.join(cmd)}")
+    print("\nPress Ctrl+C to stop the server\n")
     
-    # Start the server with the updated environment
+    # Run the server
     try:
-        subprocess.run(cmd, env=env)
+        subprocess.run(cmd)
     except KeyboardInterrupt:
         print("\nServer stopped by user.")
-    except Exception as e:
-        print(f"\nError starting server: {str(e)}")
 
 if __name__ == "__main__":
     main() 
