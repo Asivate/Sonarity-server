@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 # Global variables
 MODEL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'models')
-MODEL_URL = "https://zenodo.org/record/3987831/files/Cnn13_mAP%3D0.423.pth?download=1"
+MODEL_URL = "https://zenodo.org/records/3987831/files/Cnn13_mAP%3D0.423.pth?download=1"
 MODEL_PATH = os.path.join(MODEL_DIR, 'Cnn13_mAP=0.423.pth')
 CSV_PATH = os.path.join(MODEL_DIR, 'validate_meta.csv')
 SCALAR_PATH = os.path.join(MODEL_DIR, 'scalar.h5')
