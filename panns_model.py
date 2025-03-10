@@ -116,134 +116,46 @@ class Cnn9_GMP_64x64(nn.Module):
         init_layer(self.fc_audioset)
         
     def get_bottleneck(self, input):
-        try:
-            # Add shape debugging
-            logger.debug(f"Input tensor shape: {input.shape}")
-            
-            # Check input tensor and reshape if needed
-            if input.dim() != 4:
-                logger.error(f"Input tensor must be 4D [batch, channel, height, width], got {input.dim()}D tensor")
-                # Try to reshape - assuming it's a 3D tensor missing the channel dimension
-                if input.dim() == 3:
-                    input = input.unsqueeze(1)
-                    logger.warning(f"Reshaped 3D tensor to 4D: {input.shape}")
-                else:
-                    raise ValueError(f"Cannot automatically reshape {input.dim()}D tensor to 4D")
-
-            # Validate input shape dimensions
-            if input.shape[2] != 64 or input.shape[3] < 64:
-                logger.warning(f"Input shape {input.shape} may cause issues. Expected [batch, channel, 64, time>=64]")
-                
-                # Fix input shape issues for CNN
-                fixed_input = input
-                
-                # Fix mel bins dimension if needed
-                if input.shape[2] != 64:
-                    logger.warning(f"Reshaping mel bins from {input.shape[2]} to 64")
-                    fixed_input = torch.nn.functional.interpolate(
-                        input, size=(64, input.shape[3]), mode='bilinear', align_corners=False
-                    )
-                
-                # Fix time frames dimension if needed
-                if fixed_input.shape[3] < 64:
-                    logger.warning(f"Padding time frames from {fixed_input.shape[3]} to 64")
-                    padding = torch.zeros(
-                        fixed_input.shape[0], fixed_input.shape[1], 
-                        fixed_input.shape[2], 64 - fixed_input.shape[3],
-                        device=fixed_input.device
-                    )
-                    fixed_input = torch.cat([fixed_input, padding], dim=3)
-                
-                # Use the fixed input
-                input = fixed_input
-                logger.info(f"Corrected input shape: {input.shape}")
-                
-                # If all else fails and we have a completely wrong shape, create a dummy tensor
-                # This is a last resort to prevent crashing but will give meaningless predictions
-                if input.shape[2] != 64 or input.shape[3] < 64:
-                    logger.error(f"Cannot fix input shape: {input.shape}. Creating dummy tensor.")
-                    input = torch.zeros(input.shape[0], input.shape[1], 64, 64, device=input.device)
-
-            # Apply convolution blocks with shape tracking
-            try:
-                x = self.conv_block1(input, pool_size=(2, 2), pool_type='avg')
-                logger.debug(f"After conv_block1: {x.shape}")
-                x = F.dropout(x, p=0.2)
-                x = self.conv_block2(x, pool_size=(2, 2), pool_type='avg')
-                logger.debug(f"After conv_block2: {x.shape}")
-                x = F.dropout(x, p=0.2)
-                x = self.conv_block3(x, pool_size=(2, 2), pool_type='avg')
-                logger.debug(f"After conv_block3: {x.shape}")
-                x = F.dropout(x, p=0.2)
-                x = self.conv_block4(x, pool_size=(2, 2), pool_type='avg')
-                logger.debug(f"After conv_block4: {x.shape}")
-                x = F.dropout(x, p=0.2)
-            except Exception as conv_error:
-                logger.error(f"Error in convolution blocks: {str(conv_error)}")
-                # Create a tensor of the right shape to proceed
-                # This is a fallback mechanism that will give meaningless predictions but prevent crashes
-                logger.error("Creating fallback tensor to prevent crash. Predictions will be meaningless.")
-                x = torch.zeros(input.shape[0], 512, 4, 4, device=input.device)
-            
-            # Global average pooling over time
-            try:
-                x = torch.mean(x, dim=3)
-                logger.debug(f"After mean: {x.shape}")
-                x = x.transpose(1, 2)
-                logger.debug(f"After transpose: {x.shape}")
-            except Exception as pool_error:
-                logger.error(f"Error in pooling: {str(pool_error)}")
-                # Create a tensor of the right shape to proceed
-                x = torch.zeros(input.shape[0], 4, 512, device=input.device)
-                
-            # Ensure we have at least one element in the last dimension for pooling
-            if x.shape[2] == 0:
-                logger.error("Zero-sized dimension after transpose, cannot pool")
-                # Create a tensor of the right shape to proceed
-                x = torch.zeros(input.shape[0], 4, 512, device=input.device)
-            
-            try:
-                # Apply 1D max pooling
-                x = F.max_pool1d(x, kernel_size=x.shape[2])
-                logger.debug(f"After max_pool1d: {x.shape}")
-                x = x.transpose(1, 2)
-                logger.debug(f"After second transpose: {x.shape}")
-                x = x.view(x.shape[0], -1)
-                logger.debug(f"After view/flatten: {x.shape}")
-            except Exception as flatten_error:
-                logger.error(f"Error in flattening: {str(flatten_error)}")
-                # Create a tensor of the right shape to proceed
-                x = torch.zeros(input.shape[0], 512, device=input.device)
-            
-            x = F.dropout(x, p=0.5)
-            
-            # Check if the tensor has the right shape for the FC layer
-            expected_fc_input = 512  # Expected input features for FC layer
-            if x.shape[1] != expected_fc_input:
-                logger.error(f"Shape mismatch before FC layer: got {x.shape[1]} features, expected {expected_fc_input}")
-                # Resize the tensor to match expected input
-                x = torch.zeros(x.shape[0], expected_fc_input, device=x.device)
-                
-            x = F.relu_(self.fc(x))
-            logger.debug(f"After FC: {x.shape}")
-            return x
-            
-        except Exception as e:
-            logger.error(f"Error in get_bottleneck: {str(e)}")
-            # Create a tensor of the right shape to avoid crashing
-            return torch.zeros(input.shape[0], 512, device=input.device)
+        """Process input through convolutional layers to get bottleneck features.
+        
+        Args:
+            input: Tensor with shape [batch_size, channels, mel_bins, time]
+        
+        Returns:
+            Tensor with shape [batch_size, 512]
+        """
+        # Simple, direct approach without complex reshaping
+        x = self.conv_block1(input, pool_size=(2, 2), pool_type='avg')
+        x = F.dropout(x, p=0.2)
+        
+        x = self.conv_block2(x, pool_size=(2, 2), pool_type='avg')
+        x = F.dropout(x, p=0.2)
+        
+        x = self.conv_block3(x, pool_size=(2, 2), pool_type='avg')
+        x = F.dropout(x, p=0.2)
+        
+        x = self.conv_block4(x, pool_size=(2, 2), pool_type='avg')
+        x = F.dropout(x, p=0.2)
+        
+        # Global max pooling
+        x = torch.mean(x, dim=3)
+        x = x.permute(0, 2, 1)
+        x = F.max_pool1d(x, kernel_size=x.shape[2])
+        x = x.permute(0, 2, 1)
+        x = x.view(x.shape[0], -1)
+        
+        # Final FC layers
+        x = F.dropout(x, p=0.5)
+        x = F.relu_(self.fc(x))
+        
+        return x
         
     def forward(self, input):
-        try:
-            logger.debug(f"Forward input shape: {input.shape}")
-            x = self.get_bottleneck(input)
-            x = F.dropout(x, p=0.5)
-            x = self.fc_audioset(x)
-            x = torch.sigmoid(x)
-            return x
-        except Exception as e:
-            logger.error(f"Error in forward pass: {str(e)}")
-            raise
+        x = self.get_bottleneck(input)
+        x = F.dropout(x, p=0.5)
+        x = self.fc_audioset(x)
+        x = torch.sigmoid(x)
+        return x
 
 class PANNsModelInference:
     """
@@ -335,12 +247,6 @@ class PANNsModelInference:
             if len(model_state_dict_keys) > 0:
                 logger.info(f"First few layer names: {list(model_state_dict_keys)[:5]}")
 
-            # Debug model structure for comparison
-            model_state_dict_keys = [k for k, v in self.model.state_dict().items()]
-            logger.info(f"Found {len(model_state_dict_keys)} layers in model")
-            if len(model_state_dict_keys) > 0:
-                logger.info(f"Model expects layer names: {model_state_dict_keys[:5]}")
-
             try:
                 # Load model weights with more flexible option
                 if 'model' in checkpoint:
@@ -370,19 +276,18 @@ class PANNsModelInference:
             return False
     
     def logmel_extract(self, audio):
-        """
-        Extract log-mel features from audio waveform.
+        """Extract log-mel features from audio waveform.
         
         Args:
             audio: Audio waveform as numpy array
             
         Returns:
-            Log-mel features as torch tensor with proper shape for CNN input
+            Log-mel features as torch tensor with shape [1, 1, 64, time]
         """
-        # Ensure audio is properly shaped and normalized
+        # Ensure audio is mono and the right length for processing
         if audio.ndim > 1:
             audio = np.mean(audio, axis=1)
-            
+        
         # Ensure audio is at least 1 second long (32000 samples at 32kHz)
         if len(audio) < SAMPLE_RATE:
             logger.info(f"Audio too short: {len(audio)} samples. Padding to {SAMPLE_RATE} samples.")
@@ -390,74 +295,75 @@ class PANNsModelInference:
             padded_audio[:len(audio)] = audio
             audio = padded_audio
         
+        # Make sure we have enough samples for meaningful analysis (at least 1 second)
+        # If less than 1 second, repeat the audio until it's at least 1 second
+        if len(audio) < SAMPLE_RATE:
+            # Calculate how many times to repeat
+            repeat_count = math.ceil(SAMPLE_RATE / len(audio))
+            audio = np.tile(audio, repeat_count)[:SAMPLE_RATE]
+        
         # Calculate spectrogram
-        stft = librosa.stft(y=audio, n_fft=N_FFT, hop_length=HOP_LENGTH, 
-                            win_length=N_FFT, window='hann', center=True)
+        stft = librosa.stft(
+            y=audio, 
+            n_fft=N_FFT, 
+            hop_length=HOP_LENGTH, 
+            win_length=N_FFT, 
+            window='hann', 
+            center=True
+        )
         spectrogram = np.abs(stft)
         
         # Convert to mel spectrogram
-        mel_basis = librosa.filters.mel(sr=SAMPLE_RATE, n_fft=N_FFT, n_mels=MEL_BINS, 
-                                        fmin=FMIN, fmax=FMAX)
+        mel_basis = librosa.filters.mel(
+            sr=SAMPLE_RATE, 
+            n_fft=N_FFT, 
+            n_mels=MEL_BINS, 
+            fmin=FMIN, 
+            fmax=FMAX
+        )
         mel_spectrogram = np.dot(mel_basis, spectrogram)
         
         # Convert to log mel spectrogram
         log_mel_spectrogram = librosa.power_to_db(mel_spectrogram, ref=1.0, amin=1e-10, top_db=None)
         
-        # Debug the shapes
-        logger.debug(f"Log mel spectrogram shape before normalization: {log_mel_spectrogram.shape}")
-        
         # Normalize with pre-computed scalars
         if self.scalar is not None:
-            # Fix the broadcasting issue by using the correct shapes
             mean = self.scalar['mean']
             std = self.scalar['std']
             
-            # Reshape mean and std for proper broadcasting if needed
-            if log_mel_spectrogram.shape[1] != mean.shape[0]:
-                logger.warning(f"Shape mismatch: mel={log_mel_spectrogram.shape}, mean={mean.shape}. Reshaping...")
-                # For broadcasting to work correctly, repeat the mean/std to match time dimension
-                if len(mean.shape) == 1:  # If mean is just a 1D array
-                    # Reshape mean to broadcast across time dimension
-                    mean = np.tile(mean.reshape(-1, 1), (1, log_mel_spectrogram.shape[1]))
-                    std = np.tile(std.reshape(-1, 1), (1, log_mel_spectrogram.shape[1]))
+            # Ensure mean and std are properly shaped for broadcasting
+            if mean.ndim == 1:
+                mean = mean.reshape(-1, 1)
+                std = std.reshape(-1, 1)
                 
             # Apply normalization
             log_mel_spectrogram = (log_mel_spectrogram - mean) / std
         
-        # Ensure the time dimension is at least 10 frames long for proper pooling operations
-        time_frames = log_mel_spectrogram.shape[1]
-        if time_frames < 10:
-            logger.warning(f"Time frames too few: {time_frames}. Padding to at least 10 frames.")
-            padding = np.zeros((log_mel_spectrogram.shape[0], max(10, 2**math.ceil(math.log2(time_frames))) - time_frames))
-            log_mel_spectrogram = np.concatenate((log_mel_spectrogram, padding), axis=1)
-
-        # Extra verification of shape for CNN input
-        if log_mel_spectrogram.shape[0] != 64:
-            logger.warning(f"Mel bins incorrect: {log_mel_spectrogram.shape[0]}, expected 64. Resizing.")
-            # Resize to 64 mel bins using interpolation
-            original_bins = np.arange(log_mel_spectrogram.shape[0])
-            target_bins = np.linspace(0, log_mel_spectrogram.shape[0] - 1, 64)
-            interpolator = interp1d(original_bins, log_mel_spectrogram, axis=0)
-            log_mel_spectrogram = interpolator(target_bins)
+        # Ensure log_mel_spectrogram has enough frames for the CNN's pooling operations
+        # The network needs at least 64 frames to work correctly due to pooling operations
+        min_time_frames = 64
+        if log_mel_spectrogram.shape[1] < min_time_frames:
+            # Calculate padding required
+            pad_size = min_time_frames - log_mel_spectrogram.shape[1]
+            # Add padding to the time dimension
+            log_mel_spectrogram = np.pad(
+                log_mel_spectrogram, 
+                ((0, 0), (0, pad_size)), 
+                mode='constant'
+            )
         
-        # Convert to tensor with shape [1, 1, n_mels, time]
-        tensor = torch.tensor(log_mel_spectrogram[np.newaxis, np.newaxis, :, :], dtype=torch.float32)
+        # Convert to tensor with shape [batch_size, channels, height, width]
+        # For CNNs, this means [batch_size, channels, mel_bins, time]
+        log_mel_tensor = torch.tensor(
+            log_mel_spectrogram[np.newaxis, np.newaxis, :, :],
+            dtype=torch.float32
+        )
         
-        # Make sure we have the right shape for CNN
-        if tensor.shape[2] != 64 or tensor.shape[3] < 64:
-            logger.warning(f"Fixing tensor shape from {tensor.shape} to [1, 1, 64, 64+]")
-            # If time dimension is too small, pad it
-            if tensor.shape[3] < 64:
-                padding = torch.zeros(1, 1, 64, 64 - tensor.shape[3], device=tensor.device)
-                tensor = torch.cat([tensor, padding], dim=3)
-        
-        logger.info(f"Final tensor shape: {tensor.shape}")
-        
-        return tensor
+        logger.info(f"Log-mel tensor shape: {log_mel_tensor.shape}")
+        return log_mel_tensor
     
     def predict(self, audio, top_k=5, threshold=0.2):
-        """
-        Predict sound classes from audio waveform.
+        """Predict sound classes from audio waveform.
         
         Args:
             audio: Audio waveform as numpy array
@@ -472,151 +378,71 @@ class PANNsModelInference:
                 return []
         
         try:
-            # Extract features and convert to tensor
+            # Log input audio properties
             logger.info(f"Processing audio for prediction: shape={audio.shape}, min={audio.min():.4f}, max={audio.max():.4f}")
             
-            # Make sure audio is in float32 format and properly normalized
+            # Make sure audio is in float32 format
             if audio.dtype != np.float32:
                 audio = audio.astype(np.float32)
             
-            # Ensure audio is normalized to [-1, 1]
+            # Normalize to [-1, 1] if needed
             max_abs = np.max(np.abs(audio))
             if max_abs > 1.0:
-                logger.warning(f"Audio contains values outside [-1,1] range. Normalizing. Max abs value: {max_abs:.4f}")
+                logger.info(f"Normalizing audio with max value {max_abs:.4f}")
                 audio = audio / max_abs
             
-            # Extract log-mel features
-            logger.info("Extracting log-mel features...")
-            logmel = self.logmel_extract(audio)
+            # Make sure audio is long enough - PANNs model expects at least a few frames of audio
+            if len(audio) < 32000:  # at least 1 second at 32kHz
+                logger.info(f"Audio too short ({len(audio)} samples). Padding to 32000 samples.")
+                padded_audio = np.zeros(32000)
+                padded_audio[:len(audio)] = audio
+                audio = padded_audio
+            
+            # Extract log-mel features - this will enforce correct shape for model
+            log_mel = self.logmel_extract(audio)
             
             # Move tensor to the correct device
-            logmel = logmel.to(self.device)
+            log_mel = log_mel.to(self.device)
             
-            # Log tensor properties for debugging
-            logger.info(f"Input tensor: shape={logmel.shape}, min={logmel.min().item():.4f}, max={logmel.max().item():.4f}")
-            
-            # Ensure the tensor shape is compatible with the model
-            # CNN9 expects shape: [batch_size, channels, mel_bins, time]
-            if logmel.dim() != 4:
-                logger.warning(f"Input tensor is {logmel.dim()}D, expected 4D. Reshaping.")
-                if logmel.dim() == 3:
-                    logmel = logmel.unsqueeze(0)  # Add batch dimension
-                elif logmel.dim() == 2:
-                    logmel = logmel.unsqueeze(0).unsqueeze(0)  # Add batch and channel dims
-            
-            # Check if we have the right number of mel bins (height dimension)
-            expected_mel_bins = 64
-            if logmel.shape[2] != expected_mel_bins:
-                logger.warning(f"Mel bins mismatch: got {logmel.shape[2]}, expected {expected_mel_bins}. Attempting to fix.")
-                # If time and mel bins are swapped
-                if logmel.shape[3] == expected_mel_bins:
-                    logger.info(f"Transposing dimensions 2 and 3 to fix shape")
-                    logmel = logmel.transpose(2, 3)
-                else:
-                    # Interpolate to correct size if possible
-                    try:
-                        logger.info(f"Interpolating to correct mel bins size: {expected_mel_bins}")
-                        logmel = torch.nn.functional.interpolate(
-                            logmel, size=(expected_mel_bins, logmel.shape[3]), 
-                            mode='bilinear', align_corners=False
-                        )
-                    except Exception as interp_error:
-                        logger.error(f"Failed to interpolate: {str(interp_error)}")
-                        # Fall back to padding/cropping
-                        if logmel.shape[2] < expected_mel_bins:
-                            logger.info(f"Padding mel bins from {logmel.shape[2]} to {expected_mel_bins}")
-                            padding = torch.zeros(
-                                logmel.shape[0], logmel.shape[1], 
-                                expected_mel_bins - logmel.shape[2], logmel.shape[3], 
-                                device=logmel.device
-                            )
-                            logmel = torch.cat([logmel, padding], dim=2)
-                        else:
-                            logger.info(f"Cropping mel bins from {logmel.shape[2]} to {expected_mel_bins}")
-                            logmel = logmel[:, :, :expected_mel_bins, :]
-            
-            # Ensure time dimension is sufficient - minimum 64 frames needed for proper downsampling
-            min_time_frames = 64
-            if logmel.shape[3] < min_time_frames:
-                logger.warning(f"Time frames too few: {logmel.shape[3]}, minimum {min_time_frames} needed. Padding.")
-                padding = torch.zeros(
-                    logmel.shape[0], logmel.shape[1], logmel.shape[2], 
-                    min_time_frames - logmel.shape[3], device=logmel.device
-                )
-                logmel = torch.cat([logmel, padding], dim=3)
-            
-            logger.info(f"Final input tensor shape: {logmel.shape}")
-            
-            # Make prediction
+            # Run model prediction
             logger.info("Running model inference...")
-            self.model.eval()  # Ensure model is in evaluation mode
             with torch.no_grad():
-                try:
-                    # Forward pass through the model
-                    logger.debug("Starting forward pass...")
-                    prediction = self.model(logmel)
-                    logger.debug(f"Forward pass complete. Output shape: {prediction.shape}")
-                    
-                    # Convert to numpy
-                    if isinstance(prediction, torch.Tensor):
-                        prediction = prediction.cpu().numpy()
-                        
-                    # Handle different output shapes
-                    if len(prediction.shape) > 1:
-                        prediction = prediction[0]  # Get first batch item
-                    
-                    # Debug raw predictions
-                    if len(prediction) > 0:
-                        logger.debug("Raw prediction values:")
-                        top_debug_indices = np.argsort(prediction)[::-1][:min(5, len(prediction))]
-                        for idx in top_debug_indices:
-                            if idx < len(self.labels):
-                                try:
-                                    label = self.labels.iloc[idx]['display_name'] if hasattr(self.labels, 'iloc') else f"idx_{idx}"
-                                    logger.debug(f"  {label}: {prediction[idx]:.6f}")
-                                except Exception as label_error:
-                                    logger.error(f"Error accessing label at index {idx}: {str(label_error)}")
+                prediction = self.model(log_mel)
+                
+                # Convert predictions to numpy array
+                if isinstance(prediction, torch.Tensor):
+                    prediction = prediction.detach().cpu().numpy()
+                
+                # Process first sample if batched
+                if len(prediction.shape) > 1:
+                    prediction = prediction[0]
+                
+                # Get top-k indices
+                top_indices = np.argsort(prediction)[::-1][:top_k]
+                
+                # Format results
+                results = []
+                logger.info("Top predictions:")
+                for idx in top_indices:
+                    confidence = float(prediction[idx])
+                    if confidence >= threshold:
+                        try:
+                            # Get label based on index
+                            if hasattr(self.labels, 'iloc'):
+                                label = self.labels.iloc[idx]['display_name']
                             else:
-                                logger.debug(f"  idx_{idx}: {prediction[idx]:.6f}")
-                    
-                    # Get the top K predictions
-                    top_indices = np.argsort(prediction)[::-1][:min(top_k, len(prediction))]
-                    
-                    # Filter by threshold and format results
-                    results = []
-                    logger.info("Top predictions:")
-                    for idx in top_indices:
-                        confidence = float(prediction[idx])
-                        if confidence >= threshold:
-                            try:
-                                if hasattr(self.labels, 'iloc'):
-                                    label = self.labels.iloc[idx]['display_name']
-                                elif isinstance(self.labels, dict) and idx in self.labels:
-                                    label = self.labels[idx]
-                                elif isinstance(self.labels, (list, tuple, np.ndarray)) and idx < len(self.labels):
-                                    label = self.labels[idx]
-                                else:
-                                    label = f"unknown_{idx}"
-                                
-                                results.append((label, confidence))
-                                logger.info(f"  {label}: {confidence:.6f}")
-                            except Exception as format_error:
-                                logger.error(f"Error formatting prediction at index {idx}: {str(format_error)}")
-                                results.append((f"unknown_{idx}", confidence))
-                    
-                    return results
-                except RuntimeError as e:
-                    if "mat1 and mat2 shapes cannot be multiplied" in str(e):
-                        logger.error(f"Matrix shape mismatch in model: {str(e)}")
-                        logger.error(f"Input tensor shape that caused the error: {logmel.shape}")
-                        # We'll return an empty result here instead of crashing
-                        return []
-                    else:
-                        # Re-raise other runtime errors
-                        logger.error(f"Runtime error during prediction: {str(e)}")
-                        return []
+                                label = f"unknown_{idx}"
+                            
+                            results.append((label, confidence))
+                            logger.info(f"  {label}: {confidence:.6f}")
+                        except Exception as e:
+                            logger.error(f"Error getting label for index {idx}: {str(e)}")
+                            results.append((f"unknown_{idx}", confidence))
+                
+                return results
+                
         except Exception as e:
-            logger.error(f"Error in PANNs prediction: {str(e)}")
+            logger.error(f"Error in prediction: {str(e)}")
             import traceback
             traceback.print_exc()
             return []
