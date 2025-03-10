@@ -29,6 +29,11 @@ MODEL_PATH = os.path.join(MODEL_DIR, 'Cnn9_GMP_64x64_300000_iterations_mAP=0.37.
 SCALAR_FN = os.path.join(MODEL_DIR, 'scalar.h5')
 CSV_FNAME = os.path.join(MODEL_DIR, 'validate_meta.csv')
 
+# Alternative paths for labels file (fallback locations)
+ASSETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'assets')
+ASSETS_CSV = os.path.join(ASSETS_DIR, 'validate_meta.csv')
+ASSETS_SCALAR = os.path.join(ASSETS_DIR, 'scalar.h5')
+
 # Default audio parameters
 SAMPLE_RATE = 32000
 N_FFT = 1024
@@ -167,41 +172,35 @@ class PANNsModelInference:
             if not os.path.exists(MODEL_PATH):
                 logger.error(f"PANNs model file not found at {MODEL_PATH}")
                 logger.info("Please download the model using:")
-                logger.info("wget -O models/Cnn9_GMP_64x64_300000_iterations_mAP=0.37.pth "
-                           "https://zenodo.org/record/3576599/files/Cnn9_GMP_64x64_300000_iterations_mAP%3D0.37.pth?download=1")
+                logger.info("python download_panns_model.py")
                 return False
                 
             # Load class labels
             if not os.path.exists(CSV_FNAME):
                 logger.error(f"Labels file not found at {CSV_FNAME}")
-                # Use reference labels from the demo repository
-                ref_csv = os.path.join(os.path.dirname(os.path.abspath(__file__)), 
-                                      'General-Purpose-Sound-Recognition-Demo',
-                                      'General-Purpose-Sound-Recognition-Demo-2019',
-                                      'models',
-                                      'validate_meta.csv')
-                if os.path.exists(ref_csv):
-                    logger.info(f"Copying reference labels from {ref_csv}")
+                # Check if it exists in assets directory
+                if os.path.exists(ASSETS_CSV):
+                    logger.info(f"Found labels file in assets directory. Copying to models directory...")
                     import shutil
-                    shutil.copy(ref_csv, CSV_FNAME)
+                    shutil.copy(ASSETS_CSV, CSV_FNAME)
+                    logger.info(f"Copied labels file from assets directory to models directory")
                 else:
-                    logger.error("Cannot find reference labels. Please provide validate_meta.csv in the models directory")
+                    logger.error("Cannot find labels file in assets directory.")
+                    logger.error("Please run 'python download_panns_model.py' to set up the required files.")
                     return False
             
             # Load scalar
             if not os.path.exists(SCALAR_FN):
                 logger.error(f"Scalar file not found at {SCALAR_FN}")
-                ref_scalar = os.path.join(os.path.dirname(os.path.abspath(__file__)), 
-                                         'General-Purpose-Sound-Recognition-Demo',
-                                         'General-Purpose-Sound-Recognition-Demo-2019',
-                                         'models',
-                                         'scalar.h5')
-                if os.path.exists(ref_scalar):
-                    logger.info(f"Copying reference scalar from {ref_scalar}")
+                # Check if it exists in assets directory
+                if os.path.exists(ASSETS_SCALAR):
+                    logger.info(f"Found scalar file in assets directory. Copying to models directory...")
                     import shutil
-                    shutil.copy(ref_scalar, SCALAR_FN)
+                    shutil.copy(ASSETS_SCALAR, SCALAR_FN)
+                    logger.info(f"Copied scalar file from assets directory to models directory")
                 else:
-                    logger.error("Cannot find reference scalar. Please provide scalar.h5 in the models directory")
+                    logger.error("Cannot find scalar file in assets directory.")
+                    logger.error("Please run 'python download_panns_model.py' to set up the required files.")
                     return False
             
             # Load audio labels

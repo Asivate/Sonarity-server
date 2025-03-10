@@ -240,6 +240,30 @@ The PANNs (Pretrained Audio Neural Networks) model is based on the work by Qiuqi
 - Input: Log-mel spectrogram (64 mel bands)
 - Output: Multilabel classification of 527 sound categories
 
+### Setting Up the PANNs Model
+
+To use the PANNs model:
+
+1. Download the required model files:
+   ```bash
+   python download_panns_model.py
+   ```
+   This script will:
+   - Download the CNN9 model weights (~150MB) from Zenodo
+   - Copy the class labels from the `assets` directory
+   - Copy the scalar file from the `assets` directory for feature normalization
+
+2. Enable the PANNs model:
+   ```bash
+   python toggle_panns.py on
+   ```
+
+3. Start the server using the interactive startup:
+   ```bash
+   python interactive_start.py
+   ```
+   Then select "PANNs (Pretrained Audio Neural Networks)" from the model options.
+
 ### References
 
 - Paper: [PANNs: Large-Scale Pretrained Audio Neural Networks for Audio Pattern Recognition](https://arxiv.org/abs/1912.10211)
