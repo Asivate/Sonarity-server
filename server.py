@@ -876,7 +876,7 @@ def handle_audio(data):
                                 # Handle speech detection
                                 if top_label.lower() == "speech" and top_score > SPEECH_DETECTION_THRES:
                                     print(f"Speech detected with AST model. Processing sentiment...")
-                                    if USE_SPEECH and os.environ.get('USE_SENTIMENT', '0') == '1':
+                                    if os.environ.get('USE_SPEECH', '0') == '1' and os.environ.get('USE_SENTIMENT', '0') == '1':
                                         # Process speech
                                         process_speech(np_wav, record_time, top_score)
                                     else:
@@ -978,7 +978,7 @@ def process_with_panns_model(np_wav, record_time=None, db=None):
             # Handle speech detection
             if top_label.lower() == "speech" and top_score > SPEECH_DETECTION_THRES:
                 print(f"Speech detected with PANNs model. Processing sentiment...")
-                if USE_SPEECH and os.environ.get('USE_SENTIMENT', '0') == '1':
+                if os.environ.get('USE_SPEECH', '0') == '1' and os.environ.get('USE_SENTIMENT', '0') == '1':
                     # Process speech
                     process_speech(np_wav, record_time, top_score)
                 else:
@@ -1499,7 +1499,7 @@ def predict_with_tensorflow(audio_data, record_time=None, db=None):
                             # Handle speech detection
                             if top_label.lower() == "speech" and top_score > SPEECH_DETECTION_THRES:
                                 print(f"Speech detected with TensorFlow model. Processing sentiment...")
-                                if USE_SPEECH and os.environ.get('USE_SENTIMENT', '0') == '1':
+                                if os.environ.get('USE_SPEECH', '0') == '1' and os.environ.get('USE_SENTIMENT', '0') == '1':
                                     # Process speech
                                     process_speech(audio_data, record_time, top_score)
                                 else:

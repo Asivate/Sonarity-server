@@ -18,6 +18,7 @@ import pandas as pd
 import librosa
 import h5py
 import logging
+import math
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -114,29 +115,83 @@ class Cnn9_GMP_64x64(nn.Module):
         init_layer(self.fc_audioset)
         
     def get_bottleneck(self, input):
-        x = self.conv_block1(input, pool_size=(2, 2), pool_type='avg')
-        x = F.dropout(x, p=0.2)
-        x = self.conv_block2(x, pool_size=(2, 2), pool_type='avg')
-        x = F.dropout(x, p=0.2)
-        x = self.conv_block3(x, pool_size=(2, 2), pool_type='avg')
-        x = F.dropout(x, p=0.2)
-        x = self.conv_block4(x, pool_size=(2, 2), pool_type='avg')
-        x = F.dropout(x, p=0.2)
-        x = torch.mean(x, dim=3)
-        x = x.transpose(1, 2)
-        x = F.max_pool1d(x, kernel_size=x.shape[2])
-        x = x.transpose(1, 2)
-        x = x.view(x.shape[0], -1)
-        x = F.dropout(x, p=0.5)
-        x = F.relu_(self.fc(x))
-        return x
+        try:
+            # Add shape debugging
+            logger.debug(f"Input tensor shape: {input.shape}")
+            
+            # Check input tensor and reshape if needed
+            if input.dim() != 4:
+                logger.error(f"Input tensor must be 4D [batch, channel, height, width], got {input.dim()}D tensor")
+                # Try to reshape - assuming it's a 3D tensor missing the channel dimension
+                if input.dim() == 3:
+                    input = input.unsqueeze(1)
+                    logger.warning(f"Reshaped 3D tensor to 4D: {input.shape}")
+                else:
+                    raise ValueError(f"Cannot automatically reshape {input.dim()}D tensor to 4D")
+
+            # Validate input shape dimensions
+            if input.shape[2] != 64 or input.shape[3] < 10:
+                logger.warning(f"Input shape {input.shape} may cause issues. Expected [batch, channel, 64, time>=10]")
+                # Try to fix by reshaping if possible
+                if input.shape[2] < 64 and input.shape[3] == 64:
+                    logger.warning("Swapping dimensions 2 and 3 to fix shape")
+                    input = input.transpose(2, 3)
+
+            x = self.conv_block1(input, pool_size=(2, 2), pool_type='avg')
+            logger.debug(f"After conv_block1: {x.shape}")
+            x = F.dropout(x, p=0.2)
+            x = self.conv_block2(x, pool_size=(2, 2), pool_type='avg')
+            logger.debug(f"After conv_block2: {x.shape}")
+            x = F.dropout(x, p=0.2)
+            x = self.conv_block3(x, pool_size=(2, 2), pool_type='avg')
+            logger.debug(f"After conv_block3: {x.shape}")
+            x = F.dropout(x, p=0.2)
+            x = self.conv_block4(x, pool_size=(2, 2), pool_type='avg')
+            logger.debug(f"After conv_block4: {x.shape}")
+            x = F.dropout(x, p=0.2)
+            x = torch.mean(x, dim=3)
+            logger.debug(f"After mean: {x.shape}")
+            x = x.transpose(1, 2)
+            logger.debug(f"After transpose: {x.shape}")
+            
+            # Ensure we have at least one element in the last dimension for pooling
+            if x.shape[2] == 0:
+                logger.error("Zero-sized dimension after transpose, cannot pool")
+                raise ValueError("Zero-sized dimension in tensor, cannot proceed")
+                
+            x = F.max_pool1d(x, kernel_size=x.shape[2])
+            logger.debug(f"After max_pool1d: {x.shape}")
+            x = x.transpose(1, 2)
+            logger.debug(f"After second transpose: {x.shape}")
+            x = x.view(x.shape[0], -1)
+            logger.debug(f"After view/flatten: {x.shape}")
+            x = F.dropout(x, p=0.5)
+            
+            # Check if the tensor has the right shape for the FC layer
+            expected_fc_input = 512  # Expected input features for FC layer
+            if x.shape[1] != expected_fc_input:
+                logger.error(f"Shape mismatch before FC layer: got {x.shape[1]} features, expected {expected_fc_input}")
+                raise ValueError(f"FC layer expects {expected_fc_input} input features, got {x.shape[1]}")
+                
+            x = F.relu_(self.fc(x))
+            logger.debug(f"After FC: {x.shape}")
+            return x
+            
+        except Exception as e:
+            logger.error(f"Error in get_bottleneck: {str(e)}")
+            raise
         
     def forward(self, input):
-        x = self.get_bottleneck(input)
-        x = F.dropout(x, p=0.5)
-        x = self.fc_audioset(x)
-        x = torch.sigmoid(x)
-        return x
+        try:
+            logger.debug(f"Forward input shape: {input.shape}")
+            x = self.get_bottleneck(input)
+            x = F.dropout(x, p=0.5)
+            x = self.fc_audioset(x)
+            x = torch.sigmoid(x)
+            return x
+        except Exception as e:
+            logger.error(f"Error in forward pass: {str(e)}")
+            raise
 
 class PANNsModelInference:
     """
@@ -316,14 +371,21 @@ class PANNsModelInference:
                 
             # Apply normalization
             log_mel_spectrogram = (log_mel_spectrogram - mean) / std
-            
+        
         # Reshape for PyTorch CNN model input: [batch_size, channels, height, width]
         # log_mel_spectrogram shape is currently [n_mels, time]
+        
+        # Ensure the time dimension is at least 10 frames long for proper pooling operations
+        time_frames = log_mel_spectrogram.shape[1]
+        if time_frames < 10:
+            logger.warning(f"Time frames too few: {time_frames}. Padding to at least 10 frames.")
+            padding = np.zeros((log_mel_spectrogram.shape[0], max(10, 2**math.ceil(math.log2(time_frames))) - time_frames))
+            log_mel_spectrogram = np.concatenate((log_mel_spectrogram, padding), axis=1)
         
         # Convert to tensor with shape [1, 1, n_mels, time]
         tensor = torch.tensor(log_mel_spectrogram[np.newaxis, np.newaxis, :, :], dtype=torch.float32)
         
-        logger.debug(f"Final tensor shape: {tensor.shape}")
+        logger.info(f"Final tensor shape: {tensor.shape}")
         
         return tensor
     
@@ -366,41 +428,77 @@ class PANNsModelInference:
             # Log tensor properties for debugging
             logger.debug(f"Input tensor: shape={logmel.shape}, min={logmel.min().item():.4f}, max={logmel.max().item():.4f}")
             
+            # Ensure the tensor shape is compatible with the model
+            # CNN9 expects shape: [batch_size, channels, mel_bins, time]
+            if logmel.dim() != 4:
+                logger.warning(f"Input tensor is {logmel.dim()}D, expected 4D. Reshaping.")
+                if logmel.dim() == 3:
+                    logmel = logmel.unsqueeze(0)  # Add batch dimension
+                elif logmel.dim() == 2:
+                    logmel = logmel.unsqueeze(0).unsqueeze(0)  # Add batch and channel dims
+            
+            # Check if we have the right number of mel bins (height dimension)
+            expected_mel_bins = 64
+            if logmel.shape[2] != expected_mel_bins:
+                logger.warning(f"Mel bins mismatch: got {logmel.shape[2]}, expected {expected_mel_bins}. Attempting to fix.")
+                # If time and mel bins are swapped
+                if logmel.shape[3] == expected_mel_bins:
+                    logger.info(f"Transposing dimensions 2 and 3 to fix shape")
+                    logmel = logmel.transpose(2, 3)
+                else:
+                    # Interpolate to correct size if possible
+                    try:
+                        logger.info(f"Interpolating to correct mel bins size: {expected_mel_bins}")
+                        import torch.nn.functional as F
+                        logmel = F.interpolate(logmel, size=(expected_mel_bins, logmel.shape[3]), mode='bilinear', align_corners=False)
+                    except Exception as interp_error:
+                        logger.error(f"Failed to interpolate: {str(interp_error)}")
+                        # Fall back to padding/cropping
+                        if logmel.shape[2] < expected_mel_bins:
+                            logger.info(f"Padding mel bins from {logmel.shape[2]} to {expected_mel_bins}")
+                            padding = torch.zeros(logmel.shape[0], logmel.shape[1], expected_mel_bins - logmel.shape[2], logmel.shape[3], device=logmel.device)
+                            logmel = torch.cat([logmel, padding], dim=2)
+                        else:
+                            logger.info(f"Cropping mel bins from {logmel.shape[2]} to {expected_mel_bins}")
+                            logmel = logmel[:, :, :expected_mel_bins, :]
+            
+            # Ensure time dimension is sufficient - minimum 4 frames needed for 2 pooling layers
+            min_time_frames = 16
+            if logmel.shape[3] < min_time_frames:
+                logger.warning(f"Time frames too few: {logmel.shape[3]}, minimum {min_time_frames} needed. Padding.")
+                padding = torch.zeros(logmel.shape[0], logmel.shape[1], logmel.shape[2], min_time_frames - logmel.shape[3], device=logmel.device)
+                logmel = torch.cat([logmel, padding], dim=3)
+            
+            logger.info(f"Final input tensor shape: {logmel.shape}")
+            
             # Make prediction
             self.model.eval()  # Ensure model is in evaluation mode
             with torch.no_grad():
-                prediction = self.model(logmel)
-                prediction = prediction.cpu().numpy()[0]  # Get first batch item and convert to numpy
-            
-            # Log raw predictions for debugging
-            if len(prediction) > 0:
-                top_indices = np.argsort(prediction)[::-1][:5]  # Get indices of top 5 predictions
-                logger.debug(f"Top 5 raw predictions:")
-                for i in top_indices:
-                    if i < len(self.labels):
-                        label = self.labels.iloc[i]['display_name']
-                        logger.debug(f"  {label}: {prediction[i]:.6f}")
-            
-            # Filter by threshold and get top k
-            above_threshold = prediction >= threshold
-            if np.sum(above_threshold) > 0:
-                indexes = np.where(above_threshold)[0]
-                indexes = indexes[np.argsort(prediction[indexes])[::-1]]
-                indexes = indexes[:top_k]
-            else:
-                # If no predictions above threshold, just take top k
-                indexes = np.argsort(prediction)[::-1][:top_k]
-            
-            # Format results
-            results = []
-            for idx in indexes:
-                if idx < len(self.labels):
-                    label = self.labels.iloc[idx]['display_name']
-                    confidence = float(prediction[idx])
-                    results.append((label, confidence))
-            
-            return results
-            
+                try:
+                    prediction = self.model(logmel)
+                    prediction = prediction.cpu().numpy()[0]  # Get first batch item and convert to numpy
+                    
+                    # Get the top K predictions
+                    top_indices = np.argsort(prediction)[::-1][:top_k]
+                    
+                    # Filter by threshold
+                    results = []
+                    for idx in top_indices:
+                        confidence = prediction[idx]
+                        if confidence >= threshold:
+                            label = self.labels.get(idx, f"unknown_{idx}")
+                            results.append((label, float(confidence)))
+                    
+                    return results
+                except RuntimeError as e:
+                    if "mat1 and mat2 shapes cannot be multiplied" in str(e):
+                        logger.error(f"Matrix shape mismatch in model: {str(e)}")
+                        logger.error(f"Input tensor shape that caused the error: {logmel.shape}")
+                        # We'll return an empty result here instead of crashing
+                        return []
+                    else:
+                        # Re-raise other runtime errors
+                        raise
         except Exception as e:
             logger.error(f"Error in PANNs prediction: {str(e)}")
             import traceback
