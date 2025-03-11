@@ -403,18 +403,18 @@ def handle_audio(data):
     This handler now expects audio data with 32000 samples (1 second at 32kHz)
     directly from the client, which eliminates the need for server-side buffering.
     """
+    # Initialize variables outside try block to ensure they're available in exception handler
+    audio_field = None
+    audio_data = None
+    timestamp = time.time() * 1000  # Default to current time in ms
+    db_level = None
+    audio_format = 'float32'  # Default format
+    
     try:
         # Start timing for performance measurement
         start_time = time.time()
         
-        log_status("RECEIVED AUDIO DATA", color="cyan")
-        
-        # Initialize variables
-        audio_field = None
-        audio_data = None
-        timestamp = time.time() * 1000  # Default to current time in ms
-        db_level = None
-        audio_format = 'float32'  # Default format
+        log_status("RECEIVED AUDIO DATA", "info")
         
         # Identify which field contains the audio data
         if isinstance(data, dict):
@@ -422,15 +422,15 @@ def handle_audio(data):
             if 'audio' in data and data['audio']:
                 audio_field = 'audio'
                 audio_data = data['audio']
-                log_status(f"Using 'audio' field", "blue")
+                log_status(f"Using 'audio' field", "info")
             elif 'audioData' in data and data['audioData']:
                 audio_field = 'audioData'
                 audio_data = data['audioData']
-                log_status(f"Using 'audioData' field", "blue")
+                log_status(f"Using 'audioData' field", "info")
             elif 'data' in data and data['data']:
                 audio_field = 'data'
                 audio_data = data['data']
-                log_status(f"Using 'data' field instead of 'audio'", "blue")
+                log_status(f"Using 'data' field instead of 'audio'", "info")
             
             # Get other metadata if available
             if 'format' in data:
@@ -444,18 +444,18 @@ def handle_audio(data):
         
         # Handle case where no valid audio data was found
         if audio_data is None:
-            log_status("No valid audio data found in message", "red")
+            log_status("No valid audio data found in message", "error")
             return
         
         # Log the received data info
-        log_status(f"Length: {len(audio_data)} samples", "blue")
-        log_status(f"Time: {timestamp}", "blue")
+        log_status(f"Length: {len(audio_data)} samples", "info")
+        log_status(f"Time: {timestamp}", "info")
         if db_level:
-            log_status(f"dB Level: {db_level:.2f}", "blue")
+            log_status(f"dB Level: {db_level:.2f}", "info")
         
         # Process the audio data based on its type
         if isinstance(audio_data, list):
-            log_status(f"Processing audio as list of values, length: {len(audio_data)}", "blue")
+            log_status(f"Processing audio as list of values, length: {len(audio_data)}", "info")
             
             # Convert the list to a numpy array
             audio_data = np.array(audio_data, dtype=np.float32)
@@ -463,12 +463,12 @@ def handle_audio(data):
             # If these are int16 values, normalize them
             if audio_format == 'int16' or (np.max(np.abs(audio_data)) > 1.0 and np.max(np.abs(audio_data)) <= 32768):
                 audio_data = audio_data.astype(np.float32) / 32768.0
-                log_status("Normalized integer audio values to float range [-1.0, 1.0]", "blue")
+                log_status("Normalized integer audio values to float range [-1.0, 1.0]", "info")
                 
         elif isinstance(audio_data, str):
             # Assume it's base64 encoded
             try:
-                log_status("Processing audio as base64 encoded data", "blue")
+                log_status("Processing audio as base64 encoded data", "info")
                 audio_bytes = base64.b64decode(audio_data)
                 
                 if audio_format == 'int16':
@@ -478,7 +478,7 @@ def handle_audio(data):
                     # Assume float32
                     audio_data = np.frombuffer(audio_bytes, dtype=np.float32)
             except Exception as e:
-                log_status(f"Error decoding base64 audio: {str(e)}", "red")
+                log_status(f"Error decoding base64 audio: {str(e)}", "error")
                 return
         
         # Calculate dB level if not provided
@@ -493,11 +493,11 @@ def handle_audio(data):
         process_audio_with_panns(audio_data, db_level, timestamp)
         
     except Exception as e:
-        log_status(f"Error in handle_audio: {str(e)}", "red")
+        log_status(f"Error in handle_audio: {str(e)}", "error")
         import traceback
         traceback.print_exc()
         
-        # Return an error prediction
+        # Return an error prediction with safely initialized variables
         emit_prediction([{"label": "Error", "score": 1.0}], db_level, timestamp)
 
 # Remaining functions and code are unchanged
@@ -610,7 +610,7 @@ def process_audio_with_panns(audio_data, db_level=None, timestamp=None, config=N
     Returns:
         None - results are emitted via socketio
     """
-    log_status("Processing audio with PANNs model", "cyan")
+    log_status("Processing audio with PANNs model", "info")
     
     if config is None:
         config = {
@@ -726,18 +726,38 @@ def process_audio_with_panns(audio_data, db_level=None, timestamp=None, config=N
         emit_prediction([{"label": "Processing Error", "score": 1.0}], db_level, timestamp)
 
 def emit_prediction(predictions, db_level, timestamp=None):
-    """Helper function to emit predictions via socketio"""
+    """
+    Emit prediction results via socketio.
+    
+    Args:
+        predictions: List of prediction dictionaries with 'label' and 'score' keys
+        db_level: Audio decibel level or None
+        timestamp: Timestamp of the audio data or None
+        
+    Returns:
+        None
+    """
+    # Set default values if None is provided
+    if db_level is None:
+        db_level = -100  # Default low dB level
+    
     if timestamp is None:
-        timestamp = time.time()
+        timestamp = time.time() * 1000  # Current time in milliseconds
     
-    result = {
-        "predictions": predictions,
-        "timestamp": timestamp,
-        "db": db_level
-    }
+    # Format the predictions for emission
+    formatted_predictions = []
+    for pred in predictions:
+        formatted_predictions.append({
+            'label': pred['label'],
+            'score': str(round(pred['score'], 4)) if isinstance(pred['score'], (int, float)) else pred['score']
+        })
     
-    log_prediction(result, db_level)
-    socketio.emit('prediction', result, broadcast=True)
+    # Emit the predictions to the client
+    socketio.emit('audio_label', {
+        'predictions': formatted_predictions,
+        'db': str(db_level),
+        'timestamp': timestamp
+    })
 
 recent_audio_buffer = []
 MAX_BUFFER_SIZE = 5
@@ -1276,6 +1296,26 @@ def get_labels():
         'labels': labels,
         'count': len(labels)
     })
+
+def calculate_db(audio_data):
+    """
+    Calculate the decibel level of audio data.
+    
+    Args:
+        audio_data: numpy array of audio samples
+        
+    Returns:
+        float: Decibel level (dBFS)
+    """
+    if audio_data is None or len(audio_data) == 0:
+        return -100  # Default low value for empty audio
+        
+    try:
+        rms = np.sqrt(np.mean(audio_data**2))
+        return dbFS(rms)
+    except Exception as e:
+        log_status(f"Error calculating dB level: {str(e)}", "error")
+        return -100  # Default low value on error
 
 # Main Execution
 if __name__ == '__main__':
