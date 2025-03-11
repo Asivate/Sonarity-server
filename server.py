@@ -400,142 +400,105 @@ def handle_source(json_data):
 def handle_audio(data):
     """
     Handle audio data sent from the client
-    This handler expects a JSON object with:
-    - audio: base64 encoded audio data or list of float/int values
-    - format: audio format (e.g., 'float32', 'int16')
-    - db: optional pre-calculated dB level
-    - timestamp: optional timestamp
+    This handler now expects audio data with 32000 samples (1 second at 32kHz)
+    directly from the client, which eliminates the need for server-side buffering.
     """
     try:
+        # Start timing for performance measurement
+        start_time = time.time()
+        
+        log_status("RECEIVED AUDIO DATA", color="cyan")
+        
+        # Initialize variables
         audio_field = None
-        audio_length = 0
-        timestamp = None
+        audio_data = None
+        timestamp = time.time() * 1000  # Default to current time in ms
         db_level = None
+        audio_format = 'float32'  # Default format
         
+        # Identify which field contains the audio data
         if isinstance(data, dict):
-            if 'audio' in data:
+            # Check various possible field names
+            if 'audio' in data and data['audio']:
                 audio_field = 'audio'
-                audio_length = len(data['audio']) if data['audio'] else 0
-            elif 'audioData' in data:
+                audio_data = data['audio']
+                log_status(f"Using 'audio' field", "blue")
+            elif 'audioData' in data and data['audioData']:
                 audio_field = 'audioData'
-                audio_length = len(data['audioData']) if data['audioData'] else 0
-            elif 'data' in data:
+                audio_data = data['audioData']
+                log_status(f"Using 'audioData' field", "blue")
+            elif 'data' in data and data['data']:
                 audio_field = 'data'
-                audio_length = len(data['data']) if data['data'] else 0
-                
-            timestamp = data.get('time', data.get('timestamp', str(time.time())))
-            db_level = data.get('db')
-        
-        if audio_field:
-            log_audio_receive(audio_field, audio_length, timestamp, db_level if db_level else 0)
-        else:
-            log_status("Received audio data in unknown format", "warning")
-        
-        if 'audio' in data:
-            audio_data_raw = data['audio']
-            field_name = 'audio'
-        elif 'audioData' in data:
-            audio_data_raw = data['audioData']
-            field_name = 'audioData'
-            print("Using 'audioData' field instead of 'audio'")
-        elif 'data' in data:
-            audio_data_raw = data['data']
-            field_name = 'data'
-            print("Using 'data' field instead of 'audio'")
-        else:
-            print("Missing audio data in request - no recognized audio field found")
-            print(f"Available fields: {list(data.keys()) if isinstance(data, dict) else 'None'}")
-            return
-        
-        if not audio_data_raw:
-            print("Empty audio data received")
-            return
+                audio_data = data['data']
+                log_status(f"Using 'data' field instead of 'audio'", "blue")
             
-        audio_format = data.get('format', 'float32')
+            # Get other metadata if available
+            if 'format' in data:
+                audio_format = data['format']
+            if 'db' in data:
+                db_level = data['db']
+            if 'timestamp' in data:
+                timestamp = data['timestamp']
+            elif 'time' in data:
+                timestamp = data['time']
         
-        try:
-            if isinstance(audio_data_raw, list):
-                print(f"Processing audio as list of values, length: {len(audio_data_raw)}")
-                audio_data = np.array(audio_data_raw, dtype=np.float32)
+        # Handle case where no valid audio data was found
+        if audio_data is None:
+            log_status("No valid audio data found in message", "red")
+            return
+        
+        # Log the received data info
+        log_status(f"Length: {len(audio_data)} samples", "blue")
+        log_status(f"Time: {timestamp}", "blue")
+        if db_level:
+            log_status(f"dB Level: {db_level:.2f}", "blue")
+        
+        # Process the audio data based on its type
+        if isinstance(audio_data, list):
+            log_status(f"Processing audio as list of values, length: {len(audio_data)}", "blue")
+            
+            # Convert the list to a numpy array
+            audio_data = np.array(audio_data, dtype=np.float32)
+            
+            # If these are int16 values, normalize them
+            if audio_format == 'int16' or (np.max(np.abs(audio_data)) > 1.0 and np.max(np.abs(audio_data)) <= 32768):
+                audio_data = audio_data.astype(np.float32) / 32768.0
+                log_status("Normalized integer audio values to float range [-1.0, 1.0]", "blue")
                 
-                if audio_format == 'int16' or (np.max(np.abs(audio_data)) > 1.0 and np.max(np.abs(audio_data)) <= 32768):
-                    audio_data = audio_data.astype(np.float32) / 32768.0
-                    print("Normalized integer audio values to float range [-1.0, 1.0]")
-            else:
-                audio_bytes = base64.b64decode(audio_data_raw)
-                print(f"Successfully decoded base64 audio data, length: {len(audio_bytes)} bytes")
+        elif isinstance(audio_data, str):
+            # Assume it's base64 encoded
+            try:
+                log_status("Processing audio as base64 encoded data", "blue")
+                audio_bytes = base64.b64decode(audio_data)
                 
-                if audio_format == 'float32':
-                    audio_data = np.frombuffer(audio_bytes, dtype=np.float32)
-                elif audio_format == 'int16':
+                if audio_format == 'int16':
+                    # Convert bytes to int16 array
                     audio_data = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
                 else:
-                    print(f"Unsupported audio format: {audio_format}, defaulting to float32")
+                    # Assume float32
                     audio_data = np.frombuffer(audio_bytes, dtype=np.float32)
-        except Exception as e:
-            print(f"Error decoding audio data: {e}. Treating as a list of values.")
-            try:
-                audio_data = np.array(audio_data_raw, dtype=np.float32)
-                if audio_format == 'int16' or (np.max(np.abs(audio_data)) > 1.0 and np.max(np.abs(audio_data)) <= 32768):
-                    audio_data = audio_data.astype(np.float32) / 32768.0
-            except Exception as e2:
-                print(f"Failed to convert audio data as list: {e2}")
+            except Exception as e:
+                log_status(f"Error decoding base64 audio: {str(e)}", "red")
                 return
         
-        if audio_length > 0:
-            audio_stats = {
-                'length': len(audio_data),
-                'min': np.min(audio_data),
-                'max': np.max(audio_data),
-                'mean': np.mean(audio_data),
-                'std': np.std(audio_data),
-                'rms': np.sqrt(np.mean(np.square(audio_data))),
-                'has_nan': np.any(np.isnan(audio_data)),
-                'has_inf': np.any(np.isinf(audio_data))
-            }
-            log_audio_stats(audio_stats)
-            log_status(f"Processed audio: {audio_length} samples", "success")
-        else:
-            log_status("Warning: Audio data has 0 samples after conversion", "warning")
-            return
-        
+        # Calculate dB level if not provided
         if db_level is None:
-            db_level = dbFS(audio_stats['rms'])
-            log_status(f"Calculated dB level: {db_level:.2f}", "info")
-            
-        if db_level < SILENCE_THRES:
-            log_status(f"Sound is silence (dB: {db_level:.2f}, threshold: {SILENCE_THRES})", "info")
-            result = {
-                "predictions": [{"label": "Silence", "score": 0.95}],
-                "timestamp": time.time() if timestamp is None else timestamp,
-                "db": db_level
-            }
-            log_prediction(result, db_level)
-            socketio.emit('prediction', result, broadcast=True)
-            return
+            db_level = calculate_db(audio_data)
         
-        if db_level < DBLEVEL_THRES:
-            log_status(f"Sound too quiet (dB: {db_level:.2f}, threshold: {DBLEVEL_THRES})", "info")
-            result = {
-                "predictions": [{"label": "Too Quiet", "score": 0.9}],
-                "timestamp": time.time() if timestamp is None else timestamp,
-                "db": db_level
-            }
-            log_prediction(result, db_level)
-            socketio.emit('prediction', result, broadcast=True)
-            return
-            
-        log_status(f"Processing audio with PANNs model (dB: {db_level:.2f})", "info")
+        # Log audio statistics for debugging
+        log_audio_stats(audio_data)
         
-        result = process_audio_with_panns(audio_data, timestamp, db_level)
-        
-        log_prediction(result, db_level)
-        socketio.emit('prediction', result, broadcast=True)
+        # Process the audio with our model directly without buffering 
+        # (since the client now sends the correct size)
+        process_audio_with_panns(audio_data, db_level, timestamp)
         
     except Exception as e:
-        print(f"Error in handle_audio: {e}")
+        log_status(f"Error in handle_audio: {str(e)}", "red")
         import traceback
         traceback.print_exc()
+        
+        # Return an error prediction
+        emit_prediction([{"label": "Error", "score": 1.0}], db_level, timestamp)
 
 # Remaining functions and code are unchanged
 def process_with_panns_model(np_wav, record_time=None, db=None):
@@ -633,14 +596,21 @@ def process_with_panns_model(np_wav, record_time=None, db=None):
 # Audio buffer for accumulating enough samples for PANNS model
 panns_audio_buffer = []
 
-def process_audio_with_panns(audio_data, timestamp=None, db_level=None, config=None):
+def process_audio_with_panns(audio_data, db_level=None, timestamp=None, config=None):
     """
     Process audio with PANNs model for sound recognition.
-    The PANNs model requires at least 32000 samples (1 second at 32kHz),
-    but we receive chunks of about 5360 samples. This function accumulates
-    audio chunks until we have enough data to process.
+    This function expects audio data with 32000 samples (1 second at 32kHz).
+    
+    Args:
+        audio_data: numpy array of audio samples
+        db_level: pre-calculated dB level or None to calculate
+        timestamp: timestamp of the audio data
+        config: dictionary with configuration parameters
+        
+    Returns:
+        None - results are emitted via socketio
     """
-    global panns_audio_buffer
+    log_status("Processing audio with PANNs model", "cyan")
     
     if config is None:
         config = {
@@ -662,177 +632,112 @@ def process_audio_with_panns(audio_data, timestamp=None, db_level=None, config=N
                 log_status("Converted audio to numpy array", "info")
             except Exception as e:
                 log_status(f"Error converting audio_data to numpy array: {e}", "error")
-                result = {
-                    "predictions": [{"label": "Invalid Audio Format", "score": 1.0}],
-                    "timestamp": timestamp if timestamp else time.time(),
-                    "db": db_level if db_level else -100
-                }
-                log_prediction(result, db_level if db_level else -100)
-                return result
+                emit_prediction([{"label": "Invalid Audio Format", "score": 1.0}], db_level, timestamp)
+                return
         
+        # Ensure we have float32 data
         if audio_data.dtype != np.float32:
             audio_data = audio_data.astype(np.float32)
-            log_status("Converted audio to float32", "info")
         
-        audio_stats = {
-            "length": len(audio_data),
-            "min": np.min(audio_data),
-            "max": np.max(audio_data),
-            "mean": np.mean(audio_data),
-            "std": np.std(audio_data),
-            "rms": np.sqrt(np.mean(np.square(audio_data))),
-            "has_nan": np.any(np.isnan(audio_data)),
-            "has_inf": np.any(np.isinf(audio_data))
-        }
-        log_audio_stats(audio_stats)
+        # Log detailed audio statistics
+        log_audio_stats(audio_data)
         
-        # Add the current chunk to our buffer
-        panns_audio_buffer.append(audio_data)
-        
-        # Calculate current buffer length
-        total_buffer_length = sum(len(chunk) for chunk in panns_audio_buffer)
-        log_status(f"Audio buffer size: {total_buffer_length} samples / {MINIMUM_AUDIO_LENGTH} required", "info")
-        
-        # If we don't have enough data yet, return a placeholder result
-        if total_buffer_length < MINIMUM_AUDIO_LENGTH:
-            return {
-                "predictions": [{"label": "Buffering...", "score": 0.5}],
-                "timestamp": timestamp if timestamp else time.time(),
-                "db": db_level if db_level else -100,
-                "buffer_progress": total_buffer_length / MINIMUM_AUDIO_LENGTH
-            }
-            
-        # We have enough data, so concatenate the buffer
-        log_status(f"Processing accumulated audio buffer: {total_buffer_length} samples", "success")
-        concatenated_audio = np.concatenate(panns_audio_buffer)
-        
-        # If we have more than we need, just take the most recent samples that add up to MINIMUM_AUDIO_LENGTH
-        if len(concatenated_audio) > MINIMUM_AUDIO_LENGTH:
-            concatenated_audio = concatenated_audio[-MINIMUM_AUDIO_LENGTH:]
-            
-        # Reset the buffer
-        panns_audio_buffer = []
-        
-        # Now process the concatenated audio
-        audio_data = concatenated_audio
-        
-        # Continue with the existing audio processing logic
-        if audio_stats["has_nan"] or audio_stats["has_inf"]:
+        # Fix NaN or Inf values if present
+        if np.any(np.isnan(audio_data)) or np.any(np.isinf(audio_data)):
             log_status("Audio contains NaN or Inf values, fixing...", "warning")
             audio_data = np.nan_to_num(audio_data)
         
-        if timestamp is None:
-            timestamp = time.time()
-        
+        # Calculate dB level if not provided
         if db_level is None:
-            db_level = dbFS(audio_stats["rms"])
+            rms = np.sqrt(np.mean(np.square(audio_data)))
+            db_level = dbFS(rms)
             log_status(f"Calculated dB level: {db_level:.2f}", "info")
-
-        if db_level is not None and db_level < silence_threshold:
+        
+        # Check for silence
+        if db_level < silence_threshold:
             log_status(f"Sound is silence (dB: {db_level:.2f}, threshold: {silence_threshold})", "info")
-            result = {
-                "predictions": [{"label": "Silence", "score": 0.95}],
-                "timestamp": timestamp,
-                "db": db_level
-            }
-            log_prediction(result, db_level)
-            return result
-        
-        if db_level is not None and db_level < db_level_threshold:
+            emit_prediction([{"label": "Silence", "score": 0.95}], db_level, timestamp)
+            return
+            
+        # Check if sound is too quiet
+        if db_level < db_level_threshold:
             log_status(f"Sound too quiet (dB: {db_level:.2f}, threshold: {db_level_threshold})", "info")
-            result = {
-                "predictions": [{"label": "Too Quiet", "score": 0.9}],
-                "timestamp": timestamp,
-                "db": db_level
-            }
-            log_prediction(result, db_level)
-            return result
+            emit_prediction([{"label": "Too Quiet", "score": 0.90}], db_level, timestamp)
+            return
         
+        # Sound level is good, proceed with PANNs model
         log_status(f"Sound level ({db_level:.2f} dB) within processing range ({silence_threshold} to {db_level_threshold} dB)", "success")
         
-        print(f"Processing audio with PANNS model (threshold: {prediction_threshold})")
+        log_status("Processing audio with PANNS model (threshold: {:.1f})".format(prediction_threshold), "info")
         
-        if db_level < 60:
-            log_status("Boosting quiet audio...", "info")
-            gain = min(3.0, pow(10, (60 - db_level) / 20))
-            audio_data = audio_data * gain
-            
-        if len(audio_data) < MINIMUM_AUDIO_LENGTH:
-            log_status(f"Audio too short ({len(audio_data)} samples), padding...", "info")
-            if len(audio_data) < MINIMUM_AUDIO_LENGTH / 4:
-                repeats = int(np.ceil(MINIMUM_AUDIO_LENGTH / len(audio_data)))
-                padded = np.tile(audio_data, repeats)[:MINIMUM_AUDIO_LENGTH]
-                log_status("Very short audio - repeating pattern", "info")
-            else:
-                padded = np.zeros(MINIMUM_AUDIO_LENGTH)
-                padded[:len(audio_data)] = audio_data
-            audio_data = padded
+        # Handle audio buffer size - PANNs expects 32000 samples
+        audio_length = len(audio_data)
+        if audio_length < MINIMUM_AUDIO_LENGTH:
+            # Pad with zeros if too short
+            log_status(f"Padding short audio: {audio_length} → {MINIMUM_AUDIO_LENGTH} samples", "info")
+            padding = np.zeros(MINIMUM_AUDIO_LENGTH - audio_length, dtype=np.float32)
+            audio_data = np.concatenate([audio_data, padding])
+        elif audio_length > MINIMUM_AUDIO_LENGTH:
+            # Trim if too long - use most recent samples
+            log_status(f"Trimming long audio: {audio_length} → {MINIMUM_AUDIO_LENGTH} samples", "info")
+            audio_data = audio_data[-MINIMUM_AUDIO_LENGTH:]
         
+        # Boost quiet sounds to improve detection
+        if db_level < -30 and db_level > -60:
+            boost_factor = max(1.0, min(5.0, (-30 - db_level) / 10))
+            log_status(f"Boosting quiet audio by factor of {boost_factor:.2f}", "info")
+            audio_data = audio_data * boost_factor
+        
+        # Run prediction with PANNs model
         log_status("Running PANNs prediction...", "info")
         
-        print(f"\n{TermColors.BOLD}DEBUG: Before calling predict_with_panns{TermColors.ENDC}")
-        print(f"Audio data shape: {audio_data.shape if hasattr(audio_data, 'shape') else 'Not a numpy array'}")
+        # Debug logs before prediction
+        print("\nDEBUG: Before calling predict_with_panns")
+        print(f"Audio data shape: {audio_data.shape}")
         print(f"Audio data type: {type(audio_data)}")
-        print(f"Audio data min/max: {np.min(audio_data):.6f}/{np.max(audio_data):.6f}")
+        print(f"Audio data min/max: {np.min(audio_data)}/{np.max(audio_data)}")
         print(f"Prediction threshold: {prediction_threshold}")
         
         try:
             with panns_model_lock:
-                predictions = panns_model.predict_with_panns(
+                predictions = predict_with_panns(
                     audio_data, 
-                    top_k=10,
+                    top_k=10, 
                     threshold=prediction_threshold,
-                    map_to_homesounds_format=True
+                    map_to_homesounds_format=True, 
+                    boost_other_categories=config.get('boost_factor', 1.2) > 1.0
                 )
-            
-            print(f"\n{TermColors.BOLD}DEBUG: After calling predict_with_panns{TermColors.ENDC}")
-            print(f"Predictions type: {type(predictions)}")
-            print(f"Predictions: {predictions}")
-            
-            if not predictions or len(predictions) == 0:
-                print(f"{TermColors.YELLOW}WARNING: No predictions returned from model{TermColors.ENDC}")
-                result = {
-                    "predictions": [
-                        {"label": "Unknown Sound", "score": 0.6}
-                    ],
-                    "timestamp": timestamp,
-                    "db": db_level
-                }
-                return result
                 
-            if len(predictions) > 1:
-                predictions = boost_other_categories(predictions, config.get('boost_factor', 1.2))
+                # Debug logs after prediction
+                print("\nDEBUG: After calling predict_with_panns")
+                print(f"Predictions type: {type(predictions)}")
+                print(f"Predictions: {predictions}")
                 
-            result = {
-                "predictions": predictions,
-                "timestamp": timestamp,
-                "db": db_level
-            }
-            
-            cleanup_memory()
-            
-            return result
+                # Emit results to clients
+                emit_prediction(predictions, db_level, timestamp)
         except Exception as e:
-            print(f"{TermColors.RED}ERROR in PANNS prediction: {e}{TermColors.ENDC}")
-            import traceback
+            log_status(f"Error in PANNs prediction: {str(e)}", "error")
             traceback.print_exc()
-            result = {
-                "predictions": [
-                    {"label": "Error in Prediction", "score": 1.0}
-                ],
-                "timestamp": timestamp,
-                "db": db_level
-            }
-            return result
+            emit_prediction([{"label": "Prediction Error", "score": 1.0}], db_level, timestamp)
+            
     except Exception as e:
-        print(f"Error processing audio with PANNs: {e}")
-        import traceback
+        log_status(f"Error processing audio: {str(e)}", "error")
         traceback.print_exc()
-        return {
-            "predictions": [{"label": "Error", "score": 1.0}],
-            "timestamp": timestamp if timestamp else time.time(),
-            "db": db_level if db_level else -100
-        }
+        emit_prediction([{"label": "Processing Error", "score": 1.0}], db_level, timestamp)
+
+def emit_prediction(predictions, db_level, timestamp=None):
+    """Helper function to emit predictions via socketio"""
+    if timestamp is None:
+        timestamp = time.time()
+    
+    result = {
+        "predictions": predictions,
+        "timestamp": timestamp,
+        "db": db_level
+    }
+    
+    log_prediction(result, db_level)
+    socketio.emit('prediction', result, broadcast=True)
 
 recent_audio_buffer = []
 MAX_BUFFER_SIZE = 5
