@@ -111,6 +111,8 @@ socketio = SocketIO(app, async_mode=async_mode, cors_allowed_origins="*")
 thread = None
 thread_lock = Lock()
 panns_lock = Lock()  # Lock for thread-safe PANNS model access
+ast_lock = Lock()    # Placeholder lock (PANNs model is primary)
+prediction_lock = Lock()  # Lock for thread-safe prediction history access
 
 # Constants for audio processing
 RATE = 16000  # Audio sample rate
@@ -163,16 +165,28 @@ google_speech_processor = None  # Will be lazy-loaded when needed
 # Load models
 def load_models():
     """Load all required models for sound recognition and speech processing."""
-    global models
+    global models, USE_AST_MODEL, USE_PANNS_MODEL
     
+    # Initialize models dictionary
     models = {
         "sentiment_analyzer": None,
         "speech_processor": None,
         "panns": None
     }
     
-    print("PANNs model will be used as the primary sound recognition model")
+    # Check environment variables to determine which models to load
+    USE_AST_MODEL = os.environ.get('USE_AST_MODEL', '0') == '1'
+    USE_PANNS_MODEL = os.environ.get('USE_PANNS_MODEL', '1') == '1'
     
+    print(f"AST model {'enabled' if USE_AST_MODEL else 'disabled'} based on environment settings")
+    print(f"PANNs model {'enabled' if USE_PANNS_MODEL else 'disabled'} based on environment settings")
+    
+    # Default to PANNs if nothing is specified
+    if not USE_AST_MODEL and not USE_PANNS_MODEL:
+        print("No models enabled, defaulting to PANNs model")
+        USE_PANNS_MODEL = True
+    
+    # Load speech models if needed
     try:
         if not USE_GOOGLE_SPEECH:
             print("Loading Whisper model for speech recognition...")
@@ -183,136 +197,58 @@ def load_models():
         print(f"Error loading Whisper model: {e}")
         traceback.print_exc()
 
-    try:
-        print("Loading PANNs model...")
-        panns_loaded = panns_model.load_panns_model()
-        if panns_loaded:
-            models["panns"] = True
-            print("PANNs model loaded successfully")
-        else:
-            print("Failed to load PANNs model")
-            USE_PANNS_MODEL = False
-            print("PANNs model will not be used")
-    except Exception as e:
-        print(f"Error loading PANNs model: {e}")
-        traceback.print_exc()
-        USE_PANNS_MODEL = False
-        print("PANNs model will not be used due to error")
-
-    # Only attempt to load AST if it's enabled
-    if USE_AST_MODEL:
-        try:
-            print("Loading AST model...")
-            import ast_model  # Import only if needed
-            ast_lock = Lock()  # Create lock only if AST is used
-            ast_model_name = "MIT/ast-finetuned-audioset-10-10-0.4593"
-            ast_kwargs = {}
-            if torch.__version__ >= '2.1.1':
-                ast_kwargs["attn_implementation"] = "sdpa"
-                print("Using Scaled Dot Product Attention (SDPA) for faster inference")
-            ast_kwargs = {"torch_dtype": torch.float32}
-            with ast_lock:
-                models["ast"], models["feature_extractor"] = ast_model.load_ast_model(
-                    model_name=ast_model_name,
-                    **ast_kwargs
-                )
-                ast_model.initialize_class_labels(models["ast"])
-            print("AST model loaded successfully")
-        except Exception as e:
-            print(f"Error loading AST model: {e}")
-            traceback.print_exc()
-            USE_AST_MODEL = False
-            print("AST model will not be used due to error")
-
-    # Only attempt to load TensorFlow if needed (when both AST and PANNs are disabled)
-    MODEL_URL = "https://www.dropbox.com/s/cq1d7uqg0l28211/example_model.hdf5?dl=1"
-    MODEL_PATH = "models/example_model.hdf5"
-    if not USE_AST_MODEL and not USE_PANNS_MODEL:
-        try:
-            print("Loading TensorFlow model as backup...")
-            # Import TensorFlow only if needed
-            import tensorflow as tf
-            from tensorflow import keras
-            tf_graph = tf.Graph()
-            tf_session = tf.compat.v1.Session(graph=tf_graph)
-            
-            model_filename = os.path.abspath(MODEL_PATH)
-            os.makedirs(os.path.dirname(model_filename), exist_ok=True)
-            
-            homesounds_model = Path(model_filename)
-            if not homesounds_model.is_file():
-                print("Downloading example_model.hdf5 [867MB]: ")
-                wget.download(MODEL_URL, MODEL_PATH)
-            
-            print("Using TensorFlow model: %s" % (model_filename))
-            
-            try:
-                with tf_graph.as_default():
-                    with tf_session.as_default():
-                        models["tensorflow"] = keras.models.load_model(model_filename)
-                        print("Initializing TensorFlow model with a dummy prediction...")
-                        dummy_input = np.zeros((1, 96, 64, 1))
-                        _ = models["tensorflow"].predict(dummy_input)
-                        print("Model prediction function initialized successfully")
-                print("TensorFlow model loaded successfully")
-                print("TensorFlow model will be used as primary model")
-                models["tensorflow"].summary()
-            except Exception as e:
-                print(f"Error loading TensorFlow model with standard method: {e}")
-                try:
-                    with tf_graph.as_default():
-                        with tf_session.as_default():
-                            models["tensorflow"] = tf.keras.models.load_model(model_filename, compile=False)
-                            print("Initializing TensorFlow model with a dummy prediction...")
-                            dummy_input = np.zeros((1, 96, 64, 1))
-                            _ = models["tensorflow"].predict(dummy_input)
-                            print("Model prediction function initialized successfully")
-                    print("TensorFlow model loaded with compile=False option")
-                except Exception as e2:
-                    print(f"Error with fallback method: {e2}")
-                    raise Exception("Could not load any sound recognition model. Please enable at least one model.")
-        except Exception as e:
-            print(f"Error setting up TensorFlow model: {e}")
-            traceback.print_exc()
-            raise Exception("No sound recognition models are available. Please enable at least one model.")
-
-    # Determine which model is primary
+    # Load PANNs model if enabled
     if USE_PANNS_MODEL:
-        print("Using PANNs model as primary model")
-        primary_model = "panns"
-    elif USE_AST_MODEL:
-        print("Using AST model as primary model")
-        primary_model = "ast"
-    else:
-        print("Using TensorFlow model as primary model")
-        primary_model = "tensorflow"
+        print("PANNs model will be used as the primary sound recognition model")
+        try:
+            print("Loading PANNs model...")
+            panns_loaded = panns_model.load_panns_model()
+            if panns_loaded:
+                models["panns"] = True
+                print("PANNs model loaded successfully")
+            else:
+                print("Failed to load PANNs model")
+                raise Exception("Failed to load PANNs model. Please run 'python download_panns_model.py' to set up the required files.")
+        except Exception as e:
+            print(f"Error loading PANNs model: {e}")
+            traceback.print_exc()
+            raise Exception("Failed to load PANNs model. Please check the error messages above.")
+    
+    # No need to load AST or TensorFlow models as we're focusing only on PANNs
 
 def audio_samples(in_data, frame_count, time_info, status_flags):
+    """Process audio samples for real-time audio streaming."""
     np_wav = np.frombuffer(in_data, dtype=np.int16).astype(np.float32) / 32768.0
     rms = np.sqrt(np.mean(np_wav**2))
     db = dbFS(rms)
 
-    x = waveform_to_examples(np_wav, RATE)
-    predictions = []
+    # Check for silence
+    if -db < SILENCE_THRES:
+        print(f"Silence detected (db: {db})")
+        return (in_data, 0)
     
-    if x.shape[0] != 0:
-        x = x.reshape(len(x), 96, 64, 1)
-        print('Reshape x successful', x.shape)
-        pred = models["tensorflow"].predict(x)
-        predictions.append(pred)
+    # Check if sound is too quiet
+    if -db <= DBLEVEL_THRES:
+        print(f"Sound too quiet (db: {db})")
+        return (in_data, 0)
     
-    print('Prediction succeeded')
-    for prediction in predictions:
-        context_prediction = np.take(
-            prediction[0], [homesounds.labels[x] for x in active_context])
-        m = np.argmax(context_prediction)
-        if (context_prediction[m] > PREDICTION_THRES and db > DBLEVEL_THRES):
-            print("Prediction: %s (%0.2f)" % (
-                homesounds.to_human_labels[active_context[m]], context_prediction[m]))
-
-    print("Raw audio min/max:", np.min(np_wav), np.max(np_wav))
-    print("Processed audio shape:", x.shape)
-
+    # Process with PANNs model
+    try:
+        # Use our process_audio_with_panns function
+        prediction_results = process_audio_with_panns(
+            audio_data=np_wav,
+            db_level=db,
+            config=None  # Use default config
+        )
+        
+        # Log the top prediction
+        if prediction_results and "predictions" in prediction_results and len(prediction_results["predictions"]) > 0:
+            top_pred = prediction_results["predictions"][0]
+            print(f"Top prediction: {top_pred['label']} ({top_pred['score']:.4f})")
+    except Exception as e:
+        print(f"Error processing audio with PANNs model: {e}")
+        traceback.print_exc()
+    
     return (in_data, 0)
 
 @socketio.on('audio_feature_data')
@@ -1370,6 +1306,9 @@ if __name__ == '__main__':
     print("=====")
     print("Setting up sound recognition models...")
     load_models()
+    
+    # Set primary_model to PANNs
+    primary_model = "panns"
     
     ip_addresses = get_ip_addresses()
     
