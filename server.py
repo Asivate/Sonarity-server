@@ -734,18 +734,42 @@ def process_audio_with_panns(audio_data, timestamp=None, db_level=None, config=N
         
         log_status("Running PANNs prediction...", "info")
         
-        with panns_model_lock:
-            predictions = panns_model.predict_with_panns(
-                audio_data, 
-                top_k=10,
-                threshold=prediction_threshold,
-                map_to_homesounds_format=True
-            )
-        
-        if not predictions or len(predictions) == 0:
+        try:
+            print(f"\n{TermColors.BOLD}DEBUG: Before calling predict_with_panns{TermColors.ENDC}")
+            print(f"Audio data shape: {audio_data.shape if hasattr(audio_data, 'shape') else 'Not a numpy array'}")
+            print(f"Audio data type: {type(audio_data)}")
+            print(f"Audio data min/max: {np.min(audio_data):.6f}/{np.max(audio_data):.6f}")
+            print(f"Prediction threshold: {prediction_threshold}")
+            
+            with panns_model_lock:
+                predictions = panns_model.predict_with_panns(
+                    audio_data, 
+                    top_k=10,
+                    threshold=prediction_threshold,
+                    map_to_homesounds_format=True
+                )
+            
+            print(f"\n{TermColors.BOLD}DEBUG: After calling predict_with_panns{TermColors.ENDC}")
+            print(f"Predictions type: {type(predictions)}")
+            print(f"Predictions: {predictions}")
+            
+            if not predictions or len(predictions) == 0:
+                print(f"{TermColors.YELLOW}WARNING: No predictions returned from model{TermColors.ENDC}")
+                result = {
+                    "predictions": [
+                        {"label": "Unknown Sound", "score": 0.6}
+                    ],
+                    "timestamp": timestamp,
+                    "db": db_level
+                }
+                return result
+        except Exception as e:
+            print(f"{TermColors.RED}ERROR in PANNS prediction: {e}{TermColors.ENDC}")
+            import traceback
+            traceback.print_exc()
             result = {
                 "predictions": [
-                    {"label": "Unknown Sound", "score": 0.6}
+                    {"label": "Error in Prediction", "score": 1.0}
                 ],
                 "timestamp": timestamp,
                 "db": db_level

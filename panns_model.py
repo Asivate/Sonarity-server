@@ -876,12 +876,11 @@ class PANNsModelInference:
             # Sort by confidence (descending)
             sorted_results = sorted(homesounds_scores.items(), key=lambda x: x[1], reverse=True)
             
-            # Convert to the format expected by the server
-            return {
-                "output": [{"label": label, "score": score} for label, score in sorted_results]
-            }
+            # Convert to the format expected by the server - return a list of predictions directly
+            return [{"label": label, "score": float(score)} for label, score in sorted_results]
         else:
-            return {"output": []}
+            # Return a generic "Unknown Sound" prediction if nothing matches
+            return [{"label": "Unknown Sound", "score": 0.7}]
 
     def get_available_labels(self):
         """
@@ -976,9 +975,44 @@ def predict_with_panns(audio_data, top_k=5, threshold=0.2, map_to_homesounds_for
         If map_to_homesounds_format is True: Dictionary with homesounds format
         Otherwise: List of (label, confidence) tuples
     """
-    results = panns_inference.predict(audio_data, top_k=top_k, threshold=threshold, boost_other_categories=boost_other_categories)
-    
-    if map_to_homesounds_format:
-        return panns_inference.map_to_homesounds(results, threshold=threshold)
-    
-    return results
+    print(f"DEBUG: predict_with_panns called with top_k={top_k}, threshold={threshold}")
+    print(f"DEBUG: audio_data shape: {audio_data.shape if hasattr(audio_data, 'shape') else 'Not a numpy array'}")
+    print(f"DEBUG: audio_data type: {type(audio_data)}")
+    try:
+        # Check if model is initialized
+        if not hasattr(panns_inference, '_initialized') or not panns_inference._initialized:
+            print("WARNING: PANNs model not initialized, initializing now...")
+            panns_inference.initialize()
+            if not hasattr(panns_inference, '_initialized') or not panns_inference._initialized:
+                print("ERROR: Failed to initialize PANNs model")
+                return [{"label": "Model Error", "score": 1.0}]
+        
+        # Call the predict method with detailed error handling
+        try:
+            results = panns_inference.predict(audio_data, top_k=top_k, threshold=threshold, boost_other_categories=boost_other_categories)
+            print(f"DEBUG: PANNs raw prediction results: {results}")
+        except Exception as e:
+            print(f"ERROR in panns_inference.predict: {e}")
+            import traceback
+            traceback.print_exc()
+            return [{"label": "Prediction Error", "score": 1.0}]
+        
+        # Map results to homesounds format if requested
+        if map_to_homesounds_format:
+            try:
+                mapped_results = panns_inference.map_to_homesounds(results, threshold=threshold)
+                print(f"DEBUG: Mapped to homesounds format: {mapped_results}")
+                return mapped_results
+            except Exception as e:
+                print(f"ERROR in mapping to homesounds format: {e}")
+                import traceback
+                traceback.print_exc()
+                # Fall back to returning raw results
+                return [{"label": result[0], "score": float(result[1])} for result in results] if results else [{"label": "Mapping Error", "score": 1.0}]
+        
+        return results
+    except Exception as e:
+        print(f"ERROR in predict_with_panns: {e}")
+        import traceback
+        traceback.print_exc()
+        return [{"label": "Function Error", "score": 1.0}]
