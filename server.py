@@ -1,3 +1,4 @@
+# Import Statements
 from threading import Lock
 from flask import Flask, render_template, session, request, \
     copy_current_request_context, Response, jsonify
@@ -25,19 +26,17 @@ from transformers import pipeline
 import logging
 import json
 
-# Import our PANNs model implementation
+# Custom Imports
 import panns_model
-
-# Import our sentiment analysis modules
 from sentiment_analyzer import analyze_sentiment
 from speech_to_text import transcribe_audio, SpeechToText
 from google_speech import transcribe_with_google, GoogleSpeechToText
 
-# Configure logging
+# Logging Configuration
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Colors for terminal output
+# Terminal Color Definitions
 class TermColors:
     HEADER = '\033[95m'
     BLUE = '\033[94m'
@@ -49,7 +48,7 @@ class TermColors:
     BOLD = '\033[1m'
     UNDERLINE = '\033[4m'
 
-# Custom log functions for better readability
+# Logging Functions
 def log_audio_receive(data_type, length, timestamp, db):
     """Format log for received audio data"""
     print(f"\n{TermColors.HEADER}{'='*80}{TermColors.ENDC}")
@@ -87,7 +86,7 @@ def log_status(message, status="info"):
     elif status == "success":
         print(f"{TermColors.GREEN}SUCCESS:{TermColors.ENDC} {message}")
 
-# Memory optimization settings
+# Memory Optimization Settings
 MEMORY_OPTIMIZATION_LEVEL = os.environ.get('MEMORY_OPTIMIZATION', '1')  # 0=None, 1=Moderate, 2=Aggressive
 if MEMORY_OPTIMIZATION_LEVEL == '1':
     logger.info("Using moderate memory optimization")
@@ -101,10 +100,11 @@ else:
     logger.info("No memory optimization")
     EMPTY_CACHE_FREQ = 0  # Never automatically empty cache
 
-# Global counter for memory cleanup
+# Global Variables
 prediction_counter = 0
+USE_GOOGLE_SPEECH = False  # Set to True to use Google Cloud Speech-to-Text instead of Whisper
 
-# Function to clean up memory periodically
+# Memory Cleanup Function
 def cleanup_memory():
     """Clean up unused memory to prevent memory leaks"""
     global prediction_counter
@@ -122,74 +122,60 @@ def cleanup_memory():
             gc.collect()
         logger.info(f"Memory cleanup performed (cycle {prediction_counter})")
 
-# Speech recognition settings
-USE_GOOGLE_SPEECH = False  # Set to True to use Google Cloud Speech-to-Text instead of Whisper
-
-# Add the current directory to the path so we can import our modules
-os.path.dirname(os.path.abspath(__file__))
-
-# Helper function to get the computer's IP addresses
+# Utility Functions
 def get_ip_addresses():
     """Get available IP addresses for the server."""
     ip_list = []
-    # Add the external IP first (prioritize this one)
     ip_list.append('34.16.101.179')  # External IP address for physical devices
     
     try:
-        # Then add the local IPs for completeness
         hostname = socket.gethostname()
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
-            # Connect to an external address to find the local network interface
             s.connect(('8.8.8.8', 80))
             primary_ip = s.getsockname()[0]
             if primary_ip != '127.0.0.1' and primary_ip != '0.0.0.0' and primary_ip != '34.16.101.179':
-            ip_list.append(primary_ip)
+                ip_list.append(primary_ip)
         except Exception:
             pass
         finally:
             s.close()
             
-        # Get all IP addresses
-        try:
         for ip in socket.gethostbyname_ex(hostname)[2]:
-                if ip not in ip_list and ip != '127.0.0.1' and ip != '0.0.0.0':
+            if ip not in ip_list and ip != '127.0.0.1' and ip != '0.0.0.0':
                 ip_list.append(ip)
-        except Exception:
-            pass
     except Exception as e:
         print(f"Error getting IP addresses: {e}")
     
     return ip_list
 
-# Set up Flask app and SocketIO
+# Flask and SocketIO Setup
 async_mode = None
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'secret!'
 socketio = SocketIO(app, async_mode=async_mode, cors_allowed_origins="*")
 thread = None
 thread_lock = Lock()
-panns_lock = Lock()  # Lock for thread-safe PANNS model access
-panns_model_lock = Lock()  # Lock for thread-safe PANNS model usage
-prediction_lock = Lock()  # Lock for thread-safe prediction history access
+panns_lock = Lock()
+panns_model_lock = Lock()
+prediction_lock = Lock()
 
-# Constants for audio processing
-RATE = 32000  # Sample rate (32kHz matches original implementation)
-CHUNK = 1024  # Buffer size for audio chunks (matches original REC_BUFFER_SIZE)
-CHANNELS = 1  # Mono audio
-SILENCE_THRES = -60  # dB threshold for silence detection (lower is more sensitive)
-DBLEVEL_THRES = 30  # dB threshold for loud sounds (sounds above this are processed by PANNs)
-PREDICTION_THRES = 0.10  # Confidence threshold for predictions
-MINIMUM_AUDIO_LENGTH = 32000  # Minimum audio length (1 second at 32kHz)
-SENTIMENT_THRES = 0.5  # Sentiment analysis threshold
+# Audio Processing Constants
+RATE = 32000
+CHUNK = 1024
+CHANNELS = 1
+SILENCE_THRES = -60
+DBLEVEL_THRES = 30
+PREDICTION_THRES = 0.10
+MINIMUM_AUDIO_LENGTH = 32000
+SENTIMENT_THRES = 0.5
 
-# Global variables
-models = {}  # Dictionary to store loaded models
-sentiment_analyzer = None  # Sentiment analyzer model
-speech_to_text = None  # Speech-to-text model
-google_speech = None  # Google Speech-to-Text client
+# Model Initialization
+models = {}
+sentiment_analyzer = None
+speech_to_text = None
+google_speech = None
 
-# Load sentiment analysis model
 try:
     sentiment_pipeline = pipeline("text-classification", model="j-hartmann/emotion-english-distilroberta-base", top_k=None)
     logger.info("Sentiment analysis model loaded successfully")
@@ -197,7 +183,6 @@ except Exception as e:
     logger.error(f"Error loading sentiment model: {str(e)}")
     sentiment_pipeline = None
 
-# Dictionary to map emotion to emojis
 EMOTION_TO_EMOJI = {
     "joy": "😄",
     "neutral": "😀",
@@ -208,7 +193,6 @@ EMOTION_TO_EMOJI = {
     "disgust": "🤢"
 }
 
-# Grouped emotions for simplified categories
 EMOTION_GROUPS = {
     "Happy": ["joy", "love", "admiration", "approval", "caring", "excitement", "amusement", "gratitude", "optimism", "pride", "relief"],
     "Neutral": ["neutral", "realization", "curiosity"],
@@ -216,50 +200,38 @@ EMOTION_GROUPS = {
     "Unpleasant": ["sadness", "fear", "anger", "disgust", "disappointment", "embarrassment", "grief", "remorse", "annoyance", "disapproval"]
 }
 
-# Initialize speech recognition systems
 speech_processor = SpeechToText()
-google_speech_processor = None  # Will be lazy-loaded when needed
+google_speech_processor = None
 
-# Load models
 def load_models():
     """Load all required models for sound recognition and speech processing."""
     global models, USE_PANNS_MODEL
     
-    # Initialize models dictionary
-    models = {
-        "panns": None,
-    }
+    models = {"panns": None}
     
-    # Check environment variables to determine which models to use
     USE_PANNS_MODEL = os.environ.get('USE_PANNS_MODEL', '1') == '1'
     
     print(f"PANNs model {'enabled' if USE_PANNS_MODEL else 'disabled'} based on environment settings")
     
-    # Ensure at least one model is enabled
     if not USE_PANNS_MODEL:
         print("Warning: No sound recognition models enabled. Enabling PANNs model by default.")
         USE_PANNS_MODEL = True
     
-    # Load PANNs model if enabled
     if USE_PANNS_MODEL:
-            print("Loading PANNs model...")
+        print("Loading PANNs model...")
         panns_model.load_panns_model()
-                models["panns"] = True
-                print("PANNs model loaded successfully")
-    
-    # No need to load other models as we're focusing only on PANNs
+        models["panns"] = True
+        print("PANNs model loaded successfully")
 
+# Audio Processing Functions
 def audio_samples(in_data, frame_count, time_info, status_flags):
     """Process audio samples for real-time audio streaming."""
     try:
-        # Convert from bytes to float [-1.0, 1.0]
         np_wav = np.frombuffer(in_data, dtype=np.int16).astype(np.float32) / 32768.0
         
-        # Calculate RMS level and dB
         rms = np.sqrt(np.mean(np_wav**2))
         db = dbFS(rms)
         
-        # Log audio stats
         audio_stats = {
             'length': len(np_wav),
             'min': np.min(np_wav),
@@ -270,17 +242,14 @@ def audio_samples(in_data, frame_count, time_info, status_flags):
         log_audio_stats(audio_stats)
         log_status(f"Live audio capture: {len(np_wav)} samples, {db:.2f} dB", "info")
 
-        # Check for silence
         if db < SILENCE_THRES:
             log_status(f"Silence detected (dB: {db:.2f}, threshold: {SILENCE_THRES})", "info")
             return (in_data, 0)
         
-        # Check if sound is loud enough to process
         if db < DBLEVEL_THRES:
             log_status(f"Sound too quiet (dB: {db:.2f}, threshold: {DBLEVEL_THRES})", "info")
             return (in_data, 0)
         
-        # Process with PANNs model
         prediction_results = process_audio_with_panns(
             audio_data=np_wav,
             db_level=db,
@@ -292,12 +261,10 @@ def audio_samples(in_data, frame_count, time_info, status_flags):
             }
         )
         
-        # Log the top prediction
         if prediction_results and "predictions" in prediction_results and len(prediction_results["predictions"]) > 0:
             top_pred = prediction_results["predictions"][0]
             print(f"DETECTED: {top_pred['label']} ({top_pred['score']:.4f}, db: {db:.2f})")
             
-            # Emit the sound prediction to all clients
             socketio.emit('audio_label', {
                 'label': top_pred['label'],
                 'accuracy': str(round(top_pred['score'], 4)),
@@ -310,6 +277,7 @@ def audio_samples(in_data, frame_count, time_info, status_flags):
 
     return (in_data, 0)
 
+# SocketIO Event Handlers
 @socketio.on('audio_feature_data')
 def handle_source(json_data):
     """
@@ -320,14 +288,12 @@ def handle_source(json_data):
     - time: timestamp (optional)
     """
     try:
-        # Log received data for debugging (truncating large feature arrays)
         debug_data = json_data.copy() if isinstance(json_data, dict) else json_data
         if isinstance(debug_data, dict) and 'features' in debug_data:
             features_len = len(debug_data['features']) if debug_data['features'] else 0
             debug_data['features'] = f"[features array, length: {features_len}]"
         print(f"Received audio feature data: {debug_data}")
         
-        # Parse JSON if it's a string
         if isinstance(json_data, str):
             try:
                 json_data = json.loads(json_data)
@@ -336,7 +302,6 @@ def handle_source(json_data):
                 print(f"Invalid JSON in audio_feature_data: {e}")
                 return
         
-        # Check for features in different possible field names
         if 'features' in json_data:
             audio_features = json_data.get('features')
         elif 'audioFeatures' in json_data:
@@ -355,11 +320,9 @@ def handle_source(json_data):
             })
             return
         
-        # Get other parameters
         db = json_data.get('db')
         timestamp = json_data.get('time', json_data.get('timestamp', time.time()))
         
-        # Validate audio features
         if not audio_features or len(audio_features) == 0:
             print("Empty audio features received")
             socketio.emit('prediction', {
@@ -367,9 +330,8 @@ def handle_source(json_data):
                 "timestamp": timestamp,
                 "db": db
             })
-                            return
+            return
                     
-        # Convert audio features to numpy array if needed
         if not isinstance(audio_features, np.ndarray):
             try:
                 audio_features = np.array(audio_features, dtype=np.float32)
@@ -383,13 +345,11 @@ def handle_source(json_data):
                 })
                 return
         
-        # Calculate dB level if not provided
         if db is None:
             rms = np.sqrt(np.mean(np.square(audio_features)))
             db = dbFS(rms)
             print(f"Calculated dB level: {db}")
         
-        # Check for silence based on dB level
         if db < SILENCE_THRES:
             print(f"Sound is silence (dB: {db})")
             socketio.emit('prediction', {
@@ -397,9 +357,8 @@ def handle_source(json_data):
                 "timestamp": timestamp,
                 "db": db
             })
-                                    return
+            return
                         
-        # Check if sound is loud enough to process
         if db < DBLEVEL_THRES:
             print(f"Sound too quiet (dB: {db}, threshold: {DBLEVEL_THRES})")
             socketio.emit('prediction', {
@@ -409,10 +368,8 @@ def handle_source(json_data):
             })
             return
         
-        # Process with PANNs model
         print(f"Processing audio features (db: {db}, features shape: {audio_features.shape})")
         
-        # Process the audio with PANNs model
         result = process_audio_with_panns(
             audio_features, 
             timestamp=timestamp, 
@@ -425,7 +382,6 @@ def handle_source(json_data):
             }
         )
         
-        # Emit results to all clients
         print(f"Emitting prediction: {result}")
         socketio.emit('prediction', result, broadcast=True)
         
@@ -434,7 +390,6 @@ def handle_source(json_data):
         import traceback
         traceback.print_exc()
         
-        # Emit error to client
         socketio.emit('prediction', {
             "predictions": [{"label": "Error", "score": 1.0}],
             "timestamp": time.time(),
@@ -452,14 +407,12 @@ def handle_audio(data):
     - timestamp: optional timestamp
     """
     try:
-        # Extract basic info for logging without dumping large audio data
         audio_field = None
         audio_length = 0
         timestamp = None
         db_level = None
         
         if isinstance(data, dict):
-            # Find which field contains the audio data
             if 'audio' in data:
                 audio_field = 'audio'
                 audio_length = len(data['audio']) if data['audio'] else 0
@@ -470,22 +423,17 @@ def handle_audio(data):
                 audio_field = 'data'
                 audio_length = len(data['data']) if data['data'] else 0
                 
-            # Get timestamp and dB if available
             timestamp = data.get('time', data.get('timestamp', str(time.time())))
             db_level = data.get('db')
         
-        # Log incoming audio data
         if audio_field:
             log_audio_receive(audio_field, audio_length, timestamp, db_level if db_level else 0)
-            else:
+        else:
             log_status("Received audio data in unknown format", "warning")
         
-        # Handle different client formats - some clients might send data in different fields
-        # Check for 'audio' field
         if 'audio' in data:
             audio_data_raw = data['audio']
             field_name = 'audio'
-        # Check for alternative fields that might contain audio data
         elif 'audioData' in data:
             audio_data_raw = data['audioData']
             field_name = 'audioData'
@@ -499,51 +447,41 @@ def handle_audio(data):
             print(f"Available fields: {list(data.keys()) if isinstance(data, dict) else 'None'}")
             return
         
-        # Validate audio data
         if not audio_data_raw:
             print("Empty audio data received")
             return
             
-        # Get audio format and other parameters
         audio_format = data.get('format', 'float32')
         
-        # Process audio data based on its type
         try:
             if isinstance(audio_data_raw, list):
-                # Direct list of values - convert to numpy array
                 print(f"Processing audio as list of values, length: {len(audio_data_raw)}")
                 audio_data = np.array(audio_data_raw, dtype=np.float32)
                 
-                # If these are int16 values, normalize them
                 if audio_format == 'int16' or (np.max(np.abs(audio_data)) > 1.0 and np.max(np.abs(audio_data)) <= 32768):
                     audio_data = audio_data.astype(np.float32) / 32768.0
                     print("Normalized integer audio values to float range [-1.0, 1.0]")
             else:
-                # Assume it's base64 encoded
-                try:
-                    audio_bytes = base64.b64decode(audio_data_raw)
-                    print(f"Successfully decoded base64 audio data, length: {len(audio_bytes)} bytes")
-                    
-                    # Convert bytes to numpy array based on format
-                    if audio_format == 'float32':
-                        audio_data = np.frombuffer(audio_bytes, dtype=np.float32)
-                    elif audio_format == 'int16':
-                        # Convert int16 to float32 normalized between -1 and 1
-                        audio_data = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
-                    else:
-                        print(f"Unsupported audio format: {audio_format}, defaulting to float32")
-                        audio_data = np.frombuffer(audio_bytes, dtype=np.float32)
-    except Exception as e:
-                    print(f"Error decoding audio data: {e}. Treating as a list of values.")
-                    try:
-                        audio_data = np.array(audio_data_raw, dtype=np.float32)
-                        if audio_format == 'int16' or (np.max(np.abs(audio_data)) > 1.0 and np.max(np.abs(audio_data)) <= 32768):
-                            audio_data = audio_data.astype(np.float32) / 32768.0
-                    except Exception as e2:
-                        print(f"Failed to convert audio data as list: {e2}")
-                        return
+                audio_bytes = base64.b64decode(audio_data_raw)
+                print(f"Successfully decoded base64 audio data, length: {len(audio_bytes)} bytes")
+                
+                if audio_format == 'float32':
+                    audio_data = np.frombuffer(audio_bytes, dtype=np.float32)
+                elif audio_format == 'int16':
+                    audio_data = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+                else:
+                    print(f"Unsupported audio format: {audio_format}, defaulting to float32")
+                    audio_data = np.frombuffer(audio_bytes, dtype=np.float32)
+        except Exception as e:
+            print(f"Error decoding audio data: {e}. Treating as a list of values.")
+            try:
+                audio_data = np.array(audio_data_raw, dtype=np.float32)
+                if audio_format == 'int16' or (np.max(np.abs(audio_data)) > 1.0 and np.max(np.abs(audio_data)) <= 32768):
+                    audio_data = audio_data.astype(np.float32) / 32768.0
+            except Exception as e2:
+                print(f"Failed to convert audio data as list: {e2}")
+                return
             
-            # Prepare and log audio statistics
             if audio_length > 0:
                 audio_stats = {
                     'length': len(audio_data),
@@ -559,14 +497,12 @@ def handle_audio(data):
                 log_status(f"Processed audio: {audio_length} samples", "success")
             else:
                 log_status("Warning: Audio data has 0 samples after conversion", "warning")
-        return
-    
-            # Calculate dB level if not provided
+                return
+            
             if db_level is None:
                 db_level = dbFS(audio_stats['rms'])
                 log_status(f"Calculated dB level: {db_level:.2f}", "info")
             
-            # Check for silence based on dB level
             if db_level < SILENCE_THRES:
                 log_status(f"Sound is silence (dB: {db_level:.2f}, threshold: {SILENCE_THRES})", "info")
                 result = {
@@ -576,9 +512,8 @@ def handle_audio(data):
                 }
                 log_prediction(result, db_level)
                 socketio.emit('prediction', result, broadcast=True)
-        return
+                return
     
-            # Check if sound is loud enough to process
             if db_level < DBLEVEL_THRES:
                 log_status(f"Sound too quiet (dB: {db_level:.2f}, threshold: {DBLEVEL_THRES})", "info")
                 result = {
@@ -590,13 +525,10 @@ def handle_audio(data):
                 socketio.emit('prediction', result, broadcast=True)
                 return
             
-            # Sound is loud enough, process with PANNs model
             log_status(f"Processing audio with PANNs model (dB: {db_level:.2f})", "info")
             
-            # Process the audio with PANNs model
             result = process_audio_with_panns(audio_data, timestamp, db_level)
             
-            # Log and emit the prediction results back to the client
             log_prediction(result, db_level)
             socketio.emit('prediction', result, broadcast=True)
             
@@ -605,34 +537,27 @@ def handle_audio(data):
             import traceback
             traceback.print_exc()
     
-            except Exception as e:
+    except Exception as e:
         print(f"Error in handle_audio: {e}")
         import traceback
-                traceback.print_exc()
+        traceback.print_exc()
 
-# Helper function to process with PANNs model
 def process_with_panns_model(np_wav, record_time=None, db=None):
     """Process audio using PANNs model"""
     try:
-        # Use PANNs model for prediction
         print("Processing with PANNs model...")
         print(f"Audio shape: {np_wav.shape}, min: {np_wav.min():.6f}, max: {np_wav.max():.6f}, mean: {np_wav.mean():.6f}")
         
-        # Ensure audio is normalized properly
         if np.abs(np_wav).max() > 1.0:
             print(f"Warning: Audio data exceeds normalized range [-1.0, 1.0]. Max value: {np.abs(np_wav).max():.6f}")
-            # Normalize if needed
             np_wav = np_wav / np.abs(np_wav).max()
             print(f"Audio normalized. New range: [{np_wav.min():.6f}, {np_wav.max():.6f}]")
         
-        # Apply noise gate to reduce background noise
         np_wav = noise_gate(np_wav, threshold=0.005, attack=0.01, release=0.1, rate=RATE)
             
-        # Ensure audio is long enough for processing
-        if len(np_wav) < MINIMUM_AUDIO_LENGTH:  # Use our new minimum size constant
+        if len(np_wav) < MINIMUM_AUDIO_LENGTH:
             print(f"Audio too short ({len(np_wav)} samples). Padding to {MINIMUM_AUDIO_LENGTH} samples.")
             if len(np_wav) < MINIMUM_AUDIO_LENGTH / 4:
-                # For very short sounds, repeat them
                 repeats = int(np.ceil(MINIMUM_AUDIO_LENGTH / len(np_wav)))
                 padded = np.tile(np_wav, repeats)[:MINIMUM_AUDIO_LENGTH]
                 print(f"Using repetition padding ({repeats} repeats)")
@@ -641,38 +566,31 @@ def process_with_panns_model(np_wav, record_time=None, db=None):
                 padded[:len(np_wav)] = np_wav
             np_wav = padded
         
-        # Start processing with enhanced audio
         with panns_lock:
-        panns_results = panns_model.predict_with_panns(
-            np_wav, 
-            top_k=10, 
-            threshold=PREDICTION_THRES,
-            map_to_homesounds_format=True,
-            boost_other_categories=True
-        )
+            panns_results = panns_model.predict_with_panns(
+                np_wav, 
+                top_k=10, 
+                threshold=PREDICTION_THRES,
+                map_to_homesounds_format=True,
+                boost_other_categories=True
+            )
         
-        # Check if we got any results
         if panns_results and "output" in panns_results and len(panns_results["output"]) > 0:
-            # Display predictions
             print("===== PANNs MODEL PREDICTIONS =====")
             for pred in panns_results["output"][:5]:
                 print(f"  {pred['label']}: {pred['score']:.6f}")
             
-            # Get top prediction
             top_prediction = panns_results["output"][0]
             top_label = top_prediction["label"]
             top_score = float(top_prediction["score"])
             
             print(f"Top prediction: {top_label} ({top_score:.4f})")
             
-            # Handle speech detection
             if top_label.lower() == "speech" and top_score > SPEECH_DETECTION_THRES:
                 print(f"Speech detected with PANNs model. Processing sentiment...")
                 if os.environ.get('USE_SPEECH', '0') == '1' and os.environ.get('USE_SENTIMENT', '0') == '1':
-                    # Process speech
                     process_speech(np_wav, record_time, top_score)
                 else:
-                    # Normal sound emission
                     socketio.emit('audio_label', {
                         'label': top_label,
                         'accuracy': str(top_score),
@@ -681,7 +599,6 @@ def process_with_panns_model(np_wav, record_time=None, db=None):
                     })
                     print(f"EMITTING: {top_label} ({top_score:.2f})")
             else:
-                # Emit the top prediction
                 if top_score > PREDICTION_THRES:
                     socketio.emit('audio_label', {
                         'label': top_label,
@@ -727,7 +644,6 @@ def process_audio_with_panns(audio_data, timestamp=None, db_level=None, config=N
             'boost_factor': 1.2
         }
     
-    # Extract config values
     silence_threshold = config.get('silence_threshold', SILENCE_THRES)
     db_level_threshold = config.get('db_level_threshold', DBLEVEL_THRES)
     prediction_threshold = config.get('prediction_threshold', PREDICTION_THRES)
@@ -735,7 +651,6 @@ def process_audio_with_panns(audio_data, timestamp=None, db_level=None, config=N
     log_status("Starting PANNs audio processing", "info")
     
     try:
-        # Ensure audio is the correct data type
         if not isinstance(audio_data, np.ndarray):
             try:
                 audio_data = np.array(audio_data, dtype=np.float32)
@@ -750,12 +665,10 @@ def process_audio_with_panns(audio_data, timestamp=None, db_level=None, config=N
                 log_prediction(result, db_level if db_level else -100)
                 return result
         
-        # Ensure audio is float32 type
         if audio_data.dtype != np.float32:
             audio_data = audio_data.astype(np.float32)
             log_status("Converted audio to float32", "info")
         
-        # Log detailed audio statistics
         audio_stats = {
             "length": len(audio_data),
             "min": np.min(audio_data),
@@ -768,21 +681,17 @@ def process_audio_with_panns(audio_data, timestamp=None, db_level=None, config=N
         }
         log_audio_stats(audio_stats)
         
-        # Handle non-finite values
         if audio_stats["has_nan"] or audio_stats["has_inf"]:
             log_status("Audio contains NaN or Inf values, fixing...", "warning")
             audio_data = np.nan_to_num(audio_data)
         
-        # Fix timestamp if not provided
         if timestamp is None:
             timestamp = time.time()
         
-        # Calculate dB level if not provided
         if db_level is None:
             db_level = dbFS(audio_stats["rms"])
             log_status(f"Calculated dB level: {db_level:.2f}", "info")
 
-        # Check for silence - if the sound is very quiet, it's silence
         if db_level is not None and db_level < silence_threshold:
             log_status(f"Sound is silence (dB: {db_level:.2f}, threshold: {silence_threshold})", "info")
             result = {
@@ -793,7 +702,6 @@ def process_audio_with_panns(audio_data, timestamp=None, db_level=None, config=N
             log_prediction(result, db_level)
             return result
         
-        # Check if sound is loud enough to process
         if db_level is not None and db_level < db_level_threshold:
             log_status(f"Sound too quiet (dB: {db_level:.2f}, threshold: {db_level_threshold})", "info")
             result = {
@@ -804,23 +712,18 @@ def process_audio_with_panns(audio_data, timestamp=None, db_level=None, config=N
             log_prediction(result, db_level)
             return result
         
-        # Sound is within processing range
         log_status(f"Sound level ({db_level:.2f} dB) within processing range ({silence_threshold} to {db_level_threshold} dB)", "success")
         
-        # Process with PANNS model
         print(f"Processing audio with PANNS model (threshold: {prediction_threshold})")
         
-        # Boost audio if it's quiet
-        if db_level < 60:  # If below 60 dB, boost it
+        if db_level < 60:
             log_status("Boosting quiet audio...", "info")
-            gain = min(3.0, pow(10, (60 - db_level) / 20))  # Calculate gain based on dB difference
+            gain = min(3.0, pow(10, (60 - db_level) / 20))
             audio_data = audio_data * gain
             
-        # Ensure audio is long enough for processing
         if len(audio_data) < MINIMUM_AUDIO_LENGTH:
             log_status(f"Audio too short ({len(audio_data)} samples), padding...", "info")
             if len(audio_data) < MINIMUM_AUDIO_LENGTH / 4:
-                # For very short sounds, repeat them
                 repeats = int(np.ceil(MINIMUM_AUDIO_LENGTH / len(audio_data)))
                 padded = np.tile(audio_data, repeats)[:MINIMUM_AUDIO_LENGTH]
                 log_status("Very short audio - repeating pattern", "info")
@@ -829,10 +732,8 @@ def process_audio_with_panns(audio_data, timestamp=None, db_level=None, config=N
                 padded[:len(audio_data)] = audio_data
             audio_data = padded
         
-        # Run prediction
         log_status("Running PANNs prediction...", "info")
         
-        # Use the lock to ensure thread safety
         with panns_model_lock:
             predictions = panns_model.predict_with_panns(
                 audio_data, 
@@ -841,7 +742,6 @@ def process_audio_with_panns(audio_data, timestamp=None, db_level=None, config=N
                 map_to_homesounds_format=True
             )
         
-        # No valid predictions above threshold
         if not predictions or len(predictions) == 0:
             result = {
                 "predictions": [
@@ -852,18 +752,15 @@ def process_audio_with_panns(audio_data, timestamp=None, db_level=None, config=N
             }
             return result
         
-        # Boost non-speech categories if we have multiple predictions
         if len(predictions) > 1:
             predictions = boost_other_categories(predictions, config.get('boost_factor', 1.2))
             
-        # Prepare the result
         result = {
             "predictions": predictions,
             "timestamp": timestamp,
             "db": db_level
         }
         
-        # Apply cleanup for memory management if needed
         cleanup_memory()
         
         return result
@@ -980,6 +877,7 @@ def background_thread():
                       {'data': 'Server generated event', 'count': count},
                       namespace='/test')
 
+# Flask Routes
 @app.route('/')
 def index():
     """Render the main page"""
@@ -1027,6 +925,7 @@ def toggle_speech_recognition():
             "use_google_speech": USE_GOOGLE_SPEECH
         })
 
+# Additional SocketIO Handlers
 @socketio.on('send_message')
 def handle_source(json_data):
     print('Receive message...' + str(json_data['message']))
@@ -1063,39 +962,30 @@ def handle_connect(auth=None):
     Handle client connection
     This is called when a client connects to the server
     We should send the client any necessary initialization data
-    
-    Args:
-        auth: Authentication data (optional, handled by Flask-SocketIO)
     """
     try:
-    print(f"Client connected: {request.sid}")
+        print(f"Client connected: {request.sid}")
         
-        # Get available IP addresses to show in logs
         ip_addresses = get_ip_addresses()
         ip_str = ", ".join(ip_addresses)
         print(f"Server running on: {ip_str}")
         
-        # Always prioritize the external IP for client connections
         primary_ip = "34.16.101.179"
         
-        # Send server status to the client
         status_data = {
             "server_status": "connected",
-            "model_loaded": True,  # Always show model as loaded for better UX
+            "model_loaded": True,
             "server_time": time.time(),
             "server_ip": primary_ip
         }
         
-        # Get available labels
         try:
             from panns_model import get_available_labels
             status_data["available_labels"] = get_available_labels()
         except Exception as e:
             print(f"Error getting labels from module: {e}")
-            # Fallback to default labels
             status_data["available_labels"] = [f"label_{i}" for i in range(527)]
         
-        # Emit the status to the connected client
         socketio.emit('server_status', status_data, room=request.sid)
         print(f"Sent server status to client: {request.sid}")
         
@@ -1109,14 +999,7 @@ def handle_disconnect():
     print(f"Client disconnected: {request.sid}")
 
 def aggregate_predictions(new_prediction, label_list, is_speech=False, num_samples=None):
-    """Aggregate predictions from multiple overlapping segments to improve accuracy.
-    
-    Args:
-        new_prediction: The new prediction array to add to history
-        label_list: List of class labels
-        is_speech: Whether to use speech-specific aggregation
-        num_samples: Optional number of samples to consider (if None, use all available)
-    """
+    """Aggregate predictions from multiple overlapping segments to improve accuracy."""
     global recent_predictions, speech_predictions
     
     with prediction_lock:
@@ -1134,7 +1017,6 @@ def aggregate_predictions(new_prediction, label_list, is_speech=False, num_sampl
             predictions_list = recent_predictions
             history_len = MAX_PREDICTIONS_HISTORY
         
-        # If num_samples is specified, limit the number of predictions to use
         if num_samples is not None and num_samples > 0 and num_samples < len(predictions_list):
             predictions_list = predictions_list[-num_samples:]
             logger.info(f"Using most recent {num_samples} samples for aggregation")
@@ -1163,9 +1045,7 @@ def aggregate_predictions(new_prediction, label_list, is_speech=False, num_sampl
         agg_top_idx = np.argmax(aggregated)
         
         if orig_top_idx != agg_top_idx:
-            # Handle different label_list types
             if isinstance(label_list, dict):
-                # Dictionary type - find label by index value
                 orig_label = "unknown"
                 agg_label = "unknown"
                 for label, idx in label_list.items():
@@ -1174,29 +1054,23 @@ def aggregate_predictions(new_prediction, label_list, is_speech=False, num_sampl
                     if idx == agg_top_idx:
                         agg_label = label
             elif isinstance(label_list, (list, tuple, np.ndarray)) and len(label_list) > 0:
-                # List type - use direct indexing if in range
                 orig_label = label_list[orig_top_idx] if orig_top_idx < len(label_list) else f"unknown({orig_top_idx})"
                 agg_label = label_list[agg_top_idx] if agg_top_idx < len(label_list) else f"unknown({agg_top_idx})"
             else:
-                # Other types or empty label_list - just use index values
                 orig_label = f"index_{orig_top_idx}"
                 agg_label = f"index_{agg_top_idx}"
                 
             logger.info(f"Aggregation changed top prediction: {orig_label} ({new_prediction[orig_top_idx]:.4f}) -> {agg_label} ({aggregated[agg_top_idx]:.4f})")
         else:
-            # Same handling for unchanged prediction
             if isinstance(label_list, dict):
-                # Dictionary type
                 label = "unknown"
                 for lbl, idx in label_list.items():
                     if idx == orig_top_idx:
                         label = lbl
                         break
             elif isinstance(label_list, (list, tuple, np.ndarray)) and len(label_list) > 0:
-                # List type
                 label = label_list[orig_top_idx] if orig_top_idx < len(label_list) else f"unknown({orig_top_idx})"
             else:
-                # Other types
                 label = f"index_{orig_top_idx}"
                 
             logger.info(f"Aggregation kept same top prediction: {label}, confidence: {new_prediction[orig_top_idx]:.4f} -> {aggregated[agg_top_idx]:.4f}")
@@ -1211,7 +1085,6 @@ def predict(message):
     timestamp = message['timestamp']
     db_level = message.get('db')
     
-    # Get configuration from message or use defaults
     config = {
         'silence_threshold': float(message.get('silence_threshold', SILENCE_THRES)),
         'db_level_threshold': float(message.get('db_level_threshold', DBLEVEL_THRES)),
@@ -1221,18 +1094,14 @@ def predict(message):
     
     print(f"Processing prediction request: sample_rate={sample_rate}, timestamp={timestamp}")
 
-    # Apply pre-emphasis and noise gate to improve audio quality
-    if len(audio_data) > 1:  # Don't apply pre-emphasis to very short audio
+    if len(audio_data) > 1:
         audio_data = pre_emphasis(audio_data)
     
-    # Resample audio if needed
     if sample_rate != RATE and len(audio_data) > 0:
         print(f"Resampling audio from {sample_rate}Hz to {RATE}Hz")
-        # Calculate the number of samples in the target sample rate
         num_samples = int(len(audio_data) * (RATE / sample_rate))
         audio_data = signal.resample(audio_data, num_samples)
     
-    # Process the audio with our enhanced PANNS processing function
     prediction_results = process_audio_with_panns(
         audio_data=audio_data,
         timestamp=timestamp,
@@ -1240,9 +1109,8 @@ def predict(message):
         config=config
     )
     
-    # Emit the results
     emit('panns_prediction', prediction_results)
-            cleanup_memory()
+    cleanup_memory()
 
 @socketio.on('predict_raw')
 def predict_raw(message):
@@ -1252,7 +1120,6 @@ def predict_raw(message):
     timestamp = message['timestamp']
     db_level = message.get('db')
     
-    # Get configuration from message or use defaults
     config = {
         'silence_threshold': float(message.get('silence_threshold', SILENCE_THRES)),
         'db_level_threshold': float(message.get('db_level_threshold', DBLEVEL_THRES)),
@@ -1262,18 +1129,14 @@ def predict_raw(message):
     
     print(f"Processing raw prediction request: sample_rate={sample_rate}, timestamp={timestamp}")
     
-    # Apply pre-emphasis and noise gate to improve audio quality
-    if len(audio_data) > 1:  # Don't apply pre-emphasis to very short audio 
+    if len(audio_data) > 1:
         audio_data = pre_emphasis(audio_data)
     
-    # Resample audio if needed
     if sample_rate != RATE and len(audio_data) > 0:
         print(f"Resampling audio from {sample_rate}Hz to {RATE}Hz")
-        # Calculate the number of samples in the target sample rate
         num_samples = int(len(audio_data) * (RATE / sample_rate))
         audio_data = signal.resample(audio_data, num_samples)
     
-    # Process with our enhanced PANNS processing function
     prediction_results = process_audio_with_panns(
         audio_data=audio_data,
         timestamp=timestamp,
@@ -1281,68 +1144,53 @@ def predict_raw(message):
         config=config
     )
     
-    # For raw predictions, use a different event name
     emit('prediction_raw', prediction_results)
     cleanup_memory()
 
-# Function to process speech with optional sentiment analysis
 def process_speech(audio_data, record_time=None, confidence=0.0):
     """Process speech audio with transcription and optional sentiment analysis."""
     try:
-        # Ensure we have enough audio data for proper speech recognition
-        # Typically we want at least 1 second, preferably more
-        if audio_data.size < 16000:  # Assuming 16kHz sampling rate
+        if audio_data.size < 16000:
             logger.info(f"Padded speech audio to size: 64000 samples (4.0 seconds)")
-            padded_data = np.zeros(64000)  # 4 seconds
+            padded_data = np.zeros(64000)
             padded_data[:audio_data.size] = audio_data
             audio_data = padded_data
         
-        # Boost audio signal for better transcription
         rms = np.sqrt(np.mean(audio_data**2))
         logger.info(f"Boosting audio signal (original RMS: {rms:.4f})")
         
-        # Target RMS around 0.1 is usually good for speech recognition
         if rms > 0:
             target_rms = 0.1
             gain = target_rms / rms
             
-            # Limit gain to avoid clipping
             max_abs = np.max(np.abs(audio_data))
             if max_abs * gain > 0.9:
                 logger.info(f"Using peak normalization to avoid clipping")
                 gain = 0.9 / max_abs
                 
-            # Apply gain
             boosted_audio = audio_data * gain
             new_rms = np.sqrt(np.mean(np.square(boosted_audio)))
             logger.info(f"Audio boosted from RMS {rms:.4f} to {new_rms:.4f}")
             audio_data = boosted_audio
         
-        # Transcribe speech
         logger.info(f"Transcribing speech to text...")
         print("Transcribing with enhanced audio processing...")
         
-        # Choose which speech recognition system to use
         transcription_result = None
         
         if os.environ.get('USE_GOOGLE_SPEECH', '0') == '1':
-            # Use Google Cloud Speech
             if models.get("google_speech_processor", None) is None:
-                # Lazy-load Google Cloud Speech
                 from google_speech import GoogleSpeechToText
                 models["google_speech_processor"] = GoogleSpeechToText()
             
             transcription_result = models["google_speech_processor"].transcribe(audio_data, RATE)
             logger.info(f"Used Google Cloud Speech for transcription")
         else:
-            # Use Whisper
             transcription_result = models["speech_processor"].transcribe(audio_data, RATE)
             logger.info(f"Used Whisper for transcription")
         
-        # Check if we have a valid transcription
         if not transcription_result or not transcription_result.get('text'):
             logger.info(f"No valid transcription found")
-            # Just emit the speech label without sentiment
             socketio.emit('audio_label', {
                 'label': 'Speech',
                 'accuracy': str(confidence),
@@ -1351,24 +1199,19 @@ def process_speech(audio_data, record_time=None, confidence=0.0):
             })
             return
         
-        # We have a valid transcription
         text = transcription_result['text']
         print(f"Transcribed: '{text}'")
         
-        # Apply sentiment analysis if enabled
         if os.environ.get('USE_SENTIMENT', '0') == '1':
             sentiment_result = analyze_sentiment(text)
             if sentiment_result:
-                # Format the result for emission
                 category = sentiment_result.get('category', 'Neutral')
                 emoji = sentiment_result.get('emoji', '😐')
                 emotion = sentiment_result.get('original_emotion', 'neutral')
                 sentiment_score = sentiment_result.get('confidence', 0.5)
                 
-                # Create the label with emoji
                 label = f"Speech {category}"
                 
-                # Emit result with all sentiment information
                 socketio.emit('audio_label', {
                     'label': label,
                     'accuracy': str(confidence),
@@ -1382,7 +1225,6 @@ def process_speech(audio_data, record_time=None, confidence=0.0):
                 print(f"Emitting speech with sentiment: {label} ({emoji})")
                 return
         
-        # If we get here, just emit the speech with transcription
         socketio.emit('audio_label', {
             'label': 'Speech',
             'accuracy': str(confidence),
@@ -1395,7 +1237,6 @@ def process_speech(audio_data, record_time=None, confidence=0.0):
     except Exception as e:
         print(f"Error processing speech: {str(e)}")
         traceback.print_exc()
-        # Fall back to basic speech detection
         socketio.emit('audio_label', {
             'label': 'Speech',
             'accuracy': str(confidence),
@@ -1404,26 +1245,21 @@ def process_speech(audio_data, record_time=None, confidence=0.0):
         })
         print("Emitting basic speech (error in processing)")
     finally:
-        # Clean up memory
         cleanup_memory()
 
-# Add pre-emphasis filter to improve speech detection
+# Audio Enhancement Functions
 def pre_emphasis(audio_data, emphasis=0.97):
     """Apply pre-emphasis filter to boost higher frequencies for better speech recognition"""
     return np.append(audio_data[0], audio_data[1:] - emphasis * audio_data[:-1])
 
-# Add noise gate function
 def noise_gate(audio_data, threshold=0.005, attack=0.01, release=0.1, rate=16000):
     """Apply a noise gate to filter out very quiet sounds"""
-    # Calculate the RMS of audio chunks
-    chunk_size = int(rate * 0.01)  # 10ms chunks
+    chunk_size = int(rate * 0.01)
     num_chunks = len(audio_data) // chunk_size
     
-    # If audio is too short, return it unchanged
     if num_chunks < 2:
         return audio_data
     
-    # Calculate the envelope
     envelope = np.zeros_like(audio_data)
     for i in range(num_chunks):
         start = i * chunk_size
@@ -1431,7 +1267,6 @@ def noise_gate(audio_data, threshold=0.005, attack=0.01, release=0.1, rate=16000
         rms = np.sqrt(np.mean(np.square(audio_data[start:end])))
         envelope[start:end] = rms
     
-    # Apply threshold with attack/release
     gate = np.zeros_like(audio_data)
     gate_value = 0
     attack_coef = 1.0 - np.exp(-1.0 / (rate * attack))
@@ -1444,48 +1279,32 @@ def noise_gate(audio_data, threshold=0.005, attack=0.01, release=0.1, rate=16000
             gate_value -= gate_value * release_coef
         gate[i] = gate_value
     
-    # Apply the gate
     return audio_data * gate
 
-# Function to boost non-speech/music categories
 def boost_other_categories(predictions, boost_factor=1.2):
     """
     Boost the confidence of non-speech, non-music categories to improve detection.
-    
-    Args:
-        predictions: Either a list of dictionaries with 'label' and 'score' keys,
-                    or a numpy array of scores
-        boost_factor: Factor to multiply non-speech/music scores by
-        
-    Returns:
-        Boosted predictions in the same format as input
     """
     if isinstance(predictions, list):
         boosted = []
         for pred in predictions:
             new_pred = pred.copy()
             label = pred['label'].lower()
-            # Don't boost speech or music
             if 'speech' not in label and 'music' not in label:
                 new_pred['score'] = min(1.0, pred['score'] * boost_factor)
             boosted.append(new_pred)
         return boosted
     elif isinstance(predictions, np.ndarray):
         boosted = predictions.copy()
-        # For numpy arrays, we would need category indices
-        # Since we're focusing on PANNs model which uses the dictionary format,
-        # this part is not needed anymore
         return boosted
     else:
-        # Return unchanged if format not recognized
-    return predictions
+        return predictions
 
 @app.route('/api/labels')
 def get_labels():
     """Return the list of labels that the model can recognize."""
     labels = []
     
-    # Get labels from PANNs model
     if USE_PANNS_MODEL and hasattr(panns_model, 'get_labels'):
         labels = panns_model.get_labels()
     
@@ -1494,8 +1313,8 @@ def get_labels():
         'count': len(labels)
     })
 
+# Main Execution
 if __name__ == '__main__':
-    # Parse command line arguments
     parser = argparse.ArgumentParser(description="SoundWatch Server")
     parser.add_argument("--port", type=int, default=8080, help="Port to run the server on")
     parser.add_argument("--host", type=str, default="0.0.0.0", help="Host to run the server on")
@@ -1503,26 +1322,23 @@ if __name__ == '__main__':
     parser.add_argument("--debug", action="store_true", help="Run in debug mode")
     args = parser.parse_args()
     
-    # Load models
     print("=====\nSetting up sound recognition models...")
     load_models()
     
-    # Set up background thread
     with thread_lock:
         if thread is None:
             thread = socketio.start_background_task(background_thread)
     
-    # Display startup banner
     ip_addresses = get_ip_addresses()
-    external_ip = "34.16.101.179"  # Your external IP address
+    external_ip = "34.16.101.179"
     
     print("\n============================================================")
     print("SONARITY SERVER STARTED")
     print("============================================================")
-        print("Server is available at:")
-        for i, ip in enumerate(ip_addresses):
-            print(f"{i+1}. http://{ip}:{args.port}")
-            print(f"   WebSocket: ws://{ip}:{args.port}")
+    print("Server is available at:")
+    for i, ip in enumerate(ip_addresses):
+        print(f"{i+1}. http://{ip}:{args.port}")
+        print(f"   WebSocket: ws://{ip}:{args.port}")
     
     print(f"\nExternal access: http://{external_ip}:{args.port}")
     print(f"External WebSocket: ws://{external_ip}:{args.port}")
@@ -1531,5 +1347,4 @@ if __name__ == '__main__':
     print(f"Preferred WebSocket address: ws://{external_ip}:{args.port}")
     print("============================================================\n")
     
-    # Start the server - make sure to listen on all interfaces
     socketio.run(app, host=args.host, port=args.port, debug=args.debug)
