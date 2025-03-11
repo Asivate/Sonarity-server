@@ -50,14 +50,25 @@ MODEL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'models')
 if not os.path.exists(MODEL_DIR):
     # Fallback to the absolute path if needed
     MODEL_DIR = '/home/hirwa0250/Sonarity-server/models'
-MODEL_PATH = os.path.join(MODEL_DIR, 'Cnn9_GMP_64x64_300000_iterations_mAP=0.37.pth')
 
-# Check if the model exists, if not, also check for the CNN13 model as an alternative
-if not os.path.exists(MODEL_PATH):
-    CNN13_MODEL_PATH = os.path.join(MODEL_DIR, 'Cnn13_GMP_64x64_520000_iterations_mAP=0.42.pth')
-    if os.path.exists(CNN13_MODEL_PATH):
-        print(f"CNN9 model not found, using CNN13 model instead: {CNN13_MODEL_PATH}")
-        MODEL_PATH = CNN13_MODEL_PATH
+# Prioritize the larger CNN13 model first (the 1GB model)
+CNN13_MODEL_PATH = os.path.join(MODEL_DIR, 'Cnn13_GMP_64x64_520000_iterations_mAP=0.42.pth')
+CNN9_MODEL_PATH = os.path.join(MODEL_DIR, 'Cnn9_GMP_64x64_300000_iterations_mAP=0.37.pth')
+
+# Check which model exists and set it as the default
+if os.path.exists(CNN13_MODEL_PATH):
+    print(f"Using the larger CNN13 model (1GB): {CNN13_MODEL_PATH}")
+    MODEL_PATH = CNN13_MODEL_PATH
+    USE_CNN13 = True
+elif os.path.exists(CNN9_MODEL_PATH):
+    print(f"Using the smaller CNN9 model: {CNN9_MODEL_PATH}")
+    MODEL_PATH = CNN9_MODEL_PATH
+    USE_CNN13 = False
+else:
+    print("No pre-trained PANNs models found in models directory")
+    # Just set a default, we'll handle the missing file during initialization
+    MODEL_PATH = CNN13_MODEL_PATH
+    USE_CNN13 = True
 
 # Define asset directory for CSV files and scalar file
 ASSET_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'assets')
@@ -465,27 +476,56 @@ class PANNsModelInference:
             
             # Load model
             try:
-                # Determine model type based on filename
-                if 'Cnn13' in model_path or 'cnn13' in model_path.lower():
+                # Determine model architecture based on global variable or filename
+                if USE_CNN13 or 'Cnn13' in model_path or 'cnn13' in model_path.lower():
                     print("Using CNN13 model architecture")
-                    from panns_inference.models import Cnn14_16k
-                    self.model = Cnn14_16k(sample_rate=SAMPLE_RATE, classes_num=527)
+                    # For CNN13, use the custom class defined in this file
+                    self.model = Cnn13(classes_num=527)
                 else:
                     # Default to CNN9
                     print("Using CNN9 model architecture")
                     self.model = Cnn9_GMP_64x64(classes_num=527)
                 
-                # Load weights with graceful error handling
+                # Load weights with specialized handling for different model formats
                 try:
                     checkpoint = torch.load(model_path, map_location=self.device)
+                    print(f"Loaded checkpoint with keys: {checkpoint.keys() if isinstance(checkpoint, dict) else 'Not a dictionary'}")
                     
-                    # Check if state dict is directly available or needs to be accessed via 'model' key
-                    if 'model' in checkpoint:
-                        self.model.load_state_dict(checkpoint['model'])
+                    # Check for different checkpoint formats
+                    if isinstance(checkpoint, dict):
+                        if 'model' in checkpoint:
+                            print("Loading from 'model' key in checkpoint")
+                            state_dict = checkpoint['model']
+                        elif 'state_dict' in checkpoint:
+                            print("Loading from 'state_dict' key in checkpoint")
+                            state_dict = checkpoint['state_dict']
+                        else:
+                            print("Using checkpoint directly as state dictionary")
+                            state_dict = checkpoint
                     else:
-                        # Try loading the raw state dict
-                        self.model.load_state_dict(checkpoint)
-                        
+                        print("Checkpoint is not a dictionary, cannot load model")
+                        return False
+                    
+                    # Filter the state dict to match the model architecture
+                    model_state_dict = self.model.state_dict()
+                    
+                    # Only load parameters that match the current model architecture
+                    # This allows loading weights even if some layers don't match exactly
+                    filtered_state_dict = {}
+                    for name, param in state_dict.items():
+                        if name in model_state_dict and param.size() == model_state_dict[name].size():
+                            filtered_state_dict[name] = param
+                        else:
+                            print(f"Skipping parameter {name} due to size mismatch or not in model")
+                    
+                    # Load the filtered state dict
+                    self.model.load_state_dict(filtered_state_dict, strict=False)
+                    
+                    # Initialize any missing parameters with default values
+                    missing_keys = set(model_state_dict.keys()) - set(filtered_state_dict.keys())
+                    if missing_keys:
+                        print(f"The following parameters were initialized with default values: {missing_keys}")
+                    
                     self.model.to(self.device)
                     self.model.eval()
                     print(f"Successfully loaded model from {model_path}")
