@@ -443,11 +443,8 @@ class PANNsModelInference:
                         alt_model_path = os.path.join(model_dir, potential_models[0])
                         print(f"Found alternative model: {alt_model_path}")
                         model_path = alt_model_path
-                    else:
-                        print(f"No alternative models found in {model_dir}")
-                        return False
                 else:
-                    print(f"Model directory {model_dir} does not exist")
+                    print(f"No alternative models found in {model_dir}")
                     return False
             
             # Load labels
@@ -486,7 +483,7 @@ class PANNsModelInference:
                         # Try loading the raw state dict
                         self.model.load_state_dict(checkpoint)
                         
-                    self.model.to(self.device)
+                self.model.to(self.device)
                     self.model.eval()
                     print(f"Successfully loaded model from {model_path}")
                     
@@ -506,23 +503,18 @@ class PANNsModelInference:
                     # Create thread lock for prediction
                     self.lock = threading.Lock()
                     
-                    self._initialized = True
+                self._initialized = True
                     print("PANNs model initialized successfully")
                     return True
                 
-                except Exception as e:
-                    print(f"Error loading model weights: {e}")
-                    print("Detailed error information:")
-                    traceback.print_exc()
-                    return False
-            
             except Exception as e:
-                print(f"Error loading model: {e}")
+                print(f"Error loading model weights: {e}")
+                print("Detailed error information:")
                 traceback.print_exc()
                 return False
             
         except Exception as e:
-            print(f"Error initializing PANNs model: {e}")
+            print(f"Error loading model: {e}")
             traceback.print_exc()
             return False
     
@@ -571,15 +563,15 @@ class PANNsModelInference:
             # Normalize with standardized values (optional - will also be done in the predict method)
             # log_mel_spec = (log_mel_spec - self.LOGMEL_MEANS.reshape(-1, 1)) / self.LOGMEL_STDDEVS.reshape(-1, 1)
         
-            # We need a larger spectrogram for the CNN to extract enough features
-            # PANNs model was trained on 64x500 spectrograms, but we have much smaller ones
-            # Ensure spectrogram is at least 64 frames wide (time dimension)
-            min_time_frames = 64
+        # We need a larger spectrogram for the CNN to extract enough features
+        # PANNs model was trained on 64x500 spectrograms, but we have much smaller ones
+        # Ensure spectrogram is at least 64 frames wide (time dimension)
+        min_time_frames = 64
             if log_mel_spec.shape[1] < min_time_frames:
-                # Calculate padding required
+            # Calculate padding required
                 pad_size = min_time_frames - log_mel_spec.shape[1]
                 print(f"Padding spectrogram time dimension from {log_mel_spec.shape[1]} to {min_time_frames}")
-                # Add padding to the time dimension
+            # Add padding to the time dimension
                 log_mel_spec = np.pad(log_mel_spec, ((0, 0), (0, pad_size)), mode='constant')
             
             # Return the log mel spectrogram
@@ -683,7 +675,7 @@ class PANNsModelInference:
                 selected_probs = [probs[indices[0]]]
             
             # Boost non-speech categories if requested
-            if boost_other_categories:
+                if boost_other_categories:
                 # This will be handled later in process_audio_with_panns
                 pass
             
@@ -941,4 +933,4 @@ def predict_with_panns(audio_data, top_k=5, threshold=0.2, map_to_homesounds_for
     if map_to_homesounds_format:
         return panns_inference.map_to_homesounds(results, threshold=threshold)
     
-    return results
+    return results 

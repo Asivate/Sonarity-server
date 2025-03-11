@@ -144,17 +144,17 @@ def get_ip_addresses():
             s.connect(('8.8.8.8', 80))
             primary_ip = s.getsockname()[0]
             if primary_ip != '127.0.0.1' and primary_ip != '0.0.0.0' and primary_ip != '34.16.101.179':
-                ip_list.append(primary_ip)
+            ip_list.append(primary_ip)
         except Exception:
             pass
         finally:
             s.close()
-        
+            
         # Get all IP addresses
         try:
-            for ip in socket.gethostbyname_ex(hostname)[2]:
+        for ip in socket.gethostbyname_ex(hostname)[2]:
                 if ip not in ip_list and ip != '127.0.0.1' and ip != '0.0.0.0':
-                    ip_list.append(ip)
+                ip_list.append(ip)
         except Exception:
             pass
     except Exception as e:
@@ -242,10 +242,10 @@ def load_models():
     
     # Load PANNs model if enabled
     if USE_PANNS_MODEL:
-        print("Loading PANNs model...")
+            print("Loading PANNs model...")
         panns_model.load_panns_model()
-        models["panns"] = True
-        print("PANNs model loaded successfully")
+                models["panns"] = True
+                print("PANNs model loaded successfully")
     
     # No need to load other models as we're focusing only on PANNs
 
@@ -307,7 +307,7 @@ def audio_samples(in_data, frame_count, time_info, status_flags):
     except Exception as e:
         print(f"Error in audio_samples: {e}")
         traceback.print_exc()
-    
+
     return (in_data, 0)
 
 @socketio.on('audio_feature_data')
@@ -354,7 +354,7 @@ def handle_source(json_data):
                 "db": None
             })
             return
-            
+        
         # Get other parameters
         db = json_data.get('db')
         timestamp = json_data.get('time', json_data.get('timestamp', time.time()))
@@ -367,8 +367,8 @@ def handle_source(json_data):
                 "timestamp": timestamp,
                 "db": db
             })
-            return
-        
+                            return
+                    
         # Convert audio features to numpy array if needed
         if not isinstance(audio_features, np.ndarray):
             try:
@@ -397,8 +397,8 @@ def handle_source(json_data):
                 "timestamp": timestamp,
                 "db": db
             })
-            return
-        
+                                    return
+                        
         # Check if sound is loud enough to process
         if db < DBLEVEL_THRES:
             print(f"Sound too quiet (dB: {db}, threshold: {DBLEVEL_THRES})")
@@ -477,7 +477,7 @@ def handle_audio(data):
         # Log incoming audio data
         if audio_field:
             log_audio_receive(audio_field, audio_length, timestamp, db_level if db_level else 0)
-        else:
+            else:
             log_status("Received audio data in unknown format", "warning")
         
         # Handle different client formats - some clients might send data in different fields
@@ -533,7 +533,7 @@ def handle_audio(data):
                     else:
                         print(f"Unsupported audio format: {audio_format}, defaulting to float32")
                         audio_data = np.frombuffer(audio_bytes, dtype=np.float32)
-                except Exception as e:
+    except Exception as e:
                     print(f"Error decoding audio data: {e}. Treating as a list of values.")
                     try:
                         audio_data = np.array(audio_data_raw, dtype=np.float32)
@@ -559,8 +559,8 @@ def handle_audio(data):
                 log_status(f"Processed audio: {audio_length} samples", "success")
             else:
                 log_status("Warning: Audio data has 0 samples after conversion", "warning")
-                return
-            
+        return
+    
             # Calculate dB level if not provided
             if db_level is None:
                 db_level = dbFS(audio_stats['rms'])
@@ -576,8 +576,8 @@ def handle_audio(data):
                 }
                 log_prediction(result, db_level)
                 socketio.emit('prediction', result, broadcast=True)
-                return
-            
+        return
+    
             # Check if sound is loud enough to process
             if db_level < DBLEVEL_THRES:
                 log_status(f"Sound too quiet (dB: {db_level:.2f}, threshold: {DBLEVEL_THRES})", "info")
@@ -605,10 +605,10 @@ def handle_audio(data):
             import traceback
             traceback.print_exc()
     
-    except Exception as e:
+            except Exception as e:
         print(f"Error in handle_audio: {e}")
         import traceback
-        traceback.print_exc()
+                traceback.print_exc()
 
 # Helper function to process with PANNs model
 def process_with_panns_model(np_wav, record_time=None, db=None):
@@ -643,13 +643,13 @@ def process_with_panns_model(np_wav, record_time=None, db=None):
         
         # Start processing with enhanced audio
         with panns_lock:
-            panns_results = panns_model.predict_with_panns(
-                np_wav, 
-                top_k=10, 
-                threshold=PREDICTION_THRES,
-                map_to_homesounds_format=True,
-                boost_other_categories=True
-            )
+        panns_results = panns_model.predict_with_panns(
+            np_wav, 
+            top_k=10, 
+            threshold=PREDICTION_THRES,
+            map_to_homesounds_format=True,
+            boost_other_categories=True
+        )
         
         # Check if we got any results
         if panns_results and "output" in panns_results and len(panns_results["output"]) > 0:
@@ -1068,7 +1068,7 @@ def handle_connect(auth=None):
         auth: Authentication data (optional, handled by Flask-SocketIO)
     """
     try:
-        print(f"Client connected: {request.sid}")
+    print(f"Client connected: {request.sid}")
         
         # Get available IP addresses to show in logs
         ip_addresses = get_ip_addresses()
@@ -1220,7 +1220,7 @@ def predict(message):
     }
     
     print(f"Processing prediction request: sample_rate={sample_rate}, timestamp={timestamp}")
-    
+
     # Apply pre-emphasis and noise gate to improve audio quality
     if len(audio_data) > 1:  # Don't apply pre-emphasis to very short audio
         audio_data = pre_emphasis(audio_data)
@@ -1242,7 +1242,7 @@ def predict(message):
     
     # Emit the results
     emit('panns_prediction', prediction_results)
-    cleanup_memory()
+            cleanup_memory()
 
 @socketio.on('predict_raw')
 def predict_raw(message):
@@ -1478,7 +1478,7 @@ def boost_other_categories(predictions, boost_factor=1.2):
         return boosted
     else:
         # Return unchanged if format not recognized
-        return predictions
+    return predictions
 
 @app.route('/api/labels')
 def get_labels():
@@ -1519,10 +1519,10 @@ if __name__ == '__main__':
     print("\n============================================================")
     print("SONARITY SERVER STARTED")
     print("============================================================")
-    print("Server is available at:")
-    for i, ip in enumerate(ip_addresses):
-        print(f"{i+1}. http://{ip}:{args.port}")
-        print(f"   WebSocket: ws://{ip}:{args.port}")
+        print("Server is available at:")
+        for i, ip in enumerate(ip_addresses):
+            print(f"{i+1}. http://{ip}:{args.port}")
+            print(f"   WebSocket: ws://{ip}:{args.port}")
     
     print(f"\nExternal access: http://{external_ip}:{args.port}")
     print(f"External WebSocket: ws://{external_ip}:{args.port}")
