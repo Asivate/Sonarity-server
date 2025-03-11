@@ -23,6 +23,7 @@ import threading
 import queue
 from transformers import pipeline
 import logging
+import json
 
 # Import our PANNs model implementation
 import panns_model
@@ -114,14 +115,13 @@ panns_lock = Lock()  # Lock for thread-safe PANNS model access
 prediction_lock = Lock()  # Lock for thread-safe prediction history access
 
 # Constants for audio processing
-RATE = 16000  # Audio sample rate
-CHUNK = 1024  # Audio chunk size
+RATE = 32000  # Sample rate (32kHz matches original implementation)
+CHUNK = 1024  # Buffer size for audio chunks (matches original REC_BUFFER_SIZE)
 CHANNELS = 1  # Mono audio
-SILENCE_THRES = 15  # Silence threshold in dB (changed from 30 to 15 to be less strict)
-DBLEVEL_THRES = 30  # Decibel level threshold (changed from 60 to 30)
-PREDICTION_THRES = 0.10  # Prediction confidence threshold (changed from 0.15 to 0.10)
-SPEECH_DETECTION_THRES = 0.3  # Threshold for speech detection
-MINIMUM_AUDIO_LENGTH = 16000  # Minimum audio length (1 second at 16kHz)
+SILENCE_THRES = 20  # dB threshold for silence detection (lower is more sensitive)
+DBLEVEL_THRES = 50  # dB threshold for detecting quiet sounds
+PREDICTION_THRES = 0.10  # Confidence threshold for predictions
+MINIMUM_AUDIO_LENGTH = 32000  # Minimum audio length (1 second at 32kHz)
 SENTIMENT_THRES = 0.5  # Sentiment analysis threshold
 
 # Global variables
@@ -192,38 +192,43 @@ def load_models():
 
 def audio_samples(in_data, frame_count, time_info, status_flags):
     """Process audio samples for real-time audio streaming."""
-    np_wav = np.frombuffer(in_data, dtype=np.int16).astype(np.float32) / 32768.0
-    rms = np.sqrt(np.mean(np_wav**2))
-    db = dbFS(rms)
-
-    # Check for silence
-    if -db < SILENCE_THRES:
-        print(f"Silence detected (db: {db})")
-        return (in_data, 0)
-    
-    # Check if sound is too quiet
-    if -db > DBLEVEL_THRES:
-        print(f"Sound too quiet (db: {db})")
-        return (in_data, 0)
-    
-    # Process with PANNs model
     try:
-        # Use our process_audio_with_panns function
+        # Convert from bytes to float [-1.0, 1.0]
+        np_wav = np.frombuffer(in_data, dtype=np.int16).astype(np.float32) / 32768.0
+        
+        # Calculate RMS level and dB
+        rms = np.sqrt(np.mean(np_wav**2))
+        db = dbFS(rms)
+        
+        # Debug audio stats
+        print(f"Audio stats: samples={len(np_wav)}, rms={rms:.6f}, db={db:.2f}")
+
+        # Check for silence
+        if -db < SILENCE_THRES:
+            print(f"Silence detected (db: {db})")
+            return (in_data, 0)
+        
+        # Check if sound is loud enough to process
+        if -db > DBLEVEL_THRES:
+            print(f"Sound too quiet (db: {db})")
+            return (in_data, 0)
+        
+        # Process with PANNs model
         prediction_results = process_audio_with_panns(
             audio_data=np_wav,
             db_level=db,
             config={
                 'silence_threshold': SILENCE_THRES,
                 'db_level_threshold': DBLEVEL_THRES,
-                'prediction_threshold': PREDICTION_THRES * 0.8,  # Lower threshold for better detection
-                'boost_factor': 1.5  # Increase boost factor
+                'prediction_threshold': PREDICTION_THRES * 0.8,
+                'boost_factor': 1.5
             }
         )
         
         # Log the top prediction
         if prediction_results and "predictions" in prediction_results and len(prediction_results["predictions"]) > 0:
             top_pred = prediction_results["predictions"][0]
-            print(f"Top prediction: {top_pred['label']} ({top_pred['score']:.4f})")
+            print(f"DETECTED: {top_pred['label']} ({top_pred['score']:.4f}, db: {db:.2f})")
             
             # Emit the sound prediction to all clients
             socketio.emit('audio_label', {
@@ -233,138 +238,185 @@ def audio_samples(in_data, frame_count, time_info, status_flags):
                 'timestamp': time.time()
             })
     except Exception as e:
-        print(f"Error processing audio with PANNs model: {e}")
+        print(f"Error in audio_samples: {e}")
         traceback.print_exc()
     
     return (in_data, 0)
 
 @socketio.on('audio_feature_data')
 def handle_source(json_data):
-    """Handle audio features sent from client."""
+    """
+    Handle audio feature data from clients
+    This expects JSON with:
+    - features: audio features
+    - db: audio level in dB (optional)
+    - time: timestamp (optional)
+    """
     try:
-        data = json_data.get('data', [])
-        db = json_data.get('db')
-        record_time = json_data.get('record_time', None)
+        # Parse JSON if it's a string
+        if isinstance(json_data, str):
+            try:
+                json_data = json.loads(json_data)
+            except json.JSONDecodeError:
+                print("Invalid JSON in audio_feature_data")
+                return
         
-        if -db < SILENCE_THRES:
-            socketio.emit('audio_label', {
-                'label': 'Silence',
-                'accuracy': '0.95',
-                'db': str(db),
-                'timestamp': record_time
+        # Get audio features, DB level, and timestamp
+        audio_features = json_data.get('features')
+        db = json_data.get('db')
+        timestamp = json_data.get('time', time.time())
+        
+        # Validate audio features
+        if not audio_features or len(audio_features) == 0:
+            print("Empty audio features received")
+            socketio.emit('prediction', {
+                "predictions": [{"label": "No Audio", "score": 1.0}],
+                "timestamp": timestamp,
+                "db": db
             })
-            print(f"EMITTING: Silence (db: {db})")
             return
         
-        if -db < DBLEVEL_THRES:
-            # Process with PANNs model
-            # Convert data to numpy array
-            np_data = np.array(data, dtype=np.float32)
-            print(f"Processing with PANNs model, data shape: {np_data.shape}")
-            
-            # Use our process_audio_with_panns function
-            prediction_results = process_audio_with_panns(
-                audio_data=np_data,
-                timestamp=record_time,
-                db_level=db,
-                config={
-                    'silence_threshold': SILENCE_THRES,
-                    'db_level_threshold': DBLEVEL_THRES,
-                    'prediction_threshold': PREDICTION_THRES * 0.8,
-                    'boost_factor': 1.5
-                }
-            )
-            
-            # Emit the results
-            socketio.emit('panns_prediction', prediction_results)
-        else:
-            socketio.emit('audio_label', {
-                'label': 'Too Quiet',
-                'accuracy': '0.9',
-                'db': str(db),
-                'timestamp': record_time
+        # Convert audio features to numpy array if needed
+        if not isinstance(audio_features, np.ndarray):
+            audio_features = np.array(audio_features, dtype=np.float32)
+        
+        # Calculate dB level if not provided
+        if db is None:
+            rms = np.sqrt(np.mean(np.square(audio_features)))
+            db = dbFS(rms)
+            print(f"Calculated dB level: {db}")
+        
+        # Check for silence based on dB level
+        if -db < SILENCE_THRES:
+            print(f"Sound is silence (dB: {db}, threshold: {SILENCE_THRES})")
+            socketio.emit('prediction', {
+                "predictions": [{"label": "Silence", "score": 0.95}],
+                "timestamp": timestamp,
+                "db": db
             })
-            print(f"EMITTING: Too Quiet (db: {db})")
+            return
+        
+        # Check if sound is too quiet but not silence
+        if -db > DBLEVEL_THRES:
+            print(f"Sound too quiet (dB: {db}, threshold: {DBLEVEL_THRES})")
+            socketio.emit('prediction', {
+                "predictions": [{"label": "Too Quiet", "score": 0.9}],
+                "timestamp": timestamp,
+                "db": db
+            })
+            return
+        
+        # Process with PANNs model
+        print(f"Processing audio features (db: {db})")
+        
+        # Process the audio with PANNs model
+        result = process_audio_with_panns(
+            audio_data=audio_features, 
+            timestamp=timestamp, 
+            db_level=db,
+            config={
+                'silence_threshold': SILENCE_THRES,
+                'db_level_threshold': DBLEVEL_THRES,
+                'prediction_threshold': PREDICTION_THRES,
+                'boost_factor': 1.2
+            }
+        )
+        
+        # Emit results to all clients
+        print(f"Emitting prediction: {result}")
+        socketio.emit('prediction', result, broadcast=True)
+        
     except Exception as e:
         print(f"Error in handle_source: {e}")
+        import traceback
         traceback.print_exc()
-        socketio.emit('audio_label', {
-            'label': 'Error Processing Audio',
-            'accuracy': '0.0',
-            'db': str(db) if 'db' in locals() else '-100'
+        
+        # Emit error to client
+        socketio.emit('prediction', {
+            "predictions": [{"label": "Error", "score": 1.0}],
+            "timestamp": time.time(),
+            "db": None
         })
 
 @socketio.on('audio_data')
 def handle_audio(data):
+    """
+    Handle audio data sent from the client
+    This handler expects a JSON object with:
+    - audio: base64 encoded audio data
+    - format: audio format (e.g., 'float32', 'int16')
+    - db: optional pre-calculated dB level
+    - timestamp: optional timestamp
+    """
     try:
-        record_time = None
-        if isinstance(data, dict):
-            if 'data' in data:
-                audio_values = data['data']
-                values = np.array(audio_values, dtype=np.int32)
-                if 'record_time' in data:
-                    record_time = data['record_time']
-                    print(f"Received record_time: {record_time}")
-            else:
-                raise ValueError("Missing 'data' field in the received JSON object")
+        # Extract data from JSON
+        if isinstance(data, str):
+            # Parse JSON if it's a string
+            try:
+                json_data = json.loads(data)
+            except json.JSONDecodeError:
+                print("Invalid JSON data received")
+                return
         else:
-            values = np.array([int(x) for x in data.split(',') if x.strip()])
-        np_wav = values.astype(np.float32) / 32768.0
-    except Exception as e:
-        print(f"Error processing audio data: {str(e)}")
-        try:
-            if isinstance(data, dict):
-                print(f"Data keys: {data.keys()}")
-                if 'data' in data:
-                    print(f"Data array length: {len(data['data'])}")
-                    if len(data['data']) > 0:
-                        print(f"First few values: {data['data'][:10]}")
-            else:
-                print(f"Data type: {type(data)}")
-                if isinstance(data, str):
-                    print(f"Data sample: {data[:100]}...")
-        except Exception as debug_err:
-            print(f"Error in debug print: {str(debug_err)}")
-        socketio.emit('audio_label', {
-            'label': 'Error Processing Audio',
-            'accuracy': '0.0',
-            'db': '-100'
-        })
-        return
-    
-    print('Successfully convert to NP rep', np_wav)
-    rms = np.sqrt(np.mean(np_wav**2))
-    db = dbFS(rms)
-    print('Db...', db)
-    
-    if -db < SILENCE_THRES:
-        socketio.emit('audio_label', {
-            'label': 'Silence',
-            'accuracy': '0.95',
-            'db': str(db)
-        })
-        print(f"EMITTING: Silence (db: {db})")
-        return
-    
-    if -db > DBLEVEL_THRES:
-        # Process with PANNs model using our consistent function
-        prediction_results = process_audio_with_panns(
-            audio_data=np_wav,
-            timestamp=record_time,
-            db_level=db,
-            config=None  # Use default config
-        )
+            json_data = data
         
-        # Emit the results
-        socketio.emit('panns_prediction', prediction_results)
-        cleanup_memory()
-    else:
-        print(f"Sound level ({-db} dB) below threshold ({DBLEVEL_THRES} dB)")
-        socketio.emit('audio_label', {
-            'label': 'Too Quiet',
-            'accuracy': '0.9',
-            'db': str(db)
-        })
+        # Validate the required fields
+        if 'audio' not in json_data:
+            print("Missing audio data in request")
+            return
+        
+        # Get audio format and convert base64 to numpy array
+        audio_format = json_data.get('format', 'float32')
+        base64_audio = json_data['audio']
+        
+        # Decode base64 audio data
+        try:
+            audio_bytes = base64.b64decode(base64_audio)
+            
+            # Convert bytes to numpy array based on format
+            if audio_format == 'float32':
+                audio_data = np.frombuffer(audio_bytes, dtype=np.float32)
+            elif audio_format == 'int16':
+                # Convert int16 to float32 normalized between -1 and 1
+                audio_data = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+            else:
+                print(f"Unsupported audio format: {audio_format}")
+                return
+            
+            # Log audio statistics
+            audio_length = len(audio_data)
+            audio_min = np.min(audio_data)
+            audio_max = np.max(audio_data)
+            audio_mean = np.mean(audio_data)
+            audio_rms = np.sqrt(np.mean(np.square(audio_data)))
+            
+            print(f"Received audio: {audio_length} samples, min={audio_min:.4f}, max={audio_max:.4f}, mean={audio_mean:.4f}, rms={audio_rms:.4f}")
+            
+            # Calculate dB level if not provided
+            db_level = json_data.get('db')
+            if db_level is None:
+                db_level = dbFS(audio_rms)
+                print(f"Calculated dB level: {db_level}")
+            
+            # Get timestamp or use current time
+            timestamp = json_data.get('timestamp', time.time())
+            
+            # Process audio with PANNs model
+            result = process_audio_with_panns(audio_data, timestamp, db_level)
+            
+            # Emit the prediction results back to the client
+            print(f"Emitting prediction: {result}")
+            socketio.emit('prediction', result, broadcast=True)
+            
+        except Exception as e:
+            print(f"Error processing audio data: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    except Exception as e:
+        print(f"Error in handle_audio: {e}")
+        import traceback
+        traceback.print_exc()
 
 # Helper function to process with PANNs model
 def process_with_panns_model(np_wav, record_time=None, db=None):
@@ -476,42 +528,74 @@ def process_with_panns_model(np_wav, record_time=None, db=None):
 # New dedicated function for advanced PANNS processing
 def process_audio_with_panns(audio_data, timestamp=None, db_level=None, config=None):
     """
-    Process audio with PANNS model using configurable thresholds.
-    
+    Process audio data with PANNs model for sound recognition
     Args:
-        audio_data: Audio waveform data as numpy array
-        timestamp: Timestamp for the recording
-        db_level: Loudness in decibels (optional)
-        config: Dictionary with configuration parameters:
-            - silence_threshold: Threshold for detecting silence (default: use SILENCE_THRES)
-            - db_level_threshold: Threshold for audio loudness (default: use DBLEVEL_THRES)
-            - prediction_threshold: Confidence threshold for predictions (default: use PREDICTION_THRES)
-            - boost_factor: Boost factor for non-speech/music categories (default: 1.2)
-            
+        audio_data: numpy array of audio samples (16000Hz mono)
+        timestamp: optional timestamp for the prediction
+        db_level: optional pre-calculated dB level
+        config: optional configuration parameters
     Returns:
-        Dictionary with prediction results
+        dict with predictions, timestamp, and dB level
     """
-    # Set default config if not provided
+    # Default configuration
     if config is None:
-        config = {}
+        config = {
+            'silence_threshold': SILENCE_THRES,
+            'db_level_threshold': DBLEVEL_THRES,
+            'prediction_threshold': PREDICTION_THRES,
+            'boost_factor': 1.2  # For non-speech categories
+        }
     
-    # Extract configuration with defaults
+    # Extract config values
     silence_threshold = config.get('silence_threshold', SILENCE_THRES)
     db_level_threshold = config.get('db_level_threshold', DBLEVEL_THRES)
     prediction_threshold = config.get('prediction_threshold', PREDICTION_THRES)
-    boost_factor = config.get('boost_factor', 1.2)
     
-    # Check if timestamp is provided
+    # Ensure audio is the correct data type
+    if not isinstance(audio_data, np.ndarray):
+        try:
+            audio_data = np.array(audio_data, dtype=np.float32)
+        except Exception as e:
+            print(f"Error converting audio_data to numpy array: {e}")
+            return {
+                "predictions": [{"label": "Invalid Audio Format", "score": 1.0}],
+                "timestamp": timestamp,
+                "db": db_level
+            }
+    
+    # Ensure audio is float32 type
+    if audio_data.dtype != np.float32:
+        audio_data = audio_data.astype(np.float32)
+    
+    # Log detailed audio statistics
+    audio_stats = {
+        "length": len(audio_data),
+        "min": np.min(audio_data),
+        "max": np.max(audio_data),
+        "mean": np.mean(audio_data),
+        "std": np.std(audio_data),
+        "rms": np.sqrt(np.mean(np.square(audio_data))),
+        "has_nan": np.any(np.isnan(audio_data)),
+        "has_inf": np.any(np.isinf(audio_data))
+    }
+    print(f"Audio stats: {audio_stats}")
+    
+    # Handle non-finite values
+    if audio_stats["has_nan"] or audio_stats["has_inf"]:
+        print("Audio contains NaN or Inf values, fixing...")
+        audio_data = np.nan_to_num(audio_data)
+    
+    # Fix timestamp if not provided
     if timestamp is None:
         timestamp = time.time()
     
-    # Check audio and calculate dB if not provided
-    if db_level is None and audio_data is not None:
-        rms = np.sqrt(np.mean(audio_data**2))
+    # Calculate dB level if not provided
+    if db_level is None:
+        rms = np.sqrt(np.mean(np.square(audio_data)))
         db_level = dbFS(rms)
         print(f"Calculated dB level: {db_level}")
 
-    # Check for silence
+    # Check for silence - if the sound is very quiet, it's silence
     if db_level is not None and -db_level < silence_threshold:
         print(f"Sound is silence (dB: {db_level}, threshold: {silence_threshold})")
         return {
@@ -520,7 +604,7 @@ def process_audio_with_panns(audio_data, timestamp=None, db_level=None, config=N
             "db": db_level
         }
     
-    # Check if sound is loud enough to process
+    # Check if sound is too quiet but not silence
     if db_level is not None and -db_level > db_level_threshold:
         print(f"Sound too quiet (dB: {db_level}, threshold: {db_level_threshold})")
         return {
@@ -536,74 +620,94 @@ def process_audio_with_panns(audio_data, timestamp=None, db_level=None, config=N
     try:
         print(f"Processing audio with PANNS model (threshold: {prediction_threshold})...")
         
+        # Ensure audio is not empty or all zeros
+        if audio_data is None or len(audio_data) == 0 or np.all(audio_data == 0):
+            print("Audio data is empty or all zeros, cannot process")
+            return {
+                "predictions": [{"label": "No Audio", "score": 1.0}],
+                "timestamp": timestamp,
+                "db": db_level
+            }
+        
         # Ensure audio is normalized properly
         if np.abs(audio_data).max() > 1.0:
             audio_data = audio_data / np.abs(audio_data).max()
-            print("Audio normalized to range [-1.0, 1.0]")
-        elif np.abs(audio_data).max() < 0.1:
-            # Amplify very quiet sounds
-            gain_factor = 0.5 / np.abs(audio_data).max() if np.abs(audio_data).max() > 0 else 1.0
-            audio_data = audio_data * min(gain_factor, 10.0)  # Limit gain to 10x
-            print(f"Audio amplified by {min(gain_factor, 10.0):.2f}x due to low amplitude")
         
-        # Apply noise gate to reduce background noise
-        audio_data = noise_gate(audio_data, threshold=0.003, attack=0.01, release=0.1, rate=RATE)
+        # Apply pre-emphasis and noise gating for better detection
+        audio_data = pre_emphasis(audio_data, emphasis=0.97)
+        audio_data = noise_gate(audio_data, threshold=0.005)
         
-        # Ensure audio is long enough for processing
-        if len(audio_data) < MINIMUM_AUDIO_LENGTH:
-            original_length = len(audio_data)
-            print(f"Audio too short ({original_length} samples). Padding to {MINIMUM_AUDIO_LENGTH} samples.")
+        # Boost very quiet sounds to make them more detectable
+        if np.abs(audio_data).max() < 0.1:
+            print("Boosting quiet audio...")
+            boost_factor = 0.3 / np.abs(audio_data).max()
+            boost_factor = min(boost_factor, 10.0)  # Cap the boost
+            audio_data = audio_data * boost_factor
+        
+        # Check audio length and pad if necessary - based on original implementation with 32kHz
+        audio_length = len(audio_data)
+        if audio_length < 32000:  # Less than 1 second at 32kHz
+            print(f"Audio too short ({audio_length} samples), padding...")
             
-            # For very short audio, use a different padding strategy based on length
-            if original_length < MINIMUM_AUDIO_LENGTH / 4:
-                # For very short sounds, repeat them
-                repeats = int(np.ceil(MINIMUM_AUDIO_LENGTH / original_length))
-                padded = np.tile(audio_data, repeats)[:MINIMUM_AUDIO_LENGTH]
-                print(f"Using repetition padding ({repeats} repeats)")
+            # Handle very short sounds by repeating them - as in the original code
+            if audio_length < 16000:  # Less than 0.5 seconds
+                print("Very short audio - repeating pattern")
+                repeat_factor = int(np.ceil(32000 / audio_length))
+                audio_data = np.tile(audio_data, repeat_factor)[:32000]
             else:
-                # For longer sounds, use zero padding
-                padded = np.zeros(MINIMUM_AUDIO_LENGTH)
-                padded[:original_length] = audio_data
-                print("Using zero padding")
-                
-            audio_data = padded
+                # Pad with zeros
+                padding = np.zeros(32000 - audio_length)
+                audio_data = np.concatenate([audio_data, padding])
         
-        # Get PANNS predictions
-        with panns_lock:
-            results = panns_model.predict_with_panns(
+        # Check for non-finite values which would cause prediction failure
+        if not np.all(np.isfinite(audio_data)):
+            print("Audio contains non-finite values, fixing...")
+            audio_data = np.nan_to_num(audio_data)
+        
+        # Make prediction with PANNs model
+        print("Running PANNs prediction...")
+        
+        # Following the original implementation's approach for prediction
+        with panns_model_lock:  # Thread safety
+            predictions = predict_with_panns(
                 audio_data, 
-                top_k=15,  # Increased from 10 to 15 to get more potential matches
-                threshold=prediction_threshold * 0.8,  # Lower threshold to catch more sounds
-                map_to_homesounds_format=True,
-                boost_other_categories=True  # Always boost non-speech categories
+                top_k=15,  # Get more potential matches
+                threshold=prediction_threshold, 
+                boost_other_categories=True
             )
         
-        # Format results for client
-        if results and "output" in results and len(results["output"]) > 0:
-            # Display predictions
-            print("===== PANNS MODEL PREDICTIONS =====")
-            for pred in results["output"][:5]:
-                print(f"  {pred['label']}: {pred['score']:.6f}")
-            
-            # Return formatted results
+        if not predictions:
+            print("No predictions returned from PANNs model")
             return {
-                "predictions": results["output"],
+                "predictions": [{"label": "Unknown", "score": 1.0}],
                 "timestamp": timestamp,
                 "db": db_level
             }
-        else:
-            print("No valid predictions from PANNS model")
-            return {
-                "predictions": [{"label": "Unrecognized Sound", "score": 0.2}],
-                "timestamp": timestamp,
-                "db": db_level
-            }
-            
+        
+        # Format predictions for output
+        formatted_predictions = []
+        for label, score in predictions:
+            formatted_predictions.append({
+                "label": label,
+                "score": float(score)
+            })
+        
+        print(f"PANNs predictions: {formatted_predictions}")
+        
+        result = {
+            "predictions": formatted_predictions,
+            "timestamp": timestamp,
+            "db": db_level
+        }
+        
+        return result
+    
     except Exception as e:
-        print(f"Error processing audio with PANNS model: {e}")
+        print(f"Error processing audio with PANNs: {e}")
+        import traceback
         traceback.print_exc()
         return {
-            "predictions": [{"label": "Error", "score": 0.1}],
+            "predictions": [{"label": "Error", "score": 1.0}],
             "timestamp": timestamp,
             "db": db_level
         }
@@ -789,8 +893,39 @@ def test_disconnect():
 
 @socketio.on('connect')
 def handle_connect():
-    print(f"Client connected: {request.sid}")
-    emit('server_status', {'status': 'connected', 'message': 'Connected to SoundWatch server'})
+    """
+    Handle client connection
+    This is called when a client connects to the server
+    We should send the client any necessary initialization data
+    """
+    try:
+        print(f"Client connected: {request.sid}")
+        
+        # Get available IP addresses to show in logs
+        ip_addresses = get_ip_addresses()
+        ip_str = ", ".join(ip_addresses)
+        print(f"Server running on: {ip_str}")
+        
+        # Send server status to the client
+        status_data = {
+            "server_status": "connected",
+            "model_loaded": panns_model is not None,
+            "server_time": time.time(),
+            "server_ip": ip_addresses[0] if ip_addresses else "unknown"
+        }
+        
+        # Get available labels
+        if panns_model is not None:
+            status_data["available_labels"] = panns_model.get_available_labels()
+        
+        # Emit the status to the connected client
+        socketio.emit('server_status', status_data, room=request.sid)
+        print(f"Sent server status to client: {request.sid}")
+        
+    except Exception as e:
+        print(f"Error in handle_connect: {e}")
+        import traceback
+        traceback.print_exc()
 
 @socketio.on('disconnect')
 def handle_disconnect():

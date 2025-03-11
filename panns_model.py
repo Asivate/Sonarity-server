@@ -23,6 +23,8 @@ from scipy.interpolate import interp1d
 import time
 import gc
 import psutil
+import threading
+import json
 
 # CPU optimization - set number of threads to use all cores
 # Get the number of CPU cores and set torch to use all of them
@@ -42,14 +44,11 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(level
 logger = logging.getLogger(__name__)
 
 # Global variables
-MODEL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'models')
-MODEL_PATH = os.path.join(MODEL_DIR, 'Cnn13_GMP_64x64_520000_iterations_mAP=0.42.pth')
+MODEL_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'models')
+MODEL_PATH = os.path.join(MODEL_DIR, 'Cnn9_GMP_64x64_300000_iterations_mAP=0.37.pth')
 SCALAR_FN = os.path.join(MODEL_DIR, 'scalar.h5')
 CSV_FNAME = os.path.join(MODEL_DIR, 'validate_meta.csv')
-
-# Alternative paths for labels file (fallback locations)
-CSV_FILES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'csv files')
-CSV_FILES_FNAME = os.path.join(CSV_FILES_DIR, 'validate_meta.csv')
+CSV_FILES_FNAME = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'csv_files', 'validate_meta.csv')
 
 # Default audio parameters
 SAMPLE_RATE = 32000
@@ -103,14 +102,15 @@ class ConvBlock(nn.Module):
         
     def forward(self, input, pool_size=(2, 2), pool_type='avg'):
         x = input
-        x = F.relu_(self.bn1(self.conv1(x)))
-        x = F.relu_(self.bn2(self.conv2(x)))
+        x = torch.relu_(self.bn1(self.conv1(x)))
+        x = torch.relu_(self.bn2(self.conv2(x)))
         if pool_type == 'max':
-            x = F.max_pool2d(x, kernel_size=pool_size)
+            x = torch.nn.functional.max_pool2d(x, kernel_size=pool_size)
         elif pool_type == 'avg':
-            x = F.avg_pool2d(x, kernel_size=pool_size)
+            x = torch.nn.functional.avg_pool2d(x, kernel_size=pool_size)
         else:
             raise Exception('Incorrect argument!')
+        
         return x
 
 # CNN13 model architecture for better accuracy (mAP=0.423)
@@ -329,6 +329,35 @@ class PANNsModelInference:
     - Label management
     """
     
+    # Constants from the original implementation
+    LOGMEL_MEANS = np.float32([
+        -14.050895, -13.107869, -13.1390915, -13.255364, -13.917199,
+        -14.087848, -14.855916, -15.266642,  -15.884036, -16.491768,
+        -17.067415, -17.717588, -18.075916,  -18.84405,  -19.233824,
+        -19.954256, -20.180824, -20.695705,  -21.031914, -21.33451,
+        -21.758745, -21.917028, -22.283598,  -22.737364, -22.920172,
+        -23.23437,  -23.66509,  -23.965239,  -24.580393, -24.67597,
+        -25.194445, -25.55243,  -25.825129,  -26.309643, -26.703104,
+        -27.28697,  -27.839067, -28.228388,  -28.746237, -29.236507,
+        -29.937782, -30.755503, -31.674414,  -32.853516, -33.959763,
+        -34.88149,  -35.81145,  -36.72929,   -37.746593, -39.000496,
+        -40.069244, -40.947514, -41.79767,   -42.81981,  -43.8541,
+        -44.895683, -46.086784, -47.255924,  -48.520145, -50.726765,
+        -52.932228, -54.713795, -56.69902,   -59.078354])
+    
+    LOGMEL_STDDEVS = np.float32([
+        22.680508, 22.13264,  21.857653, 21.656355, 21.565693, 21.525793,
+        21.450764, 21.377304, 21.338581, 21.3247,   21.289171, 21.221565,
+        21.175856, 21.049534, 20.954664, 20.891844, 20.849905, 20.809206,
+        20.71186,  20.726717, 20.72358,  20.655743, 20.650305, 20.579372,
+        20.583157, 20.604849, 20.5452,   20.561695, 20.448244, 20.46753,
+        20.433657, 20.412025, 20.47265,  20.456116, 20.487215, 20.387547,
+        20.331848, 20.310328, 20.292257, 20.292326, 20.241796, 20.19396,
+        20.23783,  20.564362, 21.075726, 21.332186, 21.508852, 21.644777,
+        21.727905, 22.251642, 22.65972,  22.800117, 22.783764, 22.78581,
+        22.86413,  22.948992, 23.12939,  23.180748, 23.03542,  23.131435,
+        23.454556, 23.39839,  23.254364, 23.198978])
+    
     def __init__(self):
         """Initialize the PANNs model inference engine."""
         self.model = None
@@ -336,405 +365,271 @@ class PANNsModelInference:
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.scalar = None
         self._initialized = False
+        self.sample_rate = SAMPLE_RATE
         
     def initialize(self):
-        """Load model, labels, and scalar."""
-        if self._initialized:
-            return
-            
+        """Initialize the PANNs model, loading weights and preparing for inference."""
         try:
-            # Ensure directories exist
-            os.makedirs(MODEL_DIR, exist_ok=True)
+            if self._initialized:
+                print("PANNs model already initialized")
+                return True
+            
+            print("Initializing PANNs model...")
+            
+            # Set up the mel filterbank for 32kHz audio (matching original implementation)
+            self.melW = librosa.filters.mel(
+                sr=32000,  # Sample rate - matching original implementation
+                n_fft=1024,  # FFT window size
+                n_mels=64,  # Number of mel bins
+                fmin=50,    # Min frequency
+                fmax=14000  # Max frequency
+            )
+            
+            # Load the model if available
+            model_path = MODEL_PATH
+            if not os.path.exists(model_path):
+                print(f"Model checkpoint not found at {model_path}")
+                return False
+            
+            # Load labels
+            if os.path.exists(CSV_FNAME):
+                try:
+                    df = pd.read_csv(CSV_FNAME)
+                    self.labels = df['display_name'].values
+                    print(f"Loaded {len(self.labels)} labels")
+                except Exception as e:
+                    print(f"Error loading labels: {e}")
+                    self.labels = [f"label_{i}" for i in range(527)]  # Default labels
+            else:
+                print(f"Labels file not found at {CSV_FNAME}")
+                self.labels = [f"label_{i}" for i in range(527)]  # Default labels
             
             # Load model
-            logger.info(f"Loading PANNs CNN13 model from {MODEL_PATH}")
-            
-            # Check if model exists, if not provide instructions
-            if not os.path.exists(MODEL_PATH):
-                logger.error(f"PANNs model file not found at {MODEL_PATH}")
-                logger.info("Please download the model using:")
-                logger.info("python download_panns_model.py")
-                return False
-                
-            # Load class labels
-            if not os.path.exists(CSV_FNAME):
-                logger.error(f"Labels file not found at {CSV_FNAME}")
-                # Check alternative locations
-                if os.path.exists(CSV_FILES_FNAME):
-                    logger.info(f"Found labels file in 'csv files' directory. Copying to models directory...")
-                    import shutil
-                    shutil.copy(CSV_FILES_FNAME, CSV_FNAME)
-                    logger.info(f"Copied labels file from {CSV_FILES_FNAME} to {CSV_FNAME}")
-                else:
-                    # Use reference labels from the demo repository
-                    ref_csv = os.path.join(os.path.dirname(os.path.abspath(__file__)), 
-                                          'General-Purpose-Sound-Recognition-Demo',
-                                          'General-Purpose-Sound-Recognition-Demo-2019',
-                                          'models',
-                                          'validate_meta.csv')
-                    if os.path.exists(ref_csv):
-                        logger.info(f"Copying reference labels from {ref_csv}")
-                        import shutil
-                        shutil.copy(ref_csv, CSV_FNAME)
-                    else:
-                        logger.error("Cannot find reference labels. Please run 'python download_panns_model.py' to set up the required files.")
-                        return False
-            
-            # Load scalar
-            if not os.path.exists(SCALAR_FN):
-                logger.error(f"Scalar file not found at {SCALAR_FN}")
-                logger.error("Please run 'python download_panns_model.py' to set up the required files.")
-                return False
-            
-            # Load audio labels
-            logger.info(f"Loading class labels from {CSV_FNAME}")
-            self.labels = pd.read_csv(CSV_FNAME)
-            
-            # Load scalar
-            logger.info(f"Loading scalar from {SCALAR_FN}")
-            with h5py.File(SCALAR_FN, 'r') as f:
-                self.scalar = {'mean': f['mean'][()], 'std': f['std'][()]}
-            
-            # Initialize model
-            classes_num = len(self.labels)
-            logger.info(f"Creating model with {classes_num} classes")
-            self.model = Cnn13(classes_num)
-            
-            # Load trained weights
-            checkpoint = torch.load(MODEL_PATH, map_location=self.device)
-
-            # Debug checkpoint structure for troubleshooting
-            logger.info(f"Checkpoint keys: {checkpoint.keys()}")
-            model_state_dict_keys = checkpoint['model'].keys() if 'model' in checkpoint else []
-            logger.info(f"Found {len(model_state_dict_keys)} layers in checkpoint")
-            if len(model_state_dict_keys) > 0:
-                logger.info(f"First few layer names: {list(model_state_dict_keys)[:5]}")
-
             try:
-                # Load model weights with more flexible option
-                if 'model' in checkpoint:
-                    self.model.load_state_dict(checkpoint['model'], strict=False)
-                    logger.info("Loaded weights from 'model' key with strict=False")
+                # Create model
+                self.model = Cnn9_GMP_64x64(classes_num=527)
+                
+                # Load weights
+                checkpoint = torch.load(model_path, map_location=self.device)
+                self.model.load_state_dict(checkpoint['model'])
+                self.model.to(self.device)
+                self.model.eval()
+                print(f"Loaded model from {model_path}")
+                
+                # Acquire mean and std for normalization
+                scalar_path = os.path.join(os.path.dirname(model_path), 'scalar.h5')
+                if os.path.exists(scalar_path):
+                    with h5py.File(scalar_path, 'r') as hf:
+                        self.mean = hf['mean'][:]
+                        self.std = hf['std'][:]
+                        print(f"Loaded normalization values from {scalar_path}")
                 else:
-                    # Try directly loading from checkpoint
-                    self.model.load_state_dict(checkpoint, strict=False)
-                    logger.info("Loaded weights directly from checkpoint with strict=False")
+                    # Use default values from the original implementation
+                    self.mean = self.LOGMEL_MEANS
+                    self.std = self.LOGMEL_STDDEVS
+                    print("Using default normalization values")
+                
+                # Create thread lock for prediction
+                self.lock = threading.Lock()
+                
+                self._initialized = True
+                print("PANNs model initialized successfully")
+                return True
+                
             except Exception as e:
-                logger.error(f"Error loading model weights: {str(e)}")
-                logger.error("Continuing with uninitialized model - predictions may be random")
-                # We'll continue even with error, to let the system still work
-            
-            # Set model to evaluation mode and move to appropriate device
-            self.model.eval()
-            self.model.to(self.device)
-            
-            logger.info("PANNs model loaded successfully")
-            self._initialized = True
-            return True
+                print(f"Error loading model: {e}")
+                import traceback
+                traceback.print_exc()
+                return False
             
         except Exception as e:
-            logger.error(f"Error initializing PANNs model: {str(e)}")
+            print(f"Error initializing PANNs model: {e}")
             import traceback
             traceback.print_exc()
             return False
     
     def logmel_extract(self, audio):
-        """Extract log-mel features from audio waveform.
+        """
+        Extract log mel spectrogram features from audio data.
         
         Args:
-            audio: Audio waveform as numpy array
+            audio: Audio data as numpy array
             
         Returns:
-            Log-mel features as torch tensor with shape [1, 1, 64, time]
+            Log mel spectrogram as tensor of shape (batch_size, time_steps, freq_bins)
         """
-        # Ensure audio is mono and the right length for processing
-        if audio.ndim > 1:
-            audio = np.mean(audio, axis=1)
-        
-        # Ensure audio is at least 1 second long (32000 samples at 32kHz)
-        if len(audio) < SAMPLE_RATE:
-            logger.info(f"Audio too short: {len(audio)} samples. Padding to {SAMPLE_RATE} samples.")
-            padded_audio = np.zeros(SAMPLE_RATE)
-            padded_audio[:len(audio)] = audio
-            audio = padded_audio
-        
-        # Make sure we have enough samples for meaningful analysis (at least 1 second)
-        # If less than 1 second, repeat the audio until it's at least 1 second
-        if len(audio) < SAMPLE_RATE:
-            # Calculate how many times to repeat
-            repeat_count = math.ceil(SAMPLE_RATE / len(audio))
-            audio = np.tile(audio, repeat_count)[:SAMPLE_RATE]
-        
-        # Calculate spectrogram
-        stft = librosa.stft(
-            y=audio, 
-            n_fft=N_FFT, 
-            hop_length=HOP_LENGTH, 
-            win_length=N_FFT, 
-            window='hann', 
-            center=True
-        )
-        spectrogram = np.abs(stft)
-        
-        # Convert to mel spectrogram
-        mel_basis = librosa.filters.mel(
-            sr=SAMPLE_RATE, 
-            n_fft=N_FFT, 
-            n_mels=MEL_BINS, 
-            fmin=FMIN, 
-            fmax=FMAX
-        )
-        mel_spectrogram = np.dot(mel_basis, spectrogram)
-        
-        # Convert to log mel spectrogram
-        log_mel_spectrogram = librosa.power_to_db(mel_spectrogram, ref=1.0, amin=1e-10, top_db=None)
-        
-        # Normalize with pre-computed scalars
-        if self.scalar is not None:
-            mean = self.scalar['mean']
-            std = self.scalar['std']
-            
-            # Ensure mean and std are properly shaped for broadcasting
-            if mean.ndim == 1:
-                mean = mean.reshape(-1, 1)
-                std = std.reshape(-1, 1)
-                
-            # Apply normalization
-            log_mel_spectrogram = (log_mel_spectrogram - mean) / std
-        
-        # We need a larger spectrogram for the CNN to extract enough features
-        # PANNs model was trained on 64x500 spectrograms, but we have much smaller ones
-        # Ensure spectrogram is at least 64 frames wide (time dimension)
-        min_time_frames = 64
-        if log_mel_spectrogram.shape[1] < min_time_frames:
-            # Calculate padding required
-            pad_size = min_time_frames - log_mel_spectrogram.shape[1]
-            logger.info(f"Padding spectrogram time dimension from {log_mel_spectrogram.shape[1]} to {min_time_frames}")
-            # Add padding to the time dimension
-            log_mel_spectrogram = np.pad(
-                log_mel_spectrogram, 
-                ((0, 0), (0, pad_size)), 
-                mode='constant'
-            )
-        
-        # Convert to tensor with shape [batch_size, channels, height, width]
-        # For CNNs, this means [batch_size, channels, mel_bins, time]
-        log_mel_tensor = torch.tensor(
-            log_mel_spectrogram[np.newaxis, np.newaxis, :, :],
-            dtype=torch.float32
-        )
-        
-        logger.info(f"Log-mel tensor shape: {log_mel_tensor.shape}")
-        return log_mel_tensor
-    
-    def predict(self, audio, top_k=5, threshold=0.2, boost_other_categories=True):
-        """Predict sound classes from audio waveform.
-        
-        Args:
-            audio: Audio waveform as numpy array
-            top_k: Number of top predictions to return
-            threshold: Confidence threshold for predictions
-            boost_other_categories: Whether to boost non-speech/music categories
-            
-        Returns:
-            List of (label, confidence) tuples for top K predictions
-        """
-        if not self._initialized:
-            if not self.initialize():
-                return []
-        
-        # Start timing
-        start_time = time.time()
-        
         try:
-            # Log input audio properties
-            logger.info(f"Processing audio for prediction: shape={audio.shape}, min={audio.min():.4f}, max={audio.max():.4f}")
+            # Audio should already be normalized to [-1, 1] and sampled at 32kHz (matching original)
+            # Parameters based on original implementation
+            n_fft = 1024  # FFT window size
+            hop_length = 500  # Hop size - matches original implementation
+            n_mels = 64  # Number of mel bins
+            fmin = 50  # Minimum frequency
+            fmax = 14000  # Maximum frequency
             
-            # Make sure audio is in float32 format
-            if audio.dtype != np.float32:
-                audio = audio.astype(np.float32)
+            # Compute STFT
+            stft = librosa.stft(
+                y=audio,
+                n_fft=n_fft,
+                hop_length=hop_length,
+                window='hann',
+                center=True,
+                pad_mode='reflect'
+            )
             
-            # Normalize to [-1, 1] if needed
-            max_abs = np.max(np.abs(audio))
-            if max_abs > 1.0:
-                logger.info(f"Normalizing audio with max value {max_abs:.4f}")
-                audio = audio / max_abs
+            # Convert to power spectrogram
+            power_spec = np.abs(stft) ** 2
             
-            # Apply pre-emphasis filter to improve higher frequency detection
-            audio = np.append(audio[0], audio[1:] - 0.97 * audio[:-1])
+            # Apply mel filterbank
+            mel_spec = np.dot(self.melW, power_spec)
             
-            # Make sure audio is long enough - PANNs model expects at least a few frames of audio
-            min_length = 32000  # 1 second at 32kHz
-            if len(audio) < min_length:
-                logger.info(f"Audio too short ({len(audio)} samples). Padding to {min_length} samples.")
-                # Smart padding: if audio is very short, repeat it to fill the buffer
-                if len(audio) < min_length / 4:
-                    # For very short sounds, repeat them to fill the buffer
-                    repeats = int(np.ceil(min_length / len(audio)))
-                    padded_audio = np.tile(audio, repeats)[:min_length]
-                    logger.info(f"Using repetition padding for very short audio ({repeats} repeats)")
-                else:
-                    # For longer sounds, use zero padding
-                    padded_audio = np.zeros(min_length, dtype=np.float32)  # Pre-allocate with correct dtype
-                    padded_audio[:len(audio)] = audio
-                audio = padded_audio
+            # Convert to log scale
+            log_mel_spec = librosa.power_to_db(mel_spec, ref=1.0, amin=1e-10, top_db=None)
             
-            # Extract log-mel features - this will enforce correct shape for model
-            feature_extraction_start = time.time()
-            log_mel = self.logmel_extract(audio)
-            feature_extraction_time = time.time() - feature_extraction_start
-            logger.info(f"Feature extraction took {feature_extraction_time:.3f}s")
+            # Ensure proper shape (time, freq) - transpose if needed
+            if log_mel_spec.shape[0] != n_mels:
+                log_mel_spec = log_mel_spec.T
             
-            # Move tensor to the correct device
-            log_mel = log_mel.to(self.device)
+            # Normalize with standardized values (optional - will also be done in the predict method)
+            # log_mel_spec = (log_mel_spec - self.LOGMEL_MEANS.reshape(-1, 1)) / self.LOGMEL_STDDEVS.reshape(-1, 1)
             
-            # Run model inference with error catching and retries
-            logger.info("Running model inference...")
-            inference_start = time.time()
+            # We need a larger spectrogram for the CNN to extract enough features
+            # PANNs model was trained on 64x500 spectrograms, but we have much smaller ones
+            # Ensure spectrogram is at least 64 frames wide (time dimension)
+            min_time_frames = 64
+            if log_mel_spec.shape[1] < min_time_frames:
+                # Calculate padding required
+                pad_size = min_time_frames - log_mel_spec.shape[1]
+                print(f"Padding spectrogram time dimension from {log_mel_spec.shape[1]} to {min_time_frames}")
+                # Add padding to the time dimension
+                log_mel_spec = np.pad(log_mel_spec, ((0, 0), (0, pad_size)), mode='constant')
             
-            # Use PyTorch's inference mode which is more efficient than no_grad
-            # for inference-only workloads
-            try:
-                with torch.inference_mode():
-                    # Try normal prediction
-                    prediction = self.model(log_mel)
-                    
-                    # Convert predictions to numpy array
-                    if isinstance(prediction, torch.Tensor):
-                        prediction = prediction.detach().cpu().numpy()
-                    
-                    # Process first sample if batched
-                    if len(prediction.shape) > 1:
-                        prediction = prediction[0]
-                    
-                inference_time = time.time() - inference_start
-                logger.info(f"Model inference took {inference_time:.3f}s")
-            except RuntimeError as e:
-                # Provide detailed diagnostic information
-                logger.error(f"RuntimeError in model prediction: {str(e)}")
-                
-                # Check if this is the matrix multiplication error
-                if "mat1 and mat2 shapes cannot be multiplied" in str(e):
-                    logger.error("Matrix multiplication error detected. This is likely due to tensor shape issues.")
-                    logger.error(f"Input log-mel shape: {log_mel.shape}")
-                    
-                    # Try with a larger padding and different approach
-                    try:
-                        logger.info("Attempting alternative prediction approach...")
-                        
-                        # Create a larger spectrogram by padding more aggressively
-                        if log_mel.shape[3] < 500:  # PANNs models often use 500 time frames
-                            padding_needed = 500 - log_mel.shape[3]
-                            logger.info(f"Adding extensive padding: {padding_needed} frames")
-                            padding = torch.zeros(
-                                log_mel.shape[0], log_mel.shape[1], log_mel.shape[2], 
-                                padding_needed, device=log_mel.device
-                            )
-                            log_mel_padded = torch.cat([log_mel, padding], dim=3)
-                            logger.info(f"New padded shape: {log_mel_padded.shape}")
-                            
-                            # Try prediction with heavily padded input
-                            with torch.inference_mode():
-                                inference_start = time.time()
-                                prediction = self.model(log_mel_padded)
-                                inference_time = time.time() - inference_start
-                                logger.info(f"Alternative inference took {inference_time:.3f}s")
-                                
-                                if isinstance(prediction, torch.Tensor):
-                                    prediction = prediction.detach().cpu().numpy()
-                                if len(prediction.shape) > 1:
-                                    prediction = prediction[0]
-                        else:
-                            # If already large enough, return empty results
-                            logger.error("Cannot fix the prediction, returning empty results")
-                            return []
-                    except Exception as retry_error:
-                        logger.error(f"Alternative prediction approach also failed: {str(retry_error)}")
-                        return []
-                else:
-                    # For other runtime errors, return empty results
-                    return []
-            except Exception as e:
-                # For any other exception, log and return empty results
-                logger.error(f"Error in model prediction: {str(e)}")
-                return []
+            # Return the log mel spectrogram
+            print(f"Extracted log mel spectrogram with shape {log_mel_spec.shape}")
+            return log_mel_spec
             
-            # Get top-k indices
-            try:
-                # Apply category boosting if enabled
-                if boost_other_categories:
-                    # Create a copy of the prediction array
-                    boosted_prediction = prediction.copy()
-                    
-                    # Find indices for speech and music
-                    speech_idx = -1
-                    music_idx = -1
-                    
-                    # Find the indices based on labels
-                    for idx, row in self.labels.iterrows():
-                        label_name = row['display_name'].lower()
-                        if 'speech' in label_name:
-                            speech_idx = idx
-                        elif 'music' in label_name:
-                            music_idx = idx
-                    
-                    # Apply boosting to all categories except speech and music
-                    boost_factor = 1.2  # 20% boost
-                    for idx in range(len(boosted_prediction)):
-                        if idx != speech_idx and idx != music_idx:
-                            boosted_prediction[idx] = min(1.0, boosted_prediction[idx] * boost_factor)
-                    
-                    logger.info(f"Applied category boosting (factor: {boost_factor}) to non-speech/music categories")
-                    top_indices = np.argsort(boosted_prediction)[::-1][:top_k]
-                    
-                    # Log the effect of boosting on top predictions
-                    orig_top_indices = np.argsort(prediction)[::-1][:top_k]
-                    if not np.array_equal(orig_top_indices, top_indices):
-                        logger.info("Category boosting changed top predictions order")
-                else:
-                    top_indices = np.argsort(prediction)[::-1][:top_k]
-            except Exception as e:
-                logger.error(f"Error getting top indices: {str(e)}")
-                return []
-            
-            # Format results
-            results = []
-            logger.info("Top predictions:")
-            for idx in top_indices:
-                try:
-                    confidence = float(prediction[idx])
-                    if confidence >= threshold:
-                        # Get label based on index
-                        if hasattr(self.labels, 'iloc'):
-                            label = self.labels.iloc[idx]['display_name']
-                        else:
-                            label = f"unknown_{idx}"
-                        
-                        results.append((label, confidence))
-                        logger.info(f"  {label}: {confidence:.6f}")
-                except Exception as e:
-                    logger.error(f"Error processing prediction for index {idx}: {str(e)}")
-            
-            # Calculate and log total prediction time
-            total_time = time.time() - start_time
-            logger.info(f"Total prediction time: {total_time:.3f}s")
-            
-            # Clean up memory
-            del log_mel
-            if 'log_mel_padded' in locals():
-                del log_mel_padded
-            torch.cuda.empty_cache() if torch.cuda.is_available() else gc.collect()
-            
-            return results
-                
         except Exception as e:
-            logger.error(f"Error in prediction: {str(e)}")
+            print(f"Error in logmel_extract: {e}")
+            import traceback
+            traceback.print_exc()
+            # Return an empty spectrogram in case of error
+            return np.zeros((64, 64), dtype=np.float32)
+    
+    def predict(self, audio_data, top_k=5, threshold=0.2, boost_other_categories=True):
+        """
+        Predict sound classes from audio data
+        Args:
+            audio_data: numpy array of audio samples (32000 samples/sec)
+            top_k: number of top predictions to return
+            threshold: minimum confidence threshold for predictions
+            boost_other_categories: whether to boost non-speech categories
+        Returns:
+            list of (label, score) tuples
+        """
+        try:
+            # Log audio statistics for debugging
+            audio_mean = np.mean(audio_data)
+            audio_std = np.std(audio_data)
+            audio_min = np.min(audio_data)
+            audio_max = np.max(audio_data)
+            audio_abs_max = np.max(np.abs(audio_data))
+            
+            print(f"Audio stats - Mean: {audio_mean:.6f}, Std: {audio_std:.6f}, Min: {audio_min:.6f}, Max: {audio_max:.6f}, Abs Max: {audio_abs_max:.6f}")
+            
+            # Check for valid audio data
+            if audio_data is None or len(audio_data) == 0:
+                print("Empty audio data received")
+                return []
+            
+            # Check for non-finite values
+            if not np.all(np.isfinite(audio_data)):
+                print("Audio contains non-finite values, fixing...")
+                audio_data = np.nan_to_num(audio_data)
+            
+            # Normalize audio if needed
+            if np.max(np.abs(audio_data)) > 1.0:
+                print("Normalizing audio...")
+                audio_data = audio_data / np.max(np.abs(audio_data))
+            
+            # Make sure audio is long enough (at least 1 second at 32kHz = 32000 samples)
+            original_length = len(audio_data)
+            if original_length < 32000:
+                print(f"Audio too short ({original_length} samples), padding to 32000 samples")
+                # If it's very short, repeat the audio to reach minimum length
+                if original_length < 16000:
+                    # Repeat the audio multiple times to reach 32000 samples
+                    repeat_count = int(np.ceil(32000 / original_length))
+                    audio_data = np.tile(audio_data, repeat_count)[:32000]
+                else:
+                    # Pad with zeros to reach 32000 samples
+                    padding = np.zeros(32000 - original_length)
+                    audio_data = np.concatenate([audio_data, padding])
+            
+            # Extract log mel spectrogram features
+            x = self.logmel_extract(audio_data)
+            
+            # Shape check and reshape if needed
+            if x.shape[0] != 128 or x.shape[1] != 64:
+                print(f"Unusual spectrogram shape: {x.shape}, expecting (128, 64)")
+                if len(x) > 128:
+                    x = x[:128, :]
+                # Reshape if needed - we need (batch_size, time_steps, freq_bins)
+            
+            # Normalize with mean and std values (essential for correct predictions)
+            x = (x - self.mean) / self.std
+            
+            # Convert to PyTorch tensor and reshape for model input
+            x = torch.tensor(x, dtype=torch.float32).unsqueeze(0)  # Add batch dimension
+
+            # Thread safety - don't allow multiple predictions at once
+            with self.lock:
+                # Run inference
+                with torch.no_grad():
+                    self.model.eval()
+                    prediction = self.model(x)
+                
+                # Get probabilities
+                probs = prediction.squeeze().cpu().numpy()
+            
+            # Get top-k indices and their probabilities
+            indices = np.argsort(probs)[-top_k:][::-1]
+            selected_probs = probs[indices]
+            
+            # Filter by threshold
+            mask = selected_probs >= threshold
+            indices = indices[mask]
+            selected_probs = selected_probs[mask]
+            
+            # If no predictions above threshold, return top prediction anyway
+            if len(indices) == 0 and len(probs) > 0:
+                indices = [np.argmax(probs)]
+                selected_probs = [probs[indices[0]]]
+            
+            # Boost non-speech categories if requested
+            if boost_other_categories:
+                # This will be handled later in process_audio_with_panns
+                pass
+            
+            # Convert to labels
+            result = []
+            for i, p in zip(indices, selected_probs):
+                if i < len(self.labels):
+                    label = self.labels[i]
+                    result.append((label, float(p)))
+                else:
+                    print(f"Warning: Index {i} out of bounds for labels list of length {len(self.labels)}")
+            
+            # Sort by probability in descending order
+            result.sort(key=lambda x: x[1], reverse=True)
+            print(f"PANNs prediction results: {result}")
+            
+            return result
+            
+        except Exception as e:
+            print(f"Error in PANNs prediction: {e}")
             import traceback
             traceback.print_exc()
             return []
-        finally:
-            # Final cleanup to free memory
-            gc.collect()
     
     def map_to_homesounds(self, results, threshold=0.2):
         """
@@ -871,6 +766,20 @@ class PANNsModelInference:
             }
         else:
             return {"output": []}
+
+    def get_available_labels(self):
+        """
+        Get the list of available labels for this model
+        Returns:
+            List of label strings
+        """
+        try:
+            if self.labels is not None:
+                return self.labels.tolist() if isinstance(self.labels, np.ndarray) else self.labels
+            return []
+        except Exception as e:
+            print(f"Error getting available labels: {e}")
+            return []
 
 # Create singleton instance
 panns_inference = PANNsModelInference()
