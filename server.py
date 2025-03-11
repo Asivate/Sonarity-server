@@ -539,7 +539,7 @@ def process_with_panns_model(np_wav, record_time=None, db=None):
                 np_wav, 
                 top_k=10, 
                 threshold=PREDICTION_THRES,
-                map_to_homesounds_format=True,
+                map_to_homesounds_format=False,
                 boost_other_categories=True
             )
         
@@ -721,7 +721,7 @@ def process_audio_with_panns(audio_data, db_level=None, timestamp=None, config=N
                     audio_data, 
                     top_k=10, 
                     threshold=prediction_threshold,
-                    map_to_homesounds_format=True, 
+                    map_to_homesounds_format=False, 
                     boost_other_categories=config.get('boost_factor', 1.2) > 1.0
                 )
                 
@@ -747,7 +747,8 @@ def emit_prediction(predictions, db_level, timestamp=None):
     Emit prediction results via socketio.
     
     Args:
-        predictions: List of prediction dictionaries with 'label' and 'score' keys
+        predictions: List of predictions, either as dictionaries with 'label' and 'score' keys,
+                    or as tuples of (label, score)
         db_level: Audio decibel level or None
         timestamp: Timestamp of the audio data or None
         
@@ -763,11 +764,21 @@ def emit_prediction(predictions, db_level, timestamp=None):
     
     # Format the predictions for emission
     formatted_predictions = []
+    
     for pred in predictions:
-        formatted_predictions.append({
-            'label': pred['label'],
-            'score': str(round(pred['score'], 4)) if isinstance(pred['score'], (int, float)) else pred['score']
-        })
+        if isinstance(pred, dict) and 'label' in pred and 'score' in pred:
+            # Handle dictionary format
+            formatted_predictions.append({
+                'label': pred['label'],
+                'score': str(round(pred['score'], 4)) if isinstance(pred['score'], (int, float)) else pred['score']
+            })
+        elif isinstance(pred, tuple) and len(pred) == 2:
+            # Handle tuple format (label, score) returned when map_to_homesounds_format=False
+            label, score = pred
+            formatted_predictions.append({
+                'label': label,
+                'score': str(round(score, 4)) if isinstance(score, (int, float)) else score
+            })
     
     # Emit the predictions to the client
     socketio.emit('audio_label', {
