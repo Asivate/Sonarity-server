@@ -111,7 +111,6 @@ socketio = SocketIO(app, async_mode=async_mode, cors_allowed_origins="*")
 thread = None
 thread_lock = Lock()
 panns_lock = Lock()  # Lock for thread-safe PANNS model access
-ast_lock = Lock()    # Placeholder lock (PANNs model is primary)
 prediction_lock = Lock()  # Lock for thread-safe prediction history access
 
 # Constants for audio processing
@@ -165,56 +164,31 @@ google_speech_processor = None  # Will be lazy-loaded when needed
 # Load models
 def load_models():
     """Load all required models for sound recognition and speech processing."""
-    global models, USE_AST_MODEL, USE_PANNS_MODEL
+    global models, USE_PANNS_MODEL
     
     # Initialize models dictionary
     models = {
-        "sentiment_analyzer": None,
-        "speech_processor": None,
-        "panns": None
+        "panns": None,
     }
     
-    # Check environment variables to determine which models to load
-    USE_AST_MODEL = os.environ.get('USE_AST_MODEL', '0') == '1'
+    # Check environment variables to determine which models to use
     USE_PANNS_MODEL = os.environ.get('USE_PANNS_MODEL', '1') == '1'
     
-    print(f"AST model {'enabled' if USE_AST_MODEL else 'disabled'} based on environment settings")
     print(f"PANNs model {'enabled' if USE_PANNS_MODEL else 'disabled'} based on environment settings")
     
-    # Default to PANNs if nothing is specified
-    if not USE_AST_MODEL and not USE_PANNS_MODEL:
-        print("No models enabled, defaulting to PANNs model")
+    # Ensure at least one model is enabled
+    if not USE_PANNS_MODEL:
+        print("Warning: No sound recognition models enabled. Enabling PANNs model by default.")
         USE_PANNS_MODEL = True
     
-    # Load speech models if needed
-    try:
-        if not USE_GOOGLE_SPEECH:
-            print("Loading Whisper model for speech recognition...")
-            speech_processor = SpeechToText()
-            print("Whisper model loaded successfully")
-            models["speech_processor"] = speech_processor
-    except Exception as e:
-        print(f"Error loading Whisper model: {e}")
-        traceback.print_exc()
-
     # Load PANNs model if enabled
     if USE_PANNS_MODEL:
-        print("PANNs model will be used as the primary sound recognition model")
-        try:
-            print("Loading PANNs model...")
-            panns_loaded = panns_model.load_panns_model()
-            if panns_loaded:
-                models["panns"] = True
-                print("PANNs model loaded successfully")
-            else:
-                print("Failed to load PANNs model")
-                raise Exception("Failed to load PANNs model. Please run 'python download_panns_model.py' to set up the required files.")
-        except Exception as e:
-            print(f"Error loading PANNs model: {e}")
-            traceback.print_exc()
-            raise Exception("Failed to load PANNs model. Please check the error messages above.")
+        print("Loading PANNs model...")
+        panns_model.initialize()
+        models["panns"] = True
+        print("PANNs model loaded successfully")
     
-    # No need to load AST or TensorFlow models as we're focusing only on PANNs
+    # No need to load other models as we're focusing only on PANNs
 
 def audio_samples(in_data, frame_count, time_info, status_flags):
     """Process audio samples for real-time audio streaming."""
@@ -269,159 +243,22 @@ def handle_source(json_data):
             return
         
         if -db > DBLEVEL_THRES:
-            # Process with the appropriate model based on what's enabled
-            if USE_PANNS_MODEL:
-                # Convert data to numpy array
-                np_data = np.array(data, dtype=np.float32)
-                print(f"Processing with PANNs model, data shape: {np_data.shape}")
-                
-                # Use our process_audio_with_panns function
-                prediction_results = process_audio_with_panns(
-                    audio_data=np_data,
-                    timestamp=record_time,
-                    db_level=db,
-                    config=None  # Use default config
-                )
-                
-                # Emit the results
-                socketio.emit('panns_prediction', prediction_results)
-                cleanup_memory()
-                
-            elif USE_AST_MODEL:
-                # Only try to use AST model if it's enabled
-                with ast_lock:
-                    np_data = np.array(data, dtype=np.float32)
-                    print(f"Processing with AST model, data shape: {np_data.shape}")
-                    ast_predictions = ast_model.predict_sound(
-                        np_data, 
-                        RATE, 
-                        models["ast"], 
-                        models["feature_extractor"],
-                        top_k=10
-                    )
-                    
-                    # Check for finger snap
-                    for pred in ast_predictions["raw_predictions"]:
-                        if "finger-snap" in pred["label"].lower() and pred["confidence"] > FINGER_SNAP_THRES:
-                            socketio.emit('audio_label', {
-                                'label': 'Finger Snap',
-                                'accuracy': str(pred["confidence"]),
-                                'db': str(db)
-                            })
-                            print(f"EMITTING: Finger Snap ({pred['confidence']:.6f})")
-                            cleanup_memory()
-                            return
-                    
-                    mapped_preds = ast_predictions["mapped_predictions"]
-                    
-                    if mapped_preds:
-                        top_pred = mapped_preds[0]
-                        top_label = top_pred["label"]
-                        top_confidence = top_pred["confidence"]
-                        
-                        for pred in mapped_preds:
-                            if pred["label"] == "finger-snap" and pred["confidence"] > FINGER_SNAP_THRES:
-                                top_label = pred["label"]
-                                top_confidence = pred["confidence"]
-                                break
-                        
-                        human_label = homesounds.to_human_labels.get(top_label, top_label)
-                        if top_label == "finger-snap" and human_label == "finger-snap":
-                            human_label = "Finger Snap"
-                        
-                        print(f"Top AST prediction: {human_label} ({top_confidence:.6f})")
-                        
-                        if human_label == "Speech" and top_confidence > SPEECH_SENTIMENT_THRES:
-                            print("Speech detected. Processing sentiment...")
-                            sentiment_result = process_speech_with_sentiment(np_data)
-                            
-                            if sentiment_result:
-                                if isinstance(sentiment_result, dict) and 'sentiment' in sentiment_result and isinstance(sentiment_result['sentiment'], dict) and 'category' in sentiment_result['sentiment']:
-                                    label = f"Speech {sentiment_result['sentiment']['category']}"
-                                    socketio.emit('audio_label', {
-                                        'label': label,
-                                        'accuracy': str(sentiment_result['sentiment']['confidence']),
-                                        'db': str(db),
-                                        'emoji': sentiment_result['sentiment']['emoji'],
-                                        'transcription': sentiment_result['text'],
-                                        'emotion': sentiment_result['sentiment']['original_emotion'],
-                                        'sentiment_score': str(sentiment_result['sentiment']['confidence'])
-                                    })
-                                    print(f"EMITTING SPEECH WITH SENTIMENT: {label} with emoji {sentiment_result['sentiment']['emoji']}")
-                                else:
-                                    label = "Speech"
-                                    if isinstance(sentiment_result, dict):
-                                        transcription = sentiment_result.get('transcription', sentiment_result.get('text', ''))
-                                        sentiment_value = sentiment_result.get('sentiment', 'neutral')
-                                        confidence = sentiment_result.get('confidence', 0.5)
-                                        
-                                        if isinstance(sentiment_value, dict):
-                                            category = sentiment_value.get('category', 'Neutral')
-                                            emoji = sentiment_value.get('emoji', '😐')
-                                            emotion = sentiment_value.get('original_emotion', 'neutral')
-                                            confidence = sentiment_value.get('confidence', confidence)
-                                        else:
-                                            category = 'Neutral' if isinstance(sentiment_value, str) else 'Neutral'
-                                            emoji = '😐'
-                                            emotion = 'neutral'
-                                        
-                                        label = f"Speech {category}"
-                                        socketio.emit('audio_label', {
-                                            'label': label,
-                                            'accuracy': str(confidence),
-                                            'db': str(db),
-                                            'emoji': emoji,
-                                            'transcription': transcription,
-                                            'emotion': emotion,
-                                            'sentiment_score': str(confidence)
-                                        })
-                                    else:
-                                        socketio.emit('audio_label', {
-                                            'label': 'Speech',
-                                            'accuracy': str(top_confidence),
-                                            'db': str(db)
-                                        })
-                                    print(f"EMITTING SPEECH: {label}")
-                            else:
-                                socketio.emit('audio_label', {
-                                    'label': 'Speech',
-                                    'accuracy': str(top_confidence),
-                                    'db': str(db)
-                                })
-                                print(f"EMITTING: Speech ({top_confidence:.6f})")
-                        else:
-                            socketio.emit('audio_label', {
-                                'label': human_label,
-                                'accuracy': str(top_confidence),
-                                'db': str(db)
-                            })
-                            print(f"EMITTING: {human_label} ({top_confidence:.6f})")
-                    else:
-                        socketio.emit('audio_label', {
-                            'label': 'Unrecognized Sound',
-                            'accuracy': '0.2',
-                            'db': str(db)
-                        })
-                        print("No valid predictions from AST model")
-                    
-                    cleanup_memory()
-            else:
-                # Fallback to TensorFlow model if available
-                if "tensorflow" in models:
-                    # Process with TensorFlow model
-                    # (Implementation would go here)
-                    socketio.emit('audio_label', {
-                        'label': 'Using TensorFlow Model',
-                        'accuracy': '0.5',
-                        'db': str(db)
-                    })
-                else:
-                    # No models available
-                    socketio.emit('audio_label', {
-                        'label': 'No Sound Recognition Models Available',
-                        'accuracy': '0.0',
-                        'db': str(db)
-                    })
+            # Process with PANNs model
+            # Convert data to numpy array
+            np_data = np.array(data, dtype=np.float32)
+            print(f"Processing with PANNs model, data shape: {np_data.shape}")
+            
+            # Use our process_audio_with_panns function
+            prediction_results = process_audio_with_panns(
+                audio_data=np_data,
+                timestamp=record_time,
+                db_level=db,
+                config=None  # Use default config
+            )
+            
+            # Emit the results
+            socketio.emit('panns_prediction', prediction_results)
+            cleanup_memory()
         else:
             print(f"Sound level ({-db} dB) below threshold ({DBLEVEL_THRES} dB)")
             socketio.emit('audio_label', {
@@ -491,8 +328,17 @@ def handle_audio(data):
         return
     
     if -db > DBLEVEL_THRES:
-        # Process with PANNS model
-        process_with_panns_model(np_wav, record_time, db)
+        # Process with PANNs model using our consistent function
+        prediction_results = process_audio_with_panns(
+            audio_data=np_wav,
+            timestamp=record_time,
+            db_level=db,
+            config=None  # Use default config
+        )
+        
+        # Emit the results
+        socketio.emit('panns_prediction', prediction_results)
+        cleanup_memory()
     else:
         print(f"Sound level ({-db} dB) below threshold ({DBLEVEL_THRES} dB)")
         socketio.emit('audio_label', {
@@ -843,21 +689,18 @@ def health_check():
     """API health check endpoint"""
     return jsonify({"status": "healthy", "timestamp": time.time()})
 
-@app.route('/status')
-def status():
-    """Return the status of the server, including model loading status."""
-    ip_addresses = get_ip_addresses()
+@app.route('/api/status')
+def api_status():
+    """Return the status of the server."""
     return jsonify({
-        'status': 'running',
-        'tensorflow_model_loaded': models["tensorflow"] is not None,
-        'ast_model_loaded': models["ast"] is not None,
-        'using_ast_model': USE_AST_MODEL,
-        'speech_recognition': 'Google Cloud' if USE_GOOGLE_SPEECH else 'Whisper',
-        'sentiment_analysis_enabled': True,
-        'ip_addresses': ip_addresses,
-        'uptime': time.time() - start_time,
-        'version': '1.2.0',
-        'active_clients': len(active_clients)
+        'status': 'ok',
+        'models': {
+            'panns_model_loaded': models["panns"] is not None,
+            'using_panns_model': USE_PANNS_MODEL,
+        },
+        'server_time': time.time(),
+        'uptime': time.time() - server_start_time,
+        'version': '1.0.0'
     })
 
 @app.route('/api/toggle-speech-recognition', methods=['POST'])
@@ -1146,11 +989,11 @@ def process_speech(audio_data, record_time=None, confidence=0.0):
                 from google_speech import GoogleSpeechToText
                 models["google_speech_processor"] = GoogleSpeechToText()
             
-            transcription_result = models["google_speech_processor"].transcribe(audio_data, sample_rate=RATE)
+            transcription_result = models["google_speech_processor"].transcribe(audio_data, RATE)
             logger.info(f"Used Google Cloud Speech for transcription")
         else:
             # Use Whisper
-            transcription_result = models["speech_processor"].transcribe(audio_data, sample_rate=RATE)
+            transcription_result = models["speech_processor"].transcribe(audio_data, RATE)
             logger.info(f"Used Whisper for transcription")
         
         # Check if we have a valid transcription
@@ -1263,31 +1106,50 @@ def noise_gate(audio_data, threshold=0.005, attack=0.01, release=0.1, rate=16000
 
 # Function to boost non-speech/music categories
 def boost_other_categories(predictions, boost_factor=1.2):
-    """Boost non-speech/music categories to counteract model bias"""
-    if isinstance(predictions, dict):
-        boosted = predictions.copy()
-        for label, score in boosted.items():
-            if label.lower() not in ['speech', 'music']:
-                boosted[label] = min(1.0, score * boost_factor)
+    """
+    Boost the confidence of non-speech, non-music categories to improve detection.
+    
+    Args:
+        predictions: Either a list of dictionaries with 'label' and 'score' keys,
+                    or a numpy array of scores
+        boost_factor: Factor to multiply non-speech/music scores by
+        
+    Returns:
+        Boosted predictions in the same format as input
+    """
+    if isinstance(predictions, list):
+        boosted = []
+        for pred in predictions:
+            new_pred = pred.copy()
+            label = pred['label'].lower()
+            # Don't boost speech or music
+            if 'speech' not in label and 'music' not in label:
+                new_pred['score'] = min(1.0, pred['score'] * boost_factor)
+            boosted.append(new_pred)
         return boosted
     elif isinstance(predictions, np.ndarray):
         boosted = predictions.copy()
-        # Find indices for speech and music if available
-        speech_idx = -1
-        music_idx = -1
-        if hasattr(ast_model, 'class_labels'):
-            for idx, label in enumerate(ast_model.class_labels):
-                if 'speech' in label.lower():
-                    speech_idx = idx
-                if 'music' in label.lower():
-                    music_idx = idx
-        
-        # Boost all except speech and music
-        for i in range(len(boosted)):
-            if i != speech_idx and i != music_idx:
-                boosted[i] = min(1.0, boosted[i] * boost_factor)
+        # For numpy arrays, we would need category indices
+        # Since we're focusing on PANNs model which uses the dictionary format,
+        # this part is not needed anymore
         return boosted
-    return predictions
+    else:
+        # Return unchanged if format not recognized
+        return predictions
+
+@app.route('/api/labels')
+def get_labels():
+    """Return the list of labels that the model can recognize."""
+    labels = []
+    
+    # Get labels from PANNs model
+    if USE_PANNS_MODEL and hasattr(panns_model, 'get_labels'):
+        labels = panns_model.get_labels()
+    
+    return jsonify({
+        'labels': labels,
+        'count': len(labels)
+    })
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Sonarity Audio Analysis Server')
