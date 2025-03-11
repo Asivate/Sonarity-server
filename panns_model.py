@@ -79,7 +79,7 @@ if not os.path.exists(ASSET_DIR):
 # Try to find scalar file in both directories
 SCALAR_FN = os.path.join(ASSET_DIR, 'scalar.h5')
 if not os.path.exists(SCALAR_FN):
-    SCALAR_FN = os.path.join(MODEL_DIR, 'scalar.h5')
+SCALAR_FN = os.path.join(MODEL_DIR, 'scalar.h5')
 
 # CSV files for label mapping
 CSV_FNAME = os.path.join(ASSET_DIR, 'audioset_labels.csv')
@@ -419,7 +419,7 @@ class PANNsModelInference:
     def initialize(self):
         """Initialize the PANNs model, loading weights and preparing for inference."""
         try:
-            if self._initialized:
+        if self._initialized:
                 print("PANNs model already initialized")
                 return True
             
@@ -499,13 +499,13 @@ class PANNsModelInference:
                         elif 'state_dict' in checkpoint:
                             print("Loading from 'state_dict' key in checkpoint")
                             state_dict = checkpoint['state_dict']
-                        else:
+                else:
                             print("Using checkpoint directly as state dictionary")
                             state_dict = checkpoint
                     else:
                         print("Checkpoint is not a dictionary, cannot load model")
                         return False
-                    
+            
                     # Filter the state dict to match the model architecture
                     model_state_dict = self.model.state_dict()
                     
@@ -537,7 +537,7 @@ class PANNsModelInference:
                             self.mean = hf['mean'][:]
                             self.std = hf['std'][:]
                             print(f"Loaded normalization values from {scalar_path}")
-                    else:
+                else:
                         # Use default values from the original implementation
                         self.mean = self.LOGMEL_MEANS
                         self.std = self.LOGMEL_STDDEVS
@@ -546,11 +546,11 @@ class PANNsModelInference:
                     # Create thread lock for prediction
                     self.lock = threading.Lock()
                     
-                    self._initialized = True
+            self._initialized = True
                     print("PANNs model initialized successfully")
-                    return True
-                
-                except Exception as e:
+            return True
+            
+        except Exception as e:
                     print(f"Error loading model weights: {e}")
                     print("Detailed error information:")
                     traceback.print_exc()
@@ -586,11 +586,11 @@ class PANNsModelInference:
             fmax = 14000  # Maximum frequency
             
             # Compute STFT
-            stft = librosa.stft(
-                y=audio, 
+        stft = librosa.stft(
+            y=audio, 
                 n_fft=n_fft,
                 hop_length=hop_length,
-                window='hann', 
+            window='hann', 
                 center=True,
                 pad_mode='reflect'
             )
@@ -611,15 +611,15 @@ class PANNsModelInference:
             # Normalize with standardized values (optional - will also be done in the predict method)
             # log_mel_spec = (log_mel_spec - self.LOGMEL_MEANS.reshape(-1, 1)) / self.LOGMEL_STDDEVS.reshape(-1, 1)
         
-            # We need a larger spectrogram for the CNN to extract enough features
-            # PANNs model was trained on 64x500 spectrograms, but we have much smaller ones
-            # Ensure spectrogram is at least 64 frames wide (time dimension)
-            min_time_frames = 64
+        # We need a larger spectrogram for the CNN to extract enough features
+        # PANNs model was trained on 64x500 spectrograms, but we have much smaller ones
+        # Ensure spectrogram is at least 64 frames wide (time dimension)
+        min_time_frames = 64
             if log_mel_spec.shape[1] < min_time_frames:
-                # Calculate padding required
+            # Calculate padding required
                 pad_size = min_time_frames - log_mel_spec.shape[1]
                 print(f"Padding spectrogram time dimension from {log_mel_spec.shape[1]} to {min_time_frames}")
-                # Add padding to the time dimension
+            # Add padding to the time dimension
                 log_mel_spec = np.pad(log_mel_spec, ((0, 0), (0, pad_size)), mode='constant')
             
             # Return the log mel spectrogram
@@ -723,7 +723,7 @@ class PANNsModelInference:
                 selected_probs = [probs[indices[0]]]
             
             # Boost non-speech categories if requested
-            if boost_other_categories:
+                if boost_other_categories:
                 # This will be handled later in process_audio_with_panns
                 pass
             
@@ -989,7 +989,7 @@ def predict_with_panns(audio_data, top_k=5, threshold=0.2, map_to_homesounds_for
         
         # Call the predict method with detailed error handling
         try:
-            results = panns_inference.predict(audio_data, top_k=top_k, threshold=threshold, boost_other_categories=boost_other_categories)
+    results = panns_inference.predict(audio_data, top_k=top_k, threshold=threshold, boost_other_categories=boost_other_categories)
             print(f"DEBUG: PANNs raw prediction results: {results}")
         except Exception as e:
             print(f"ERROR in panns_inference.predict: {e}")
@@ -998,7 +998,7 @@ def predict_with_panns(audio_data, top_k=5, threshold=0.2, map_to_homesounds_for
             return [{"label": "Prediction Error", "score": 1.0}]
         
         # Map results to homesounds format if requested
-        if map_to_homesounds_format:
+    if map_to_homesounds_format:
             try:
                 mapped_results = panns_inference.map_to_homesounds(results, threshold=threshold)
                 print(f"DEBUG: Mapped to homesounds format: {mapped_results}")
@@ -1009,8 +1009,8 @@ def predict_with_panns(audio_data, top_k=5, threshold=0.2, map_to_homesounds_for
                 traceback.print_exc()
                 # Fall back to returning raw results
                 return [{"label": result[0], "score": float(result[1])} for result in results] if results else [{"label": "Mapping Error", "score": 1.0}]
-        
-        return results
+    
+    return results 
     except Exception as e:
         print(f"ERROR in predict_with_panns: {e}")
         import traceback
