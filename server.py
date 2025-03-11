@@ -780,12 +780,25 @@ def emit_prediction(predictions, db_level, timestamp=None):
                 'score': str(round(score, 4)) if isinstance(score, (int, float)) else score
             })
     
-    # Emit the predictions to the client
-    socketio.emit('audio_label', {
+    # Create message with both formats for compatibility
+    message = {
         'predictions': formatted_predictions,
         'db': str(db_level),
         'timestamp': timestamp
-    })
+    }
+    
+    # Add backward compatibility for clients expecting single prediction
+    if formatted_predictions:
+        # Use the first prediction (highest confidence) for backward compatibility
+        message['label'] = formatted_predictions[0]['label']
+        message['accuracy'] = formatted_predictions[0]['score']
+    else:
+        # No predictions available, provide default values
+        message['label'] = "No sound detected"
+        message['accuracy'] = "0.0"
+    
+    # Emit the predictions to the client
+    socketio.emit('audio_label', message)
 
 recent_audio_buffer = []
 MAX_BUFFER_SIZE = 5
