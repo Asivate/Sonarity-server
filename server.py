@@ -717,7 +717,7 @@ def process_audio_with_panns(audio_data, db_level=None, timestamp=None, config=N
         
         try:
             with panns_model_lock:
-                predictions = predict_with_panns(
+                predictions = panns_model.predict_with_panns(
                     audio_data, 
                     top_k=10, 
                     threshold=prediction_threshold,
