@@ -387,17 +387,21 @@ def handle_audio(data):
     """
     Handle audio data sent from the client
     This handler expects a JSON object with:
-    - audio: base64 encoded audio data
+    - audio: base64 encoded audio data or list of float/int values
     - format: audio format (e.g., 'float32', 'int16')
     - db: optional pre-calculated dB level
     - timestamp: optional timestamp
     """
     try:
-        # Log complete received data for debugging (without large audio data)
+        # Log received data for debugging (without large audio data)
         debug_data = data.copy() if isinstance(data, dict) else data
-        if isinstance(debug_data, dict) and 'audio' in debug_data:
-            audio_length = len(debug_data['audio']) if debug_data['audio'] else 0
-            debug_data['audio'] = f"[base64 audio data, length: {audio_length}]"
+        if isinstance(debug_data, dict):
+            if 'audio' in debug_data:
+                audio_length = len(debug_data['audio']) if debug_data['audio'] else 0
+                debug_data['audio'] = f"[audio data, length: {audio_length}]"
+            elif 'data' in debug_data:
+                audio_length = len(debug_data['data']) if debug_data['data'] else 0
+                debug_data['data'] = f"[audio data, length: {audio_length}]"
         print(f"Received audio data: {debug_data}")
         
         # Extract data from JSON
@@ -415,13 +419,16 @@ def handle_audio(data):
         # Handle different client formats - some clients might send data in different fields
         # Check for 'audio' field
         if 'audio' in json_data:
-            audio_base64 = json_data['audio']
+            audio_data_raw = json_data['audio']
+            field_name = 'audio'
         # Check for alternative fields that might contain audio data
         elif 'audioData' in json_data:
-            audio_base64 = json_data['audioData']
+            audio_data_raw = json_data['audioData']
+            field_name = 'audioData'
             print("Using 'audioData' field instead of 'audio'")
         elif 'data' in json_data:
-            audio_base64 = json_data['data']
+            audio_data_raw = json_data['data']
+            field_name = 'data'
             print("Using 'data' field instead of 'audio'")
         else:
             print("Missing audio data in request - no recognized audio field found")
@@ -429,7 +436,7 @@ def handle_audio(data):
             return
         
         # Validate audio data
-        if not audio_base64:
+        if not audio_data_raw:
             print("Empty audio data received")
             return
             
@@ -438,20 +445,41 @@ def handle_audio(data):
         db_level = json_data.get('db')
         timestamp = json_data.get('timestamp', time.time())
         
-        # Decode base64 audio data
+        # Process audio data based on its type
         try:
-            audio_bytes = base64.b64decode(audio_base64)
-            print(f"Successfully decoded base64 audio data, length: {len(audio_bytes)} bytes")
-            
-            # Convert bytes to numpy array based on format
-            if audio_format == 'float32':
-                audio_data = np.frombuffer(audio_bytes, dtype=np.float32)
-            elif audio_format == 'int16':
-                # Convert int16 to float32 normalized between -1 and 1
-                audio_data = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+            if isinstance(audio_data_raw, list):
+                # Direct list of values - convert to numpy array
+                print(f"Processing audio as list of values, length: {len(audio_data_raw)}")
+                audio_data = np.array(audio_data_raw, dtype=np.float32)
+                
+                # If these are int16 values, normalize them
+                if audio_format == 'int16' or (np.max(np.abs(audio_data)) > 1.0 and np.max(np.abs(audio_data)) <= 32768):
+                    audio_data = audio_data.astype(np.float32) / 32768.0
+                    print("Normalized integer audio values to float range [-1.0, 1.0]")
             else:
-                print(f"Unsupported audio format: {audio_format}, defaulting to float32")
-                audio_data = np.frombuffer(audio_bytes, dtype=np.float32)
+                # Assume it's base64 encoded
+                try:
+                    audio_bytes = base64.b64decode(audio_data_raw)
+                    print(f"Successfully decoded base64 audio data, length: {len(audio_bytes)} bytes")
+                    
+                    # Convert bytes to numpy array based on format
+                    if audio_format == 'float32':
+                        audio_data = np.frombuffer(audio_bytes, dtype=np.float32)
+                    elif audio_format == 'int16':
+                        # Convert int16 to float32 normalized between -1 and 1
+                        audio_data = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+                    else:
+                        print(f"Unsupported audio format: {audio_format}, defaulting to float32")
+                        audio_data = np.frombuffer(audio_bytes, dtype=np.float32)
+                except Exception as e:
+                    print(f"Error decoding audio data: {e}. Treating as a list of values.")
+                    try:
+                        audio_data = np.array(audio_data_raw, dtype=np.float32)
+                        if audio_format == 'int16' or (np.max(np.abs(audio_data)) > 1.0 and np.max(np.abs(audio_data)) <= 32768):
+                            audio_data = audio_data.astype(np.float32) / 32768.0
+                    except Exception as e2:
+                        print(f"Failed to convert audio data as list: {e2}")
+                        return
             
             # Log audio statistics
             audio_length = len(audio_data)
@@ -467,6 +495,7 @@ def handle_audio(data):
             
             # Calculate dB level if not provided
             if db_level is None:
+                audio_rms = np.sqrt(np.mean(np.square(audio_data)))
                 db_level = dbFS(audio_rms)
                 print(f"Calculated dB level: {db_level}")
             
