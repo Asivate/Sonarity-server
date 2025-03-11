@@ -45,12 +45,47 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(level
 logger = logging.getLogger(__name__)
 
 # Define model paths and constants
-MODEL_DIR = '/home/hirwa0250/Sonarity-server/assets'  # Use absolute path to ensure correct location
+# Use a relative path with fallback to absolute path for better compatibility
+MODEL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'models')
+if not os.path.exists(MODEL_DIR):
+    # Fallback to the absolute path if needed
+    MODEL_DIR = '/home/hirwa0250/Sonarity-server/models'
 MODEL_PATH = os.path.join(MODEL_DIR, 'Cnn9_GMP_64x64_300000_iterations_mAP=0.37.pth')
-SCALAR_FN = os.path.join(MODEL_DIR, 'scalar.h5')
-CSV_FNAME = os.path.join(MODEL_DIR, 'audioset_labels.csv')
-ALT_CSV_FNAME = os.path.join(MODEL_DIR, 'validate_meta.csv')
-DOMESTIC_CSV_FNAME = os.path.join(MODEL_DIR, 'domestic_labels.csv')
+
+# Check if the model exists, if not, also check for the CNN13 model as an alternative
+if not os.path.exists(MODEL_PATH):
+    CNN13_MODEL_PATH = os.path.join(MODEL_DIR, 'Cnn13_GMP_64x64_520000_iterations_mAP=0.42.pth')
+    if os.path.exists(CNN13_MODEL_PATH):
+        print(f"CNN9 model not found, using CNN13 model instead: {CNN13_MODEL_PATH}")
+        MODEL_PATH = CNN13_MODEL_PATH
+
+# Define asset directory for CSV files and scalar file
+ASSET_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'assets')
+if not os.path.exists(ASSET_DIR):
+    # Fallback to model directory if assets dir doesn't exist
+    ASSET_DIR = MODEL_DIR
+
+# Try to find scalar file in both directories
+SCALAR_FN = os.path.join(ASSET_DIR, 'scalar.h5')
+if not os.path.exists(SCALAR_FN):
+    SCALAR_FN = os.path.join(MODEL_DIR, 'scalar.h5')
+
+# CSV files for label mapping
+CSV_FNAME = os.path.join(ASSET_DIR, 'audioset_labels.csv')
+ALT_CSV_FNAME = os.path.join(ASSET_DIR, 'validate_meta.csv')
+DOMESTIC_CSV_FNAME = os.path.join(ASSET_DIR, 'domestic_labels.csv')
+
+# Fallback path for CSV files
+if not os.path.exists(CSV_FNAME) and os.path.exists(os.path.join(MODEL_DIR, 'audioset_labels.csv')):
+    CSV_FNAME = os.path.join(MODEL_DIR, 'audioset_labels.csv')
+
+if not os.path.exists(ALT_CSV_FNAME) and os.path.exists(os.path.join(MODEL_DIR, 'validate_meta.csv')):
+    ALT_CSV_FNAME = os.path.join(MODEL_DIR, 'validate_meta.csv')
+
+if not os.path.exists(DOMESTIC_CSV_FNAME) and os.path.exists(os.path.join(MODEL_DIR, 'domestic_labels.csv')):
+    DOMESTIC_CSV_FNAME = os.path.join(MODEL_DIR, 'domestic_labels.csv')
+
+# Additional path for CSV files
 CSV_FILES_FNAME = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'csv_files', 'validate_meta.csv')
 
 # Default audio parameters
@@ -392,7 +427,28 @@ class PANNsModelInference:
             model_path = MODEL_PATH
             if not os.path.exists(model_path):
                 print(f"Model checkpoint not found at {model_path}")
-                return False
+                
+                # Try to find any PANNs model in the models directory
+                model_dir = os.path.dirname(model_path)
+                print(f"Searching for alternative models in {model_dir}...")
+                
+                if os.path.exists(model_dir):
+                    potential_models = [
+                        file for file in os.listdir(model_dir) 
+                        if file.endswith('.pth') and ('Cnn' in file or 'cnn' in file)
+                    ]
+                    
+                    if potential_models:
+                        # Use the first available model
+                        alt_model_path = os.path.join(model_dir, potential_models[0])
+                        print(f"Found alternative model: {alt_model_path}")
+                        model_path = alt_model_path
+                    else:
+                        print(f"No alternative models found in {model_dir}")
+                        return False
+                else:
+                    print(f"Model directory {model_dir} does not exist")
+                    return False
             
             # Load labels
             if os.path.exists(CSV_FNAME):
@@ -409,36 +465,57 @@ class PANNsModelInference:
             
             # Load model
             try:
-                # Create model
-                self.model = Cnn9_GMP_64x64(classes_num=527)
-                
-                # Load weights
-                checkpoint = torch.load(model_path, map_location=self.device)
-                self.model.load_state_dict(checkpoint['model'])
-                self.model.to(self.device)
-                self.model.eval()
-                print(f"Loaded model from {model_path}")
-                
-                # Acquire mean and std for normalization
-                scalar_path = os.path.join(os.path.dirname(model_path), 'scalar.h5')
-                if os.path.exists(scalar_path):
-                    with h5py.File(scalar_path, 'r') as hf:
-                        self.mean = hf['mean'][:]
-                        self.std = hf['std'][:]
-                        print(f"Loaded normalization values from {scalar_path}")
+                # Determine model type based on filename
+                if 'Cnn13' in model_path or 'cnn13' in model_path.lower():
+                    print("Using CNN13 model architecture")
+                    from panns_inference.models import Cnn14_16k
+                    self.model = Cnn14_16k(sample_rate=SAMPLE_RATE, classes_num=527)
                 else:
-                    # Use default values from the original implementation
-                    self.mean = self.LOGMEL_MEANS
-                    self.std = self.LOGMEL_STDDEVS
-                    print("Using default normalization values")
+                    # Default to CNN9
+                    print("Using CNN9 model architecture")
+                    self.model = Cnn9_GMP_64x64(classes_num=527)
                 
-                # Create thread lock for prediction
-                self.lock = threading.Lock()
+                # Load weights with graceful error handling
+                try:
+                    checkpoint = torch.load(model_path, map_location=self.device)
+                    
+                    # Check if state dict is directly available or needs to be accessed via 'model' key
+                    if 'model' in checkpoint:
+                        self.model.load_state_dict(checkpoint['model'])
+                    else:
+                        # Try loading the raw state dict
+                        self.model.load_state_dict(checkpoint)
+                        
+                    self.model.to(self.device)
+                    self.model.eval()
+                    print(f"Successfully loaded model from {model_path}")
+                    
+                    # Acquire mean and std for normalization
+                    scalar_path = os.path.join(os.path.dirname(model_path), 'scalar.h5')
+                    if os.path.exists(scalar_path):
+                        with h5py.File(scalar_path, 'r') as hf:
+                            self.mean = hf['mean'][:]
+                            self.std = hf['std'][:]
+                            print(f"Loaded normalization values from {scalar_path}")
+                    else:
+                        # Use default values from the original implementation
+                        self.mean = self.LOGMEL_MEANS
+                        self.std = self.LOGMEL_STDDEVS
+                        print("Using default normalization values")
+                    
+                    # Create thread lock for prediction
+                    self.lock = threading.Lock()
+                    
+                    self._initialized = True
+                    print("PANNs model initialized successfully")
+                    return True
                 
-                self._initialized = True
-                print("PANNs model initialized successfully")
-                return True
-                
+                except Exception as e:
+                    print(f"Error loading model weights: {e}")
+                    print("Detailed error information:")
+                    traceback.print_exc()
+                    return False
+            
             except Exception as e:
                 print(f"Error loading model: {e}")
                 traceback.print_exc()
