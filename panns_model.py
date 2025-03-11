@@ -563,21 +563,22 @@ class PANNsModelInference:
     def logmel_extract(self, audio):
         """
         Extract log mel spectrogram features from audio data.
+        The PANNs model expects a spectrogram with shape (128, 64).
         
         Args:
             audio: Audio data as numpy array
             
         Returns:
-            Log mel spectrogram as tensor of shape (batch_size, time_steps, freq_bins)
+            Log mel spectrogram with shape (128, 64) for CNN13 model
         """
         try:
-            # Audio should already be normalized to [-1, 1] and sampled at 32kHz (matching original)
-            # Parameters based on original implementation
+            # Audio should already be normalized to [-1, 1] and sampled at 32kHz
+            # Parameters based on original PANNs implementation
             n_fft = 1024  # FFT window size
-            hop_length = 500  # Hop size - matches original implementation
+            hop_length = 320  # Hop size - adjusted for CNN13 model
             n_mels = 64  # Number of mel bins
-            fmin = 50  # Minimum frequency
-            fmax = 14000  # Maximum frequency
+            fmin = 0  # Minimum frequency (Hz)
+            fmax = 16000  # Maximum frequency (Hz)
             
             # Compute STFT
             stft = librosa.stft(
@@ -592,48 +593,77 @@ class PANNsModelInference:
             # Convert to power spectrogram
             power_spec = np.abs(stft) ** 2
             
+            # Create mel filterbank if not already created
+            if not hasattr(self, 'melW'):
+                self.melW = librosa.filters.mel(
+                    sr=self.sample_rate,
+                    n_fft=n_fft,
+                    n_mels=n_mels,
+                    fmin=fmin,
+                    fmax=fmax
+                )
+            
             # Apply mel filterbank
             mel_spec = np.dot(self.melW, power_spec)
             
             # Convert to log scale
             log_mel_spec = librosa.power_to_db(mel_spec, ref=1.0, amin=1e-10, top_db=None)
             
-            # Ensure proper shape (time, freq) - transpose if needed
+            # Ensure proper shape (freq, time) - transpose if needed
             if log_mel_spec.shape[0] != n_mels:
                 log_mel_spec = log_mel_spec.T
             
-            # Normalize with standardized values (optional - will also be done in the predict method)
-            # log_mel_spec = (log_mel_spec - self.LOGMEL_MEANS.reshape(-1, 1)) / self.LOGMEL_STDDEVS.reshape(-1, 1)
-        
-            # We need a larger spectrogram for the CNN to extract enough features
-            # PANNs model was trained on 64x500 spectrograms, but we have much smaller ones
-            # Ensure spectrogram is at least 64 frames wide (time dimension)
-            min_time_frames = 64
-            if log_mel_spec.shape[1] < min_time_frames:
-                # Calculate padding required
-                pad_size = min_time_frames - log_mel_spec.shape[1]
-                print(f"Padding spectrogram time dimension from {log_mel_spec.shape[1]} to {min_time_frames}")
-                # Add padding to the time dimension
-                log_mel_spec = np.pad(log_mel_spec, ((0, 0), (0, pad_size)), mode='constant')
+            # Get current shape
+            current_height, current_width = log_mel_spec.shape
+            print(f"Raw spectrogram shape: {log_mel_spec.shape}")
             
-            # Return the log mel spectrogram
-            print(f"Extracted log mel spectrogram with shape {log_mel_spec.shape}")
-            return log_mel_spec
+            # PANNs CNN13 model expects (128, 64) input
+            # Reshape to match the expected dimensions
+            target_height, target_width = 128, 64
+            
+            # Initialize the reshaped spectrogram with zeros
+            reshaped_spec = np.zeros((target_height, target_width), dtype=np.float32)
+            
+            # For height dimension: if smaller, zero pad; if larger, center crop
+            if current_height < target_height:
+                # Pad with zeros
+                pad_top = (target_height - current_height) // 2
+                reshaped_spec[pad_top:pad_top + current_height, :target_width] = log_mel_spec[:, :target_width]
+            else:
+                # Center crop
+                start_idx = (current_height - target_height) // 2
+                reshaped_spec = log_mel_spec[start_idx:start_idx + target_height, :target_width]
+            
+            # For width dimension: if width is too small, duplicate columns
+            if current_width < target_width:
+                # Copy what we can
+                reshaped_spec[:, :current_width] = reshaped_spec[:, :current_width]
+                # Then duplicate the last column to fill the remainder
+                for i in range(current_width, target_width):
+                    reshaped_spec[:, i] = reshaped_spec[:, current_width-1]
+            
+            # Return the properly shaped log mel spectrogram
+            print(f"Reshaped spectrogram to {reshaped_spec.shape} for PANNs model")
+            return reshaped_spec
             
         except Exception as e:
             print(f"Error in logmel_extract: {e}")
             traceback.print_exc()
             # Return an empty spectrogram in case of error
-            return np.zeros((64, 64), dtype=np.float32)
+            return np.zeros((128, 64), dtype=np.float32)
     
     def predict(self, audio_data, top_k=5, threshold=0.2, boost_other_categories=True):
         """
-        Predict sound classes from audio data
+        Predict sound classes from audio data.
+        The CNN13 model requires audio to be properly formatted as a 
+        log mel spectrogram with shape (128, 64).
+        
         Args:
             audio_data: numpy array of audio samples (32000 samples/sec)
             top_k: number of top predictions to return
             threshold: minimum confidence threshold for predictions
             boost_other_categories: whether to boost non-speech categories
+            
         Returns:
             list of (label, score) tuples
         """
@@ -679,18 +709,65 @@ class PANNsModelInference:
             # Extract log mel spectrogram features
             x = self.logmel_extract(audio_data)
             
-            # Shape check and reshape if needed
-            if x.shape[0] != 128 or x.shape[1] != 64:
-                print(f"Unusual spectrogram shape: {x.shape}, expecting (128, 64)")
-                if len(x) > 128:
-                    x = x[:128, :]
-                # Reshape if needed - we need (batch_size, time_steps, freq_bins)
+            # Verify that we have the correct shape for the CNN13 model
+            if x.shape != (128, 64):
+                print(f"WARNING: Fixing spectrogram shape from {x.shape} to (128, 64)")
+                # Create a properly sized spectrogram
+                fixed_spec = np.zeros((128, 64), dtype=np.float32)
+                
+                # Copy what we can from the original spectrogram
+                h = min(x.shape[0], 128)
+                w = min(x.shape[1], 64)
+                fixed_spec[:h, :w] = x[:h, :w]
+                
+                x = fixed_spec
             
             # Normalize with mean and std values (essential for correct predictions)
-            x = (x - self.mean) / self.std
+            try:
+                # Check if we need to reshape the mean/std vectors
+                if len(self.mean) != x.shape[0]:
+                    print(f"Reshaping normalization vectors from {len(self.mean)} to {x.shape[0]}")
+                    # Create new mean/std vectors of the right size
+                    new_mean = np.zeros(x.shape[0], dtype=np.float32)
+                    new_std = np.ones(x.shape[0], dtype=np.float32)
+                    
+                    # Copy the values we have
+                    common_len = min(len(self.mean), x.shape[0])
+                    new_mean[:common_len] = self.mean[:common_len]
+                    new_std[:common_len] = self.std[:common_len]
+                    
+                    # Apply the normalization
+                    x = (x - new_mean.reshape(-1, 1)) / new_std.reshape(-1, 1)
+                else:
+                    # Apply the normalization as usual
+                    x = (x - self.mean.reshape(-1, 1)) / self.std.reshape(-1, 1)
+            except Exception as e:
+                print(f"Error applying normalization: {e}, using default normalization")
+                # Use a simple global normalization as a fallback
+                if np.std(x) > 0:
+                    x = (x - np.mean(x)) / np.std(x)
             
             # Convert to PyTorch tensor and reshape for model input
-            x = torch.tensor(x, dtype=torch.float32).unsqueeze(0)  # Add batch dimension
+            x = torch.tensor(x, dtype=torch.float32)
+            
+            # The CNN13 model expects input with shape (batch_size, channels, mel_bins, time)
+            # where mel_bins=128 and time=64
+            # Ensure x has the right dimensions (128, 64) before adding batch and channel dimensions
+            if x.shape != (128, 64):
+                print(f"Reshaping tensor from {x.shape} to (128, 64)")
+                # Create a properly sized tensor
+                fixed_tensor = torch.zeros((128, 64), dtype=torch.float32)
+                
+                # Copy what we can from the original tensor
+                h = min(x.shape[0], 128)
+                w = min(x.shape[1], 64)
+                fixed_tensor[:h, :w] = x[:h, :w]
+                
+                x = fixed_tensor
+            
+            # Add batch and channel dimensions: (128, 64) -> (1, 1, 128, 64)
+            x = x.unsqueeze(0).unsqueeze(0)
+            print(f"Input tensor shape: {x.shape}, expected (1, 1, 128, 64)")
 
             # Thread safety - don't allow multiple predictions at once
             with self.lock:
