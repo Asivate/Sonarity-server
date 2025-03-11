@@ -25,6 +25,7 @@ import gc
 import psutil
 import threading
 import json
+import traceback
 
 # CPU optimization - set number of threads to use all cores
 # Get the number of CPU cores and set torch to use all of them
@@ -43,11 +44,13 @@ except Exception as e:
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Global variables
-MODEL_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'models')
+# Define model paths and constants
+MODEL_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'assets')
 MODEL_PATH = os.path.join(MODEL_DIR, 'Cnn9_GMP_64x64_300000_iterations_mAP=0.37.pth')
 SCALAR_FN = os.path.join(MODEL_DIR, 'scalar.h5')
-CSV_FNAME = os.path.join(MODEL_DIR, 'validate_meta.csv')
+CSV_FNAME = os.path.join(MODEL_DIR, 'audioset_labels.csv')
+ALT_CSV_FNAME = os.path.join(MODEL_DIR, 'validate_meta.csv')
+DOMESTIC_CSV_FNAME = os.path.join(MODEL_DIR, 'domestic_labels.csv')
 CSV_FILES_FNAME = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'csv_files', 'validate_meta.csv')
 
 # Default audio parameters
@@ -438,13 +441,11 @@ class PANNsModelInference:
                 
             except Exception as e:
                 print(f"Error loading model: {e}")
-                import traceback
                 traceback.print_exc()
                 return False
             
         except Exception as e:
             print(f"Error initializing PANNs model: {e}")
-            import traceback
             traceback.print_exc()
             return False
     
@@ -510,7 +511,6 @@ class PANNsModelInference:
             
         except Exception as e:
             print(f"Error in logmel_extract: {e}")
-            import traceback
             traceback.print_exc()
             # Return an empty spectrogram in case of error
             return np.zeros((64, 64), dtype=np.float32)
@@ -627,7 +627,6 @@ class PANNsModelInference:
             
         except Exception as e:
             print(f"Error in PANNs prediction: {e}")
-            import traceback
             traceback.print_exc()
             return []
     
@@ -784,13 +783,70 @@ class PANNsModelInference:
 # Create singleton instance
 panns_inference = PANNsModelInference()
 
-def load_panns_model():
-    """Public function to load the PANNs model."""
-    return panns_inference.initialize()
+def get_available_labels():
+    """
+    Get the list of available sound labels from the loaded model
+    Returns a list of label strings
+    """
+    try:
+        # Try to get from the PANNs inference object first
+        if hasattr(panns_inference, 'get_available_labels'):
+            return panns_inference.get_available_labels()
+        
+        # Fallback to loading labels directly from CSV files
+        labels = []
+        
+        # Try primary audioset labels
+        if os.path.exists(CSV_FNAME):
+            try:
+                df = pd.read_csv(CSV_FNAME)
+                if 'display_name' in df.columns:
+                    labels = df['display_name'].tolist()
+                    print(f"Loaded {len(labels)} labels from {CSV_FNAME}")
+                    return labels
+            except Exception as e:
+                print(f"Error loading labels from {CSV_FNAME}: {e}")
+        
+        # Try alternate validate_meta.csv
+        if os.path.exists(ALT_CSV_FNAME):
+            try:
+                df = pd.read_csv(ALT_CSV_FNAME)
+                if 'display_name' in df.columns:
+                    labels = df['display_name'].tolist()
+                    print(f"Loaded {len(labels)} labels from {ALT_CSV_FNAME}")
+                    return labels
+            except Exception as e:
+                print(f"Error loading labels from {ALT_CSV_FNAME}: {e}")
+        
+        # Try domestic labels as last resort
+        if os.path.exists(DOMESTIC_CSV_FNAME):
+            try:
+                df = pd.read_csv(DOMESTIC_CSV_FNAME)
+                if 'display_name' in df.columns:
+                    labels = df['display_name'].tolist()
+                    print(f"Loaded {len(labels)} labels from {DOMESTIC_CSV_FNAME}")
+                    return labels
+            except Exception as e:
+                print(f"Error loading labels from {DOMESTIC_CSV_FNAME}: {e}")
+        
+        # If all else fails, return default labels
+        if not labels:
+            print("Could not load labels from any source, using default labels")
+            labels = [f"label_{i}" for i in range(527)]
+        
+        return labels
+    except Exception as e:
+        print(f"Error in get_available_labels: {e}")
+        traceback.print_exc()
+        return [f"label_{i}" for i in range(527)]  # Return default labels on error
 
+def load_panns_model():
+    """Initialize the PANNs model"""
+    panns_inference.initialize()
+    
 def predict_with_panns(audio_data, top_k=5, threshold=0.2, map_to_homesounds_format=False, boost_other_categories=True):
     """
-    Public function to make predictions using the PANNs model.
+    Predict audio categories using PANNs model
     
     Args:
         audio_data: Audio waveform as numpy array

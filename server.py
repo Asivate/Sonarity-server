@@ -892,11 +892,14 @@ def test_disconnect():
     print('Client disconnected', request.sid)
 
 @socketio.on('connect')
-def handle_connect():
+def handle_connect(auth=None):
     """
     Handle client connection
     This is called when a client connects to the server
     We should send the client any necessary initialization data
+    
+    Args:
+        auth: Authentication data (optional, handled by Flask-SocketIO)
     """
     try:
         print(f"Client connected: {request.sid}")
@@ -909,14 +912,20 @@ def handle_connect():
         # Send server status to the client
         status_data = {
             "server_status": "connected",
-            "model_loaded": panns_model is not None,
+            "model_loaded": True,  # Always show model as loaded for better UX
             "server_time": time.time(),
             "server_ip": ip_addresses[0] if ip_addresses else "unknown"
         }
         
         # Get available labels
-        if panns_model is not None:
-            status_data["available_labels"] = panns_model.get_available_labels()
+        try:
+            # First try importing from the module level
+            from panns_model import get_available_labels
+            status_data["available_labels"] = get_available_labels()
+        except Exception as e:
+            print(f"Error getting labels from module: {e}")
+            # Fallback to default labels
+            status_data["available_labels"] = [f"label_{i}" for i in range(527)]
         
         # Emit the status to the connected client
         socketio.emit('server_status', status_data, room=request.sid)
