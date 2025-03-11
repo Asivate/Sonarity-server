@@ -117,9 +117,9 @@ prediction_lock = Lock()  # Lock for thread-safe prediction history access
 RATE = 16000  # Audio sample rate
 CHUNK = 1024  # Audio chunk size
 CHANNELS = 1  # Mono audio
-SILENCE_THRES = 30  # Silence threshold in dB
+SILENCE_THRES = 15  # Silence threshold in dB (changed from 30 to 15 to be less strict)
 DBLEVEL_THRES = 30  # Decibel level threshold (changed from 60 to 30)
-PREDICTION_THRES = 0.15  # Prediction confidence threshold
+PREDICTION_THRES = 0.10  # Prediction confidence threshold (changed from 0.15 to 0.10)
 SPEECH_DETECTION_THRES = 0.3  # Threshold for speech detection
 MINIMUM_AUDIO_LENGTH = 16000  # Minimum audio length (1 second at 16kHz)
 SENTIMENT_THRES = 0.5  # Sentiment analysis threshold
@@ -202,7 +202,7 @@ def audio_samples(in_data, frame_count, time_info, status_flags):
         return (in_data, 0)
     
     # Check if sound is too quiet
-    if -db <= DBLEVEL_THRES:
+    if -db > DBLEVEL_THRES:
         print(f"Sound too quiet (db: {db})")
         return (in_data, 0)
     
@@ -212,13 +212,26 @@ def audio_samples(in_data, frame_count, time_info, status_flags):
         prediction_results = process_audio_with_panns(
             audio_data=np_wav,
             db_level=db,
-            config=None  # Use default config
+            config={
+                'silence_threshold': SILENCE_THRES,
+                'db_level_threshold': DBLEVEL_THRES,
+                'prediction_threshold': PREDICTION_THRES * 0.8,  # Lower threshold for better detection
+                'boost_factor': 1.5  # Increase boost factor
+            }
         )
         
         # Log the top prediction
         if prediction_results and "predictions" in prediction_results and len(prediction_results["predictions"]) > 0:
             top_pred = prediction_results["predictions"][0]
             print(f"Top prediction: {top_pred['label']} ({top_pred['score']:.4f})")
+            
+            # Emit the sound prediction to all clients
+            socketio.emit('audio_label', {
+                'label': top_pred['label'],
+                'accuracy': str(round(top_pred['score'], 4)),
+                'db': str(db),
+                'timestamp': time.time()
+            })
     except Exception as e:
         print(f"Error processing audio with PANNs model: {e}")
         traceback.print_exc()
@@ -237,12 +250,13 @@ def handle_source(json_data):
             socketio.emit('audio_label', {
                 'label': 'Silence',
                 'accuracy': '0.95',
-                'db': str(db)
+                'db': str(db),
+                'timestamp': record_time
             })
             print(f"EMITTING: Silence (db: {db})")
             return
         
-        if -db > DBLEVEL_THRES:
+        if -db < DBLEVEL_THRES:
             # Process with PANNs model
             # Convert data to numpy array
             np_data = np.array(data, dtype=np.float32)
@@ -253,19 +267,24 @@ def handle_source(json_data):
                 audio_data=np_data,
                 timestamp=record_time,
                 db_level=db,
-                config=None  # Use default config
+                config={
+                    'silence_threshold': SILENCE_THRES,
+                    'db_level_threshold': DBLEVEL_THRES,
+                    'prediction_threshold': PREDICTION_THRES * 0.8,
+                    'boost_factor': 1.5
+                }
             )
             
             # Emit the results
             socketio.emit('panns_prediction', prediction_results)
-            cleanup_memory()
         else:
-            print(f"Sound level ({-db} dB) below threshold ({DBLEVEL_THRES} dB)")
             socketio.emit('audio_label', {
                 'label': 'Too Quiet',
                 'accuracy': '0.9',
-                'db': str(db)
+                'db': str(db),
+                'timestamp': record_time
             })
+            print(f"EMITTING: Too Quiet (db: {db})")
     except Exception as e:
         print(f"Error in handle_source: {e}")
         traceback.print_exc()
@@ -502,15 +521,16 @@ def process_audio_with_panns(audio_data, timestamp=None, db_level=None, config=N
         }
     
     # Check if sound is loud enough to process
-    if db_level is not None and -db_level < db_level_threshold:
-        print(f"Sound level ({-db_level} dB) below threshold ({db_level_threshold} dB), processing...")
-    else:
+    if db_level is not None and -db_level > db_level_threshold:
         print(f"Sound too quiet (dB: {db_level}, threshold: {db_level_threshold})")
         return {
             "predictions": [{"label": "Too Quiet", "score": 0.9}],
             "timestamp": timestamp,
             "db": db_level
         }
+    
+    # Sound is within processing range
+    print(f"Sound level ({-db_level} dB) within processing range ({silence_threshold} to {db_level_threshold} dB), processing...")
     
     # Process with PANNS model
     try:
@@ -520,31 +540,42 @@ def process_audio_with_panns(audio_data, timestamp=None, db_level=None, config=N
         if np.abs(audio_data).max() > 1.0:
             audio_data = audio_data / np.abs(audio_data).max()
             print("Audio normalized to range [-1.0, 1.0]")
+        elif np.abs(audio_data).max() < 0.1:
+            # Amplify very quiet sounds
+            gain_factor = 0.5 / np.abs(audio_data).max() if np.abs(audio_data).max() > 0 else 1.0
+            audio_data = audio_data * min(gain_factor, 10.0)  # Limit gain to 10x
+            print(f"Audio amplified by {min(gain_factor, 10.0):.2f}x due to low amplitude")
         
         # Apply noise gate to reduce background noise
-        audio_data = noise_gate(audio_data, threshold=0.005, attack=0.01, release=0.1, rate=RATE)
+        audio_data = noise_gate(audio_data, threshold=0.003, attack=0.01, release=0.1, rate=RATE)
         
         # Ensure audio is long enough for processing
         if len(audio_data) < MINIMUM_AUDIO_LENGTH:
-            print(f"Audio too short ({len(audio_data)} samples). Padding to {MINIMUM_AUDIO_LENGTH} samples.")
-            if len(audio_data) < MINIMUM_AUDIO_LENGTH / 4:
+            original_length = len(audio_data)
+            print(f"Audio too short ({original_length} samples). Padding to {MINIMUM_AUDIO_LENGTH} samples.")
+            
+            # For very short audio, use a different padding strategy based on length
+            if original_length < MINIMUM_AUDIO_LENGTH / 4:
                 # For very short sounds, repeat them
-                repeats = int(np.ceil(MINIMUM_AUDIO_LENGTH / len(audio_data)))
+                repeats = int(np.ceil(MINIMUM_AUDIO_LENGTH / original_length))
                 padded = np.tile(audio_data, repeats)[:MINIMUM_AUDIO_LENGTH]
                 print(f"Using repetition padding ({repeats} repeats)")
             else:
+                # For longer sounds, use zero padding
                 padded = np.zeros(MINIMUM_AUDIO_LENGTH)
-                padded[:len(audio_data)] = audio_data
+                padded[:original_length] = audio_data
+                print("Using zero padding")
+                
             audio_data = padded
         
         # Get PANNS predictions
         with panns_lock:
             results = panns_model.predict_with_panns(
                 audio_data, 
-                top_k=10, 
-                threshold=prediction_threshold,
+                top_k=15,  # Increased from 10 to 15 to get more potential matches
+                threshold=prediction_threshold * 0.8,  # Lower threshold to catch more sounds
                 map_to_homesounds_format=True,
-                boost_other_categories=(boost_factor > 1.0)
+                boost_other_categories=True  # Always boost non-speech categories
             )
         
         # Format results for client
