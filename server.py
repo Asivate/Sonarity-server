@@ -24,7 +24,6 @@ import queue
 from transformers import pipeline
 import logging
 import json
-import netifaces
 
 # Import our PANNs model implementation
 import panns_model
@@ -88,19 +87,29 @@ def get_ip_addresses():
     
     try:
         # Then add the local IPs for completeness
-        interfaces = netifaces.interfaces()
-        for interface in interfaces:
-            try:
-                addresses = netifaces.ifaddresses(interface)
-                if netifaces.AF_INET in addresses:
-                    for link in addresses[netifaces.AF_INET]:
-                        ip = link['addr']
-                        if ip != '127.0.0.1' and ip != '0.0.0.0' and ip != '34.16.101.179':
-                            ip_list.append(ip)
-            except:
-                pass
-    except:
-        pass
+        hostname = socket.gethostname()
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            # Connect to an external address to find the local network interface
+            s.connect(('8.8.8.8', 80))
+            primary_ip = s.getsockname()[0]
+            if primary_ip != '127.0.0.1' and primary_ip != '0.0.0.0' and primary_ip != '34.16.101.179':
+                ip_list.append(primary_ip)
+        except Exception:
+            pass
+        finally:
+            s.close()
+        
+        # Get all IP addresses
+        try:
+            for ip in socket.gethostbyname_ex(hostname)[2]:
+                if ip not in ip_list and ip != '127.0.0.1' and ip != '0.0.0.0':
+                    ip_list.append(ip)
+        except Exception:
+            pass
+    except Exception as e:
+        print(f"Error getting IP addresses: {e}")
+    
     return ip_list
 
 # Set up Flask app and SocketIO
