@@ -126,8 +126,8 @@ prediction_lock = Lock()  # Lock for thread-safe prediction history access
 RATE = 32000  # Sample rate (32kHz matches original implementation)
 CHUNK = 1024  # Buffer size for audio chunks (matches original REC_BUFFER_SIZE)
 CHANNELS = 1  # Mono audio
-SILENCE_THRES = 20  # dB threshold for silence detection (lower is more sensitive)
-DBLEVEL_THRES = 50  # dB threshold for detecting quiet sounds
+SILENCE_THRES = -60  # dB threshold for silence detection (lower is more sensitive)
+DBLEVEL_THRES = -30  # dB threshold for detecting quiet sounds (sounds between -60dB and -30dB are processed)
 PREDICTION_THRES = 0.10  # Confidence threshold for predictions
 MINIMUM_AUDIO_LENGTH = 32000  # Minimum audio length (1 second at 32kHz)
 SENTIMENT_THRES = 0.5  # Sentiment analysis threshold
@@ -212,12 +212,12 @@ def audio_samples(in_data, frame_count, time_info, status_flags):
         print(f"Audio stats: samples={len(np_wav)}, rms={rms:.6f}, db={db:.2f}")
 
         # Check for silence
-        if -db < SILENCE_THRES:
+        if db < SILENCE_THRES:
             print(f"Silence detected (db: {db})")
             return (in_data, 0)
         
-        # Check if sound is loud enough to process
-        if -db > DBLEVEL_THRES:
+        # Check if sound is too quiet
+        if db > -DBLEVEL_THRES:
             print(f"Sound too quiet (db: {db})")
             return (in_data, 0)
         
@@ -331,7 +331,7 @@ def handle_source(json_data):
             print(f"Calculated dB level: {db}")
         
         # Check for silence based on dB level
-        if -db < SILENCE_THRES:
+        if db < SILENCE_THRES:
             print(f"Sound is silence (dB: {db}, threshold: {SILENCE_THRES})")
             socketio.emit('prediction', {
                 "predictions": [{"label": "Silence", "score": 0.95}],
@@ -341,8 +341,8 @@ def handle_source(json_data):
             return
         
         # Check if sound is too quiet but not silence
-        if -db > DBLEVEL_THRES:
-            print(f"Sound too quiet (dB: {db}, threshold: {DBLEVEL_THRES})")
+        if db > -DBLEVEL_THRES:
+            print(f"Sound too quiet (dB: {db}, threshold: {-DBLEVEL_THRES})")
             socketio.emit('prediction', {
                 "predictions": [{"label": "Too Quiet", "score": 0.9}],
                 "timestamp": timestamp,
@@ -694,7 +694,7 @@ def process_audio_with_panns(audio_data, timestamp=None, db_level=None, config=N
         print(f"Calculated dB level: {db_level}")
 
     # Check for silence - if the sound is very quiet, it's silence
-    if db_level is not None and -db_level < silence_threshold:
+    if db_level is not None and db_level < silence_threshold:
         print(f"Sound is silence (dB: {db_level}, threshold: {silence_threshold})")
         return {
             "predictions": [{"label": "Silence", "score": 0.95}],
@@ -703,8 +703,8 @@ def process_audio_with_panns(audio_data, timestamp=None, db_level=None, config=N
         }
     
     # Check if sound is too quiet but not silence
-    if db_level is not None and -db_level > db_level_threshold:
-        print(f"Sound too quiet (dB: {db_level}, threshold: {db_level_threshold})")
+    if db_level is not None and db_level > -db_level_threshold:
+        print(f"Sound too quiet (dB: {db_level}, threshold: {-DBLEVEL_THRES})")
         return {
             "predictions": [{"label": "Too Quiet", "score": 0.9}],
             "timestamp": timestamp,
@@ -712,7 +712,7 @@ def process_audio_with_panns(audio_data, timestamp=None, db_level=None, config=N
         }
     
     # Sound is within processing range
-    print(f"Sound level ({-db_level} dB) within processing range ({silence_threshold} to {db_level_threshold} dB), processing...")
+    print(f"Sound level ({db_level} dB) within processing range ({silence_threshold} to {-DBLEVEL_THRES} dB), processing...")
     
     # Process with PANNS model
     try:
