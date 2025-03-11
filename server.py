@@ -3,11 +3,7 @@ from flask import Flask, render_template, session, request, \
     copy_current_request_context, Response, jsonify
 from flask_socketio import SocketIO, emit, join_room, leave_room, \
     close_room, rooms, disconnect
-import tensorflow as tf
-from tensorflow import keras
 import numpy as np
-from vggish_input import waveform_to_examples
-import homesounds
 from pathlib import Path
 import time
 import argparse
@@ -27,9 +23,6 @@ import threading
 import queue
 from transformers import pipeline
 import logging
-
-# Import our AST model implementation
-import ast_model
 
 # Import our PANNs model implementation
 import panns_model
@@ -98,69 +91,43 @@ def get_ip_addresses():
             pass
         finally:
             s.close()
-            
-        for ip in socket.gethostbyname_ex(hostname)[2]:
-            if ip not in ip_list and not ip.startswith('127.'):
-                ip_list.append(ip)
-    except Exception as e:
-        print(f"Error getting IP addresses: {e}")
-    
+        
+        # Get all IP addresses
+        try:
+            for ip in socket.gethostbyname_ex(hostname)[2]:
+                if ip not in ip_list:
+                    ip_list.append(ip)
+        except:
+            pass
+    except:
+        pass
     return ip_list
 
-# Set this variable to "threading", "eventlet" or "gevent" to test the
-# different async modes, or leave it set to None for the application to choose
-# the best option based on installed packages.
+# Set up Flask app and SocketIO
 async_mode = None
-
-# Configure TensorFlow to use compatibility mode with TF 1.x code
-tf.compat.v1.disable_eager_execution()
-
-# Create a TensorFlow lock for thread safety, and another lock for the AST model
-tf_lock = Lock()
-tf_graph = tf.Graph()
-tf_session = tf.compat.v1.Session(graph=tf_graph)
-ast_lock = Lock()
-speech_lock = Lock()  # Lock for speech processing
-
-# Prediction aggregation system - store recent predictions to improve accuracy
-MAX_PREDICTIONS_HISTORY = 2  # Reduced from 3 to 2 for general sounds
-SPEECH_PREDICTIONS_HISTORY = 4  # Keep more prediction history for speech
-recent_predictions = []  # Store recent prediction probabilities for each sound category
-speech_predictions = []  # Separate storage for speech predictions
-prediction_lock = Lock()  # Lock for thread-safe access to prediction history
-
 app = Flask(__name__)
-app.config['SECRET_KEY'] = 'soundwatch_secret!'
-socketio = SocketIO(app, async_mode=async_mode)
+app.config['SECRET_KEY'] = 'secret!'
+socketio = SocketIO(app, async_mode=async_mode, cors_allowed_origins="*")
 thread = None
 thread_lock = Lock()
+panns_lock = Lock()  # Lock for thread-safe PANNS model access
 
-# contexts
-context = homesounds.everything
-active_context = homesounds.everything
+# Constants for audio processing
+RATE = 16000  # Audio sample rate
+CHUNK = 1024  # Audio chunk size
+CHANNELS = 1  # Mono audio
+SILENCE_THRES = 30  # Silence threshold in dB
+DBLEVEL_THRES = 60  # Decibel level threshold
+PREDICTION_THRES = 0.15  # Prediction confidence threshold
+SPEECH_DETECTION_THRES = 0.3  # Threshold for speech detection
+MINIMUM_AUDIO_LENGTH = 16000  # Minimum audio length (1 second at 16kHz)
+SENTIMENT_THRES = 0.5  # Sentiment analysis threshold
 
-# thresholds
-PREDICTION_THRES = 0.12  # Decreased from 0.15 to optimize for CNN13 model
-FINGER_SNAP_THRES = 0.03  # Special lower threshold for finger snapping
-DBLEVEL_THRES = -65  # Adjusted from -60 to -65 to capture more meaningful audio
-SILENCE_THRES = -75  # Threshold for silence detection
-SPEECH_SENTIMENT_THRES = 0.35  # Increased from 0.12 to 0.35 to reduce false positives
-CHOPPING_THRES = 0.70  # Higher threshold for chopping sounds to prevent false positives
-SPEECH_PREDICTION_THRES = 0.70  # Higher threshold for speech to reduce false positives
-SPEECH_DETECTION_THRES = 0.20  # Lower threshold for detecting potential speech with CNN13 model
-
-CHANNELS = 1
-RATE = 16000
-CHUNK = RATE * 2  # 2 second chunks, increased from 1 second for better model performance
-SPEECH_CHUNK_MULTIPLIER = 4.0  # Increased from 2.5 to 4.0 for better speech recognition
-MINIMUM_AUDIO_LENGTH = 16000  # Minimum number of samples for processing (1 second at 16kHz)
-MICROPHONES_DESCRIPTION = []
-FPS = 60.0
-
-# Minimum word length for meaningful transcription
-MIN_TRANSCRIPTION_LENGTH = 3  # Minimum characters in transcription to analyze
-MIN_MEANINGFUL_WORDS = 2  # Minimum number of meaningful words (not just "you" or "thank you")
-COMMON_FALSE_POSITIVES = ["you", "the", "thank you", "thanks", "a", "to", "and", "is", "it", "that"]
+# Global variables
+models = {}  # Dictionary to store loaded models
+sentiment_analyzer = None  # Sentiment analyzer model
+speech_to_text = None  # Speech-to-text model
+google_speech = None  # Google Speech-to-Text client
 
 # Load sentiment analysis model
 try:
@@ -189,14 +156,6 @@ EMOTION_GROUPS = {
     "Unpleasant": ["sadness", "fear", "anger", "disgust", "disappointment", "embarrassment", "grief", "remorse", "annoyance", "disapproval"]
 }
 
-# Dictionary to store our models
-models = {
-    "tensorflow": None,
-    "ast": None,
-    "feature_extractor": None,
-    "panns": None
-}
-
 # Initialize speech recognition systems
 speech_processor = SpeechToText()
 google_speech_processor = None  # Will be lazy-loaded when needed
@@ -204,89 +163,16 @@ google_speech_processor = None  # Will be lazy-loaded when needed
 # Load models
 def load_models():
     """Load all required models for sound recognition and speech processing."""
-    global models, USE_AST_MODEL, USE_PANNS_MODEL
+    global models
     
     models = {
-        "tensorflow": None,
-        "ast": None,
-        "feature_extractor": None,
         "sentiment_analyzer": None,
         "speech_processor": None,
         "panns": None
     }
     
-    USE_AST_MODEL = os.environ.get('USE_AST_MODEL', '1') == '1'  # Default to enabled
-    USE_PANNS_MODEL = os.environ.get('USE_PANNS_MODEL', '0') == '1'  # Default to disabled
-    print(f"AST model {'enabled' if USE_AST_MODEL else 'disabled'} based on environment settings")
-    print(f"PANNs model {'enabled' if USE_PANNS_MODEL else 'disabled'} based on environment settings")
+    print("PANNs model will be used as the primary sound recognition model")
     
-    MODEL_URL = "https://www.dropbox.com/s/cq1d7uqg0l28211/example_model.hdf5?dl=1"
-    MODEL_PATH = "models/example_model.hdf5"
-    
-    try:
-        print("Loading AST model...")
-        with ast_lock:
-            ast_kwargs = {
-                "torch_dtype": torch.float32
-            }
-            if torch.__version__ >= '2.1.1':
-                ast_kwargs["attn_implementation"] = "sdpa"
-                print("Using Scaled Dot Product Attention (SDPA) for faster inference")
-            print("Using standard precision (float32) for maximum compatibility")
-            model_name = "MIT/ast-finetuned-audioset-10-10-0.4593"
-            models["ast"], models["feature_extractor"] = ast_model.load_ast_model(
-                model_name=model_name,
-                **ast_kwargs
-            )
-            ast_model.initialize_class_labels(models["ast"])
-            print("AST model loaded successfully")
-    except Exception as e:
-        print(f"Error loading AST model: {e}")
-        traceback.print_exc()
-        USE_AST_MODEL = False
-
-    model_filename = os.path.abspath(MODEL_PATH)
-    if not USE_AST_MODEL or True:
-        print("Loading TensorFlow model as backup...")
-        os.makedirs(os.path.dirname(model_filename), exist_ok=True)
-        
-        homesounds_model = Path(model_filename)
-        if not homesounds_model.is_file():
-            print("Downloading example_model.hdf5 [867MB]: ")
-            wget.download(MODEL_URL, MODEL_PATH)
-        
-        print("Using TensorFlow model: %s" % (model_filename))
-        
-        try:
-            with tf_graph.as_default():
-                with tf_session.as_default():
-                    models["tensorflow"] = keras.models.load_model(model_filename)
-                    print("Initializing TensorFlow model with a dummy prediction...")
-                    dummy_input = np.zeros((1, 96, 64, 1))
-                    _ = models["tensorflow"].predict(dummy_input)
-                    print("Model prediction function initialized successfully")
-            print("TensorFlow model loaded successfully")
-            if not USE_AST_MODEL:
-                print("TensorFlow model will be used as primary model")
-                models["tensorflow"].summary()
-        except Exception as e:
-            print(f"Error loading TensorFlow model with standard method: {e}")
-            try:
-                with tf_graph.as_default():
-                    with tf_session.as_default():
-                        models["tensorflow"] = tf.keras.models.load_model(model_filename, compile=False)
-                        print("Initializing TensorFlow model with a dummy prediction...")
-                        dummy_input = np.zeros((1, 96, 64, 1))
-                        _ = models["tensorflow"].predict(dummy_input)
-                        print("Model prediction function initialized successfully")
-                print("TensorFlow model loaded with compile=False option")
-            except Exception as e2:
-                print(f"Error with fallback method: {e2}")
-                if not USE_AST_MODEL:
-                    raise Exception("Could not load TensorFlow model with any method, and AST model is not enabled")
-
-    print(f"Using {'AST' if USE_AST_MODEL else 'TensorFlow'} model as primary model")
-
     try:
         if not USE_GOOGLE_SPEECH:
             print("Loading Whisper model for speech recognition...")
@@ -297,23 +183,19 @@ def load_models():
         print(f"Error loading Whisper model: {e}")
         traceback.print_exc()
 
-    if USE_PANNS_MODEL:
-        try:
-            print("Loading PANNs model...")
-            panns_loaded = panns_model.load_panns_model()
-            if panns_loaded:
-                models["panns"] = True
-                print("PANNs model loaded successfully")
-            else:
-                print("Failed to load PANNs model")
-                USE_PANNS_MODEL = False
-        except Exception as e:
-            print(f"Error loading PANNs model: {e}")
-            traceback.print_exc()
-            USE_PANNS_MODEL = False
-
-    if not USE_AST_MODEL and not USE_PANNS_MODEL:
-        print("Both AST and PANNs models are disabled, using TensorFlow model as primary model")
+    try:
+        print("Loading PANNs model...")
+        panns_loaded = panns_model.load_panns_model()
+        if panns_loaded:
+            models["panns"] = True
+            print("PANNs model loaded successfully")
+        else:
+            print("Failed to load PANNs model")
+            raise Exception("Failed to load PANNs model. Please run 'python download_panns_model.py' to set up the required files.")
+    except Exception as e:
+        print(f"Error loading PANNs model: {e}")
+        traceback.print_exc()
+        raise Exception("Failed to load PANNs model. Please check the error messages above.")
 
 # Add a comprehensive debug function
 def debug_predictions(predictions, label_list):
@@ -736,10 +618,10 @@ def handle_source(json_data):
                                                     print(f"EMITTING SPEECH WITH BASIC SENTIMENT: {label}")
                                                 else:
                                                     socketio.emit('audio_label', {
-                                                        'label': 'Speech',
-                                                        'accuracy': '0.6',
-                                                        'db': str(db)
-                                                    })
+                                                    'label': 'Speech',
+                                                    'accuracy': '0.6',
+                                                    'db': str(db)
+                                                })
                                                     print("EMITTING BASIC SPEECH DETECTION (no sentiment)")
                                                 cleanup_memory()
                                             return
@@ -777,7 +659,7 @@ def handle_source(json_data):
         socketio.emit('audio_label', {
             'label': 'Error Processing Audio',
             'accuracy': '0.0',
-            'db': str(db) if 'db' in locals() else '-100'
+            'db': '-100'
         })
 
 @socketio.on('audio_data')
@@ -833,97 +715,8 @@ def handle_audio(data):
         return
     
     if -db > DBLEVEL_THRES:
-        # Determine which model to use based on settings
-        if USE_AST_MODEL:
-            try:
-                with ast_lock:
-                    print("Processing with AST model (from audio_data)...")
-                    ast_predictions = ast_model.predict_sound(
-                        np_wav, 
-                        RATE, 
-                        models["ast"], 
-                        models["feature_extractor"], 
-                        threshold=PREDICTION_THRES
-                    )
-                    print("===== AST MODEL RAW PREDICTIONS =====")
-                    for pred in ast_predictions["top_predictions"][:5]:
-                        print(f"  {pred['label']}: {pred['confidence']:.6f}")
-                    
-                    raw_predictions = ast_predictions["raw_predictions"]
-                    is_speech_prediction = False
-                    for pred in ast_predictions["top_predictions"]:
-                        if pred["label"].lower() == "speech" and pred["confidence"] > SPEECH_DETECTION_THRES:
-                            is_speech_prediction = True
-                            logger.info(f"AST detected potential speech with confidence: {pred['confidence']:.4f}")
-                            break
-                    
-                    if raw_predictions is not None and len(raw_predictions) > 0:
-                        aggregated_predictions = aggregate_predictions(
-                            raw_predictions, 
-                            ast_model.class_labels,
-                            is_speech=is_speech_prediction
-                        )
-                        debug_predictions(aggregated_predictions, ast_model.class_labels)
-                        
-                        # Find top prediction and emit result
-                        top_idx = np.argmax(aggregated_predictions)
-                        if top_idx < len(ast_model.class_labels):
-                            top_label = ast_model.class_labels[top_idx]
-                            top_score = float(aggregated_predictions[top_idx])
-                            
-                            if top_score > PREDICTION_THRES:
-                                print(f"Top prediction: {top_label} ({top_score:.4f})")
-                                
-                                # Handle speech detection
-                                if top_label.lower() == "speech" and top_score > SPEECH_DETECTION_THRES:
-                                    print(f"Speech detected with AST model. Processing sentiment...")
-                                    if os.environ.get('USE_SPEECH', '0') == '1' and os.environ.get('USE_SENTIMENT', '0') == '1':
-                                        # Process speech
-                                        process_speech(np_wav, record_time, top_score)
-                                    else:
-                                        # Normal sound emission
-                                        socketio.emit('audio_label', {
-                                            'label': top_label,
-                                            'accuracy': str(top_score),
-                                            'db': str(db),
-                                            'timestamp': record_time
-                                        })
-                                else:
-                                    # Normal sound emission
-                                    socketio.emit('audio_label', {
-                                        'label': top_label,
-                                        'accuracy': str(top_score),
-                                        'db': str(db),
-                                        'timestamp': record_time
-                                    })
-                                print(f"EMITTING: {top_label} ({top_score:.2f})")
-                            else:
-                                print(f"Top prediction {top_label} ({top_score:.4f}) below threshold, not emitting")
-                        else:
-                            print(f"Invalid index {top_idx} for label list with {len(homesounds.labels)} elements")
-                            socketio.emit('audio_label', {
-                                'label': 'Unrecognized Sound',
-                                'accuracy': '0.2',
-                                'db': str(db),
-                                'timestamp': record_time
-                            })
-                    else:
-                        print("No valid predictions from AST model")
-            except Exception as e:
-                print(f"Error with AST prediction: {e}")
-                traceback.print_exc()
-                print("Falling back to next available model due to AST error")
-                
-                # Choose next available model based on settings
-                if USE_PANNS_MODEL:
-                    process_with_panns_model(np_wav, record_time, db)
-                else:
-                    predict_with_tensorflow(np_wav, record_time, db)
-                    
-        elif USE_PANNS_MODEL:
-            process_with_panns_model(np_wav, record_time, db)
-        else:
-            predict_with_tensorflow(np_wav, record_time, db)
+        # Process with PANNS model
+        process_with_panns_model(np_wav, record_time, db)
     else:
         print(f"Sound level ({-db} dB) below threshold ({DBLEVEL_THRES} dB)")
         socketio.emit('audio_label', {
@@ -932,9 +725,9 @@ def handle_audio(data):
             'db': str(db)
         })
 
-# Helper function to process with PANNs model with fallback to TensorFlow
+# Helper function to process with PANNs model
 def process_with_panns_model(np_wav, record_time=None, db=None):
-    """Process audio using PANNs model with fallback to TensorFlow"""
+    """Process audio using PANNs model"""
     try:
         # Use PANNs model for prediction
         print("Processing with PANNs model...")
@@ -964,13 +757,14 @@ def process_with_panns_model(np_wav, record_time=None, db=None):
             np_wav = padded
         
         # Start processing with enhanced audio
-        panns_results = panns_model.predict_with_panns(
-            np_wav, 
-            top_k=10, 
-            threshold=PREDICTION_THRES,
-            map_to_homesounds_format=True,
-            boost_other_categories=True
-        )
+        with panns_lock:
+            panns_results = panns_model.predict_with_panns(
+                np_wav, 
+                top_k=10, 
+                threshold=PREDICTION_THRES,
+                map_to_homesounds_format=True,
+                boost_other_categories=True
+            )
         
         # Check if we got any results
         if panns_results and "output" in panns_results and len(panns_results["output"]) > 0:
@@ -997,7 +791,8 @@ def process_with_panns_model(np_wav, record_time=None, db=None):
                     socketio.emit('audio_label', {
                         'label': top_label,
                         'accuracy': str(top_score),
-                        'db': str(db)
+                        'db': str(db),
+                        'timestamp': record_time
                     })
                     print(f"EMITTING: {top_label} ({top_score:.2f})")
             else:
@@ -1006,7 +801,8 @@ def process_with_panns_model(np_wav, record_time=None, db=None):
                     socketio.emit('audio_label', {
                         'label': top_label,
                         'accuracy': str(top_score),
-                        'db': str(db)
+                        'db': str(db),
+                        'timestamp': record_time
                     })
                     print(f"EMITTING: {top_label} ({top_score:.2f})")
                 else:
@@ -1014,18 +810,150 @@ def process_with_panns_model(np_wav, record_time=None, db=None):
                     socketio.emit('audio_label', {
                         'label': 'Unrecognized Sound',
                         'accuracy': '0.2',
-                        'db': str(db)
+                        'db': str(db),
+                        'timestamp': record_time
                     })
         else:
             print("No valid predictions from PANNs model")
-            # Fall back to TensorFlow model
-            predict_with_tensorflow(np_wav, record_time, db)
+            socketio.emit('audio_label', {
+                'label': 'Unrecognized Sound',
+                'accuracy': '0.2',
+                'db': str(db),
+                'timestamp': record_time
+            })
             
     except Exception as e:
         print(f"Error with PANNs prediction: {e}")
         traceback.print_exc()
-        print("Falling back to TensorFlow model due to PANNs error")
-        predict_with_tensorflow(np_wav, record_time, db)
+        socketio.emit('audio_label', {
+            'label': 'Error Processing Audio',
+            'accuracy': '0.0',
+            'db': str(db) if db is not None else '-100',
+            'timestamp': record_time
+        })
+
+# New dedicated function for advanced PANNS processing
+def process_audio_with_panns(audio_data, timestamp=None, db_level=None, config=None):
+    """
+    Process audio with PANNS model using configurable thresholds.
+    
+    Args:
+        audio_data: Audio waveform data as numpy array
+        timestamp: Timestamp for the recording
+        db_level: Loudness in decibels (optional)
+        config: Dictionary with configuration parameters:
+            - silence_threshold: Threshold for detecting silence (default: use SILENCE_THRES)
+            - db_level_threshold: Threshold for audio loudness (default: use DBLEVEL_THRES)
+            - prediction_threshold: Confidence threshold for predictions (default: use PREDICTION_THRES)
+            - boost_factor: Boost factor for non-speech/music categories (default: 1.2)
+            
+    Returns:
+        Dictionary with prediction results
+    """
+    # Set default config if not provided
+    if config is None:
+        config = {}
+    
+    # Extract configuration with defaults
+    silence_threshold = config.get('silence_threshold', SILENCE_THRES)
+    db_level_threshold = config.get('db_level_threshold', DBLEVEL_THRES)
+    prediction_threshold = config.get('prediction_threshold', PREDICTION_THRES)
+    boost_factor = config.get('boost_factor', 1.2)
+    
+    # Check if timestamp is provided
+    if timestamp is None:
+        timestamp = time.time()
+    
+    # Check audio and calculate dB if not provided
+    if db_level is None and audio_data is not None:
+        rms = np.sqrt(np.mean(audio_data**2))
+        db_level = dbFS(rms)
+        print(f"Calculated dB level: {db_level}")
+
+    # Check for silence
+    if db_level is not None and -db_level < silence_threshold:
+        print(f"Sound is silence (dB: {db_level}, threshold: {silence_threshold})")
+        return {
+            "predictions": [{"label": "Silence", "score": 0.95}],
+            "timestamp": timestamp,
+            "db": db_level
+        }
+    
+    # Check if sound is too quiet
+    if db_level is not None and -db_level > db_level_threshold:
+        print(f"Sound level ({-db_level} dB) above threshold ({db_level_threshold} dB), processing...")
+    else:
+        print(f"Sound too quiet (dB: {db_level}, threshold: {db_level_threshold})")
+        return {
+            "predictions": [{"label": "Too Quiet", "score": 0.9}],
+            "timestamp": timestamp,
+            "db": db_level
+        }
+    
+    # Process with PANNS model
+    try:
+        print(f"Processing audio with PANNS model (threshold: {prediction_threshold})...")
+        
+        # Ensure audio is normalized properly
+        if np.abs(audio_data).max() > 1.0:
+            audio_data = audio_data / np.abs(audio_data).max()
+            print("Audio normalized to range [-1.0, 1.0]")
+        
+        # Apply noise gate to reduce background noise
+        audio_data = noise_gate(audio_data, threshold=0.005, attack=0.01, release=0.1, rate=RATE)
+        
+        # Ensure audio is long enough for processing
+        if len(audio_data) < MINIMUM_AUDIO_LENGTH:
+            print(f"Audio too short ({len(audio_data)} samples). Padding to {MINIMUM_AUDIO_LENGTH} samples.")
+            if len(audio_data) < MINIMUM_AUDIO_LENGTH / 4:
+                # For very short sounds, repeat them
+                repeats = int(np.ceil(MINIMUM_AUDIO_LENGTH / len(audio_data)))
+                padded = np.tile(audio_data, repeats)[:MINIMUM_AUDIO_LENGTH]
+                print(f"Using repetition padding ({repeats} repeats)")
+            else:
+                padded = np.zeros(MINIMUM_AUDIO_LENGTH)
+                padded[:len(audio_data)] = audio_data
+            audio_data = padded
+        
+        # Get PANNS predictions
+        with panns_lock:
+            results = panns_model.predict_with_panns(
+                audio_data, 
+                top_k=10, 
+                threshold=prediction_threshold,
+                map_to_homesounds_format=True,
+                boost_other_categories=(boost_factor > 1.0)
+            )
+        
+        # Format results for client
+        if results and "output" in results and len(results["output"]) > 0:
+            # Display predictions
+            print("===== PANNS MODEL PREDICTIONS =====")
+            for pred in results["output"][:5]:
+                print(f"  {pred['label']}: {pred['score']:.6f}")
+            
+            # Return formatted results
+            return {
+                "predictions": results["output"],
+                "timestamp": timestamp,
+                "db": db_level
+            }
+        else:
+            print("No valid predictions from PANNS model")
+            return {
+                "predictions": [{"label": "Unrecognized Sound", "score": 0.2}],
+                "timestamp": timestamp,
+                "db": db_level
+            }
+            
+    except Exception as e:
+        print(f"Error processing audio with PANNS model: {e}")
+        traceback.print_exc()
+        return {
+            "predictions": [{"label": "Error", "score": 0.1}],
+            "timestamp": timestamp,
+            "db": db_level
+        }
 
 recent_audio_buffer = []
 MAX_BUFFER_SIZE = 5
@@ -1315,296 +1243,84 @@ def aggregate_predictions(new_prediction, label_list, is_speech=False, num_sampl
 
 @socketio.on('predict')
 def predict(message):
-    audio_data = np.array(message['audio_data'])
-    timestamp = message['timestamp']
-
-    # Apply pre-emphasis and noise gate to improve audio quality
-    if len(audio_data) > 1:  # Don't apply pre-emphasis to very short audio
-        audio_data = pre_emphasis(audio_data)
-    audio_data = noise_gate(audio_data, threshold=0.005, attack=0.01, release=0.1, rate=RATE)
-
-    # Ensure proper length
-    if len(audio_data) < MINIMUM_AUDIO_LENGTH:
-        if len(audio_data) < MINIMUM_AUDIO_LENGTH / 4:
-            # For very short sounds, repeat them
-            repeats = int(np.ceil(MINIMUM_AUDIO_LENGTH / len(audio_data)))
-            padded = np.tile(audio_data, repeats)[:MINIMUM_AUDIO_LENGTH]
-        else:
-            padded = np.zeros(MINIMUM_AUDIO_LENGTH)
-            padded[:len(audio_data)] = audio_data
-        audio_data = padded
-
-    if USE_AST_MODEL:
-        print("Using AST model for prediction")
-        pass
-    elif USE_PANNS_MODEL:
-        print("Using PANNs model for prediction")
-        try:
-            panns_results = panns_model.predict_with_panns(
-                audio_data, 
-                top_k=10, 
-                threshold=PREDICTION_THRES, 
-                map_to_homesounds_format=True,
-                boost_other_categories=True
-            )
-            panns_results["timestamp"] = timestamp
-            emit('prediction', panns_results)
-            cleanup_memory()
-        except Exception as e:
-            print(f"Error with PANNs prediction: {e}")
-            traceback.print_exc()
-            print("Falling back to TensorFlow model due to PANNs error")
-            pass
-    else:
-        print("Using TensorFlow model for prediction")
-        pass
-
-@socketio.on('predict_raw')
-def predict_raw(message):
-    if not USE_PANNS_MODEL:
-        print("PANNs model is not enabled, ignoring predict_raw request")
-        return
-
+    """Handler for audio prediction requests."""
     audio_data = np.array(message['audio_data'])
     sample_rate = int(message.get('sample_rate', 32000))
     timestamp = message['timestamp']
+    db_level = message.get('db')
+    
+    # Get configuration from message or use defaults
+    config = {
+        'silence_threshold': float(message.get('silence_threshold', SILENCE_THRES)),
+        'db_level_threshold': float(message.get('db_level_threshold', DBLEVEL_THRES)),
+        'prediction_threshold': float(message.get('prediction_threshold', PREDICTION_THRES)),
+        'boost_factor': float(message.get('boost_factor', 1.2))
+    }
+    
+    print(f"Processing prediction request: sample_rate={sample_rate}, timestamp={timestamp}")
+    
+    # Apply pre-emphasis and noise gate to improve audio quality
+    if len(audio_data) > 1:  # Don't apply pre-emphasis to very short audio
+        audio_data = pre_emphasis(audio_data)
+    
+    # Resample audio if needed
+    if sample_rate != RATE and len(audio_data) > 0:
+        print(f"Resampling audio from {sample_rate}Hz to {RATE}Hz")
+        # Calculate the number of samples in the target sample rate
+        num_samples = int(len(audio_data) * (RATE / sample_rate))
+        audio_data = signal.resample(audio_data, num_samples)
+    
+    # Process the audio with our enhanced PANNS processing function
+    prediction_results = process_audio_with_panns(
+        audio_data=audio_data,
+        timestamp=timestamp,
+        db_level=db_level,
+        config=config
+    )
+    
+    # Emit the results
+    emit('panns_prediction', prediction_results)
+    cleanup_memory()
+
+@socketio.on('predict_raw')
+def predict_raw(message):
+    """Handler for raw audio prediction requests."""
+    audio_data = np.array(message['audio_data'])
+    sample_rate = int(message.get('sample_rate', 32000))
+    timestamp = message['timestamp']
+    db_level = message.get('db')
+    
+    # Get configuration from message or use defaults
+    config = {
+        'silence_threshold': float(message.get('silence_threshold', SILENCE_THRES)),
+        'db_level_threshold': float(message.get('db_level_threshold', DBLEVEL_THRES)),
+        'prediction_threshold': float(message.get('prediction_threshold', PREDICTION_THRES)),
+        'boost_factor': float(message.get('boost_factor', 1.2))
+    }
+    
+    print(f"Processing raw prediction request: sample_rate={sample_rate}, timestamp={timestamp}")
     
     # Apply pre-emphasis and noise gate to improve audio quality
     if len(audio_data) > 1:  # Don't apply pre-emphasis to very short audio 
         audio_data = pre_emphasis(audio_data)
-    audio_data = noise_gate(audio_data, threshold=0.005, attack=0.01, release=0.1, rate=sample_rate)
     
-    # Ensure proper length
-    if len(audio_data) < MINIMUM_AUDIO_LENGTH:
-        if len(audio_data) < MINIMUM_AUDIO_LENGTH / 4:
-            # For very short sounds, repeat them
-            repeats = int(np.ceil(MINIMUM_AUDIO_LENGTH / len(audio_data)))
-            padded = np.tile(audio_data, repeats)[:MINIMUM_AUDIO_LENGTH]
-        else:
-            padded = np.zeros(MINIMUM_AUDIO_LENGTH)
-            padded[:len(audio_data)] = audio_data
-        audio_data = padded
+    # Resample audio if needed
+    if sample_rate != RATE and len(audio_data) > 0:
+        print(f"Resampling audio from {sample_rate}Hz to {RATE}Hz")
+        # Calculate the number of samples in the target sample rate
+        num_samples = int(len(audio_data) * (RATE / sample_rate))
+        audio_data = signal.resample(audio_data, num_samples)
     
-    try:
-        results = panns_model.predict_with_panns(
-            audio_data, 
-            top_k=10, 
-            threshold=PREDICTION_THRES, 
-            map_to_homesounds_format=False,
-            boost_other_categories=True
-        )
-        output = {
-            "timestamp": timestamp,
-            "output": [{"label": label, "score": float(score)} for label, score in results]
-        }
-        emit('prediction_raw', output)
-        cleanup_memory()
-    except Exception as e:
-        print(f"Error with PANNs raw prediction: {e}")
-        traceback.print_exc()
-        emit('prediction_raw', {
-            "timestamp": timestamp,
-            "output": [],
-            "error": str(e)
-        })
-
-# Function to predict using TensorFlow model
-def predict_with_tensorflow(audio_data, record_time=None, db=None):
-    """Predict sounds using the TensorFlow model"""
-    try:
-        # Store original audio data shape
-        orig_shape = audio_data.shape
-        orig_size = audio_data.size
-        print(f"Original np_wav shape: {orig_shape}, size: {orig_size}")
-        
-        # Pad audio to 1-second length if too short
-        if audio_data.size < 16000:  # Assuming 16kHz sampling rate
-            padded_data = np.zeros(16000)
-            padded_data[:audio_data.size] = audio_data
-            audio_data = padded_data
-            print(f"Padded audio data to size: {audio_data.size} samples (1 second)")
-        
-        # Convert to vggish input
-        with tf_lock:
-            try:
-                # Extract features (will return multiple frames for longer audio)
-                examples = waveform_to_examples(audio_data, RATE)
-                
-                # Take first frame for simplicity
-                if examples.shape[0] > 1:
-                    print(f"Using first frame from multiple frames: {examples.shape[1:3]}")
-                example = examples[0, :]
-                example = example.reshape(1, *example.shape, 1)  # Add batch and channel dimensions
-                print(f"Processed audio data shape: {example.shape}")
-                
-                # Make prediction with TensorFlow model
-                print("Making prediction with TensorFlow model...")
-                with tf_graph.as_default():
-                    with tf_session.as_default():
-                        prediction = models["tensorflow"].predict(example)[0]
-                        
-                        try:
-                            # Debug predictions
-                            debug_predictions(prediction, homesounds.labels)
-                            
-                            # Find top prediction
-                            top_idx = np.argmax(prediction)
-                            top_score = float(prediction[top_idx])
-                            
-                            # Check if it might be speech
-                            speech_idx = -1
-                            is_speech_prediction = False
-                            
-                            # Find speech index if exists
-                            if isinstance(homesounds.labels, dict):
-                                for label, idx in homesounds.labels.items():
-                                    if label.lower() == "speech":
-                                        speech_idx = idx
-                                        break
-                            elif isinstance(homesounds.labels, (list, tuple, np.ndarray)) and len(homesounds.labels) > 0:
-                                if "speech" in homesounds.labels:
-                                    speech_idx = homesounds.labels.index("speech")
-                                else:
-                                    # Try case-insensitive search
-                                    for idx, label in enumerate(homesounds.labels):
-                                        if isinstance(label, str) and label.lower() == "speech":
-                                            speech_idx = idx
-                                            break
-                            
-                            if speech_idx >= 0 and speech_idx < len(prediction) and prediction[speech_idx] > SPEECH_DETECTION_THRES:
-                                is_speech_prediction = True
-                                logger.info(f"Detected potential speech with confidence: {prediction[speech_idx]:.4f}")
-                            
-                            # Aggregate predictions (potentially considering speech)
-                            aggregated = aggregate_predictions(
-                                prediction, 
-                                homesounds.labels,
-                                is_speech=is_speech_prediction, 
-                                num_samples=1
-                            )
-                            
-                            # Log aggregation results
-                            agg_top_idx = np.argmax(aggregated)
-                            agg_top_score = float(aggregated[agg_top_idx])
-                            
-                            # Get label names for logging
-                            if agg_top_idx != top_idx:
-                                if isinstance(homesounds.labels, dict):
-                                    # Find labels for indices
-                                    orig_label = "unknown"
-                                    agg_label = "unknown"
-                                    for label, idx in homesounds.labels.items():
-                                        if idx == top_idx:
-                                            orig_label = label
-                                        if idx == agg_top_idx:
-                                            agg_label = label
-                                    logger.info(f"Aggregation changed top prediction: {orig_label} ({top_score:.4f}) -> {agg_label} ({agg_top_score:.4f})")
-                                elif isinstance(homesounds.labels, (list, tuple, np.ndarray)) and len(homesounds.labels) > 0:
-                                    orig_label = homesounds.labels[top_idx] if top_idx < len(homesounds.labels) else "unknown"
-                                    agg_label = homesounds.labels[agg_top_idx] if agg_top_idx < len(homesounds.labels) else "unknown"
-                                    logger.info(f"Aggregation changed top prediction: {orig_label} ({top_score:.4f}) -> {agg_label} ({agg_top_score:.4f})")
-                                else:
-                                    logger.info(f"Aggregation changed top prediction index: {top_idx} ({top_score:.4f}) -> {agg_top_idx} ({agg_top_score:.4f})")
-                            else:
-                                if isinstance(homesounds.labels, dict):
-                                    # Find label for index
-                                    label = "unknown"
-                                    for lbl, idx in homesounds.labels.items():
-                                        if idx == top_idx:
-                                            label = lbl
-                                            break
-                                    logger.info(f"Aggregation kept same top prediction: {label}, confidence: {top_score:.4f} -> {agg_top_score:.4f}")
-                                elif isinstance(homesounds.labels, (list, tuple, np.ndarray)) and len(homesounds.labels) > 0:
-                                    label = homesounds.labels[top_idx] if top_idx < len(homesounds.labels) else "unknown"
-                                    logger.info(f"Aggregation kept same top prediction: {label}, confidence: {top_score:.4f} -> {agg_top_score:.4f}")
-                                else:
-                                    logger.info(f"Aggregation kept same top prediction index: {top_idx}, confidence: {top_score:.4f} -> {agg_top_score:.4f}")
-                            
-                            # Log aggregated predictions for debugging
-                            logger.info("Aggregated predictions:")
-                            debug_predictions(aggregated, homesounds.labels)
-                            
-                            # Get top prediction after aggregation
-                            top_idx = np.argmax(aggregated)
-                            top_score = float(aggregated[top_idx])
-                            
-                            # Get the label for the top prediction
-                            top_label = "Unknown"
-                            if isinstance(homesounds.labels, dict):
-                                # Find label for index
-                                for lbl, idx in homesounds.labels.items():
-                                    if idx == top_idx:
-                                        top_label = lbl
-                                        break
-                            elif isinstance(homesounds.labels, (list, tuple, np.ndarray)) and len(homesounds.labels) > 0 and top_idx < len(homesounds.labels):
-                                top_label = homesounds.labels[top_idx]
-                            
-                            # Human-readable conversion if available
-                            human_label = top_label
-                            if hasattr(homesounds, 'to_human_labels') and isinstance(homesounds.to_human_labels, dict) and top_label in homesounds.to_human_labels:
-                                human_label = homesounds.to_human_labels[top_label]
-                            
-                            print(f"Top prediction: {human_label} ({top_score:.4f})")
-                            
-                            # Handle speech detection
-                            if top_label.lower() == "speech" and top_score > SPEECH_DETECTION_THRES:
-                                print(f"Speech detected with TensorFlow model. Processing sentiment...")
-                                if os.environ.get('USE_SPEECH', '0') == '1' and os.environ.get('USE_SENTIMENT', '0') == '1':
-                                    # Process speech
-                                    process_speech(audio_data, record_time, top_score)
-                                else:
-                                    # Normal sound emission
-                                    socketio.emit('audio_label', {
-                                        'label': human_label,
-                                        'accuracy': str(top_score),
-                                        'db': str(db)
-                                    })
-                                    print(f"EMITTING: {human_label} ({top_score:.2f})")
-                            else:
-                                # Emit the top prediction if above threshold
-                                if top_score > PREDICTION_THRES:
-                                    socketio.emit('audio_label', {
-                                        'label': human_label,
-                                        'accuracy': str(top_score),
-                                        'db': str(db)
-                                    })
-                                    print(f"EMITTING: {human_label} ({top_score:.2f})")
-                                else:
-                                    print(f"Top prediction {human_label} ({top_score:.4f}) below threshold, not emitting")
-                                    socketio.emit('audio_label', {
-                                        'label': 'Unrecognized Sound',
-                                        'accuracy': '0.2',
-                                        'db': str(db)
-                                    })
-                        except Exception as inner_e:
-                            print(f"Error processing TensorFlow prediction results: {inner_e}")
-                            traceback.print_exc()
-                            # Emit an error
-                            socketio.emit('audio_label', {
-                                'label': 'Error Processing',
-                                'accuracy': '0.0',
-                                'db': str(db)
-                            })
-            except Exception as e:
-                print(f"Error during TensorFlow prediction: {e}")
-                traceback.print_exc()
-                # Emit an error
-                socketio.emit('audio_label', {
-                    'label': 'Error Processing',
-                    'accuracy': '0.0',
-                    'db': str(db)
-                })
-    except Exception as e:
-        print(f"Error in predict_with_tensorflow: {e}")
-        traceback.print_exc()
-        # Emit an error
-        socketio.emit('audio_label', {
-            'label': 'Error Processing',
-            'accuracy': '0.0',
-            'db': str(db)
-        })
+    # Process with our enhanced PANNS processing function
+    prediction_results = process_audio_with_panns(
+        audio_data=audio_data,
+        timestamp=timestamp,
+        db_level=db_level,
+        config=config
+    )
     
-    # Always clean up memory
+    # For raw predictions, use a different event name
+    emit('prediction_raw', prediction_results)
     cleanup_memory()
 
 # Function to process speech with optional sentiment analysis
