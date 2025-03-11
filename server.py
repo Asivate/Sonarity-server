@@ -191,138 +191,101 @@ def load_models():
             print("PANNs model loaded successfully")
         else:
             print("Failed to load PANNs model")
-            raise Exception("Failed to load PANNs model. Please run 'python download_panns_model.py' to set up the required files.")
+            USE_PANNS_MODEL = False
+            print("PANNs model will not be used")
     except Exception as e:
         print(f"Error loading PANNs model: {e}")
         traceback.print_exc()
-        raise Exception("Failed to load PANNs model. Please check the error messages above.")
+        USE_PANNS_MODEL = False
+        print("PANNs model will not be used due to error")
 
-# Add a comprehensive debug function
-def debug_predictions(predictions, label_list):
-    print("===== DEBUGGING ALL PREDICTIONS (BEFORE THRESHOLD) =====")
-    try:
-        # Convert predictions to numpy array if needed
-        if not isinstance(predictions, np.ndarray):
-            try:
-                predictions = np.array(predictions)
-            except:
-                print(f"Could not convert predictions to numpy array. Type: {type(predictions)}")
-        
-        # Handle different label_list types
-        if label_list is None:
-            # Handle case where label_list is None
-            for idx, pred in enumerate(predictions):
-                print(f"Prediction {idx}: {pred:.6f}")
-        elif isinstance(label_list, dict):
-            # Handle dictionary labels (e.g., {label: index})
-            # For dictionaries, try to find the matching label for each index
-            for idx, pred in enumerate(predictions):
-                label_found = False
-                for label, label_idx in label_list.items():
-                    if label_idx == idx:
-                        print(f"{label}: {pred:.6f}")
-                        label_found = True
-                        break
-                if not label_found:
-                    print(f"Unknown({idx}): {pred:.6f}")
-        elif isinstance(label_list, (list, tuple, np.ndarray)):
-            # Handle list, tuple, or array of labels
-            if len(label_list) == 0:
-                # Empty list case
-                for idx, pred in enumerate(predictions):
-                    print(f"Prediction {idx}: {pred:.6f}")
-            else:
-                # Normal case with labels
-                for idx, pred in enumerate(predictions):
-                    if idx < len(label_list):
-                        try:
-                            print(f"{label_list[idx]}: {pred:.6f}")
-                        except Exception as e:
-                            print(f"Prediction {idx}: {pred:.6f} (Error accessing label: {e})")
-                    else:
-                        print(f"Unknown({idx}): {pred:.6f}")
-        else:
-            # Fallback for other label_list types
-            print(f"Unexpected label_list type: {type(label_list)}")
-            for idx, pred in enumerate(predictions):
-                print(f"Prediction {idx}: {pred:.6f}")
-        
-        print("=======================================================")
-    except Exception as e:
-        print(f"Error in debug_predictions: {e}")
-        traceback.print_exc()
-
-MODEL_URL = "https://www.dropbox.com/s/cq1d7uqg0l28211/example_model.hdf5?dl=1"
-MODEL_PATH = "models/example_model.hdf5"
-print("=====")
-print("Setting up sound recognition models...")
-
-USE_AST_MODEL = os.environ.get('USE_AST_MODEL', '1') == '1'
-USE_PANNS_MODEL = os.environ.get('USE_PANNS_MODEL', '0') == '1'
-print(f"AST model {'enabled' if USE_AST_MODEL else 'disabled'} based on environment settings")
-print(f"PANNs model {'enabled' if USE_PANNS_MODEL else 'disabled'} based on environment settings")
-
-try:
-    print("Loading AST model...")
-    ast_model_name = "MIT/ast-finetuned-audioset-10-10-0.4593"
-    ast_kwargs = {}
-    if torch.__version__ >= '2.1.1':
-        ast_kwargs["attn_implementation"] = "sdpa"
-        print("Using Scaled Dot Product Attention (SDPA) for faster inference")
-    ast_kwargs = {"torch_dtype": torch.float32}
-    with ast_lock:
-        models["ast"], models["feature_extractor"] = ast_model.load_ast_model(
-            model_name=ast_model_name,
-            **ast_kwargs
-        )
-        ast_model.initialize_class_labels(models["ast"])
-    print("AST model loaded successfully")
-except Exception as e:
-    print(f"Error loading AST model: {e}")
-    traceback.print_exc()
-    USE_AST_MODEL = False
-
-model_filename = os.path.abspath(MODEL_PATH)
-if not USE_AST_MODEL or True:
-    print("Loading TensorFlow model as backup...")
-    os.makedirs(os.path.dirname(model_filename), exist_ok=True)
-    
-    homesounds_model = Path(model_filename)
-    if not homesounds_model.is_file():
-        print("Downloading example_model.hdf5 [867MB]: ")
-        wget.download(MODEL_URL, MODEL_PATH)
-    
-    print("Using TensorFlow model: %s" % (model_filename))
-    
-    try:
-        with tf_graph.as_default():
-            with tf_session.as_default():
-                models["tensorflow"] = keras.models.load_model(model_filename)
-                print("Initializing TensorFlow model with a dummy prediction...")
-                dummy_input = np.zeros((1, 96, 64, 1))
-                _ = models["tensorflow"].predict(dummy_input)
-                print("Model prediction function initialized successfully")
-        print("TensorFlow model loaded successfully")
-        if not USE_AST_MODEL:
-            print("TensorFlow model will be used as primary model")
-            models["tensorflow"].summary()
-    except Exception as e:
-        print(f"Error loading TensorFlow model with standard method: {e}")
+    # Only attempt to load AST if it's enabled
+    if USE_AST_MODEL:
         try:
-            with tf_graph.as_default():
-                with tf_session.as_default():
-                    models["tensorflow"] = tf.keras.models.load_model(model_filename, compile=False)
-                    print("Initializing TensorFlow model with a dummy prediction...")
-                    dummy_input = np.zeros((1, 96, 64, 1))
-                    _ = models["tensorflow"].predict(dummy_input)
-                    print("Model prediction function initialized successfully")
-            print("TensorFlow model loaded with compile=False option")
-        except Exception as e2:
-            print(f"Error with fallback method: {e2}")
-            if not USE_AST_MODEL:
-                raise Exception("Could not load TensorFlow model with any method, and AST model is not enabled")
+            print("Loading AST model...")
+            import ast_model  # Import only if needed
+            ast_lock = Lock()  # Create lock only if AST is used
+            ast_model_name = "MIT/ast-finetuned-audioset-10-10-0.4593"
+            ast_kwargs = {}
+            if torch.__version__ >= '2.1.1':
+                ast_kwargs["attn_implementation"] = "sdpa"
+                print("Using Scaled Dot Product Attention (SDPA) for faster inference")
+            ast_kwargs = {"torch_dtype": torch.float32}
+            with ast_lock:
+                models["ast"], models["feature_extractor"] = ast_model.load_ast_model(
+                    model_name=ast_model_name,
+                    **ast_kwargs
+                )
+                ast_model.initialize_class_labels(models["ast"])
+            print("AST model loaded successfully")
+        except Exception as e:
+            print(f"Error loading AST model: {e}")
+            traceback.print_exc()
+            USE_AST_MODEL = False
+            print("AST model will not be used due to error")
 
-print(f"Using {'AST' if USE_AST_MODEL else 'TensorFlow'} model as primary model")
+    # Only attempt to load TensorFlow if needed (when both AST and PANNs are disabled)
+    MODEL_URL = "https://www.dropbox.com/s/cq1d7uqg0l28211/example_model.hdf5?dl=1"
+    MODEL_PATH = "models/example_model.hdf5"
+    if not USE_AST_MODEL and not USE_PANNS_MODEL:
+        try:
+            print("Loading TensorFlow model as backup...")
+            # Import TensorFlow only if needed
+            import tensorflow as tf
+            from tensorflow import keras
+            tf_graph = tf.Graph()
+            tf_session = tf.compat.v1.Session(graph=tf_graph)
+            
+            model_filename = os.path.abspath(MODEL_PATH)
+            os.makedirs(os.path.dirname(model_filename), exist_ok=True)
+            
+            homesounds_model = Path(model_filename)
+            if not homesounds_model.is_file():
+                print("Downloading example_model.hdf5 [867MB]: ")
+                wget.download(MODEL_URL, MODEL_PATH)
+            
+            print("Using TensorFlow model: %s" % (model_filename))
+            
+            try:
+                with tf_graph.as_default():
+                    with tf_session.as_default():
+                        models["tensorflow"] = keras.models.load_model(model_filename)
+                        print("Initializing TensorFlow model with a dummy prediction...")
+                        dummy_input = np.zeros((1, 96, 64, 1))
+                        _ = models["tensorflow"].predict(dummy_input)
+                        print("Model prediction function initialized successfully")
+                print("TensorFlow model loaded successfully")
+                print("TensorFlow model will be used as primary model")
+                models["tensorflow"].summary()
+            except Exception as e:
+                print(f"Error loading TensorFlow model with standard method: {e}")
+                try:
+                    with tf_graph.as_default():
+                        with tf_session.as_default():
+                            models["tensorflow"] = tf.keras.models.load_model(model_filename, compile=False)
+                            print("Initializing TensorFlow model with a dummy prediction...")
+                            dummy_input = np.zeros((1, 96, 64, 1))
+                            _ = models["tensorflow"].predict(dummy_input)
+                            print("Model prediction function initialized successfully")
+                    print("TensorFlow model loaded with compile=False option")
+                except Exception as e2:
+                    print(f"Error with fallback method: {e2}")
+                    raise Exception("Could not load any sound recognition model. Please enable at least one model.")
+        except Exception as e:
+            print(f"Error setting up TensorFlow model: {e}")
+            traceback.print_exc()
+            raise Exception("No sound recognition models are available. Please enable at least one model.")
+
+    # Determine which model is primary
+    if USE_PANNS_MODEL:
+        print("Using PANNs model as primary model")
+        primary_model = "panns"
+    elif USE_AST_MODEL:
+        print("Using AST model as primary model")
+        primary_model = "ast"
+    else:
+        print("Using TensorFlow model as primary model")
+        primary_model = "tensorflow"
 
 def audio_samples(in_data, frame_count, time_info, status_flags):
     np_wav = np.frombuffer(in_data, dtype=np.int16).astype(np.float32) / 32768.0
@@ -370,7 +333,26 @@ def handle_source(json_data):
             return
         
         if -db > DBLEVEL_THRES:
-            if USE_AST_MODEL:
+            # Process with the appropriate model based on what's enabled
+            if USE_PANNS_MODEL:
+                # Convert data to numpy array
+                np_data = np.array(data, dtype=np.float32)
+                print(f"Processing with PANNs model, data shape: {np_data.shape}")
+                
+                # Use our process_audio_with_panns function
+                prediction_results = process_audio_with_panns(
+                    audio_data=np_data,
+                    timestamp=record_time,
+                    db_level=db,
+                    config=None  # Use default config
+                )
+                
+                # Emit the results
+                socketio.emit('panns_prediction', prediction_results)
+                cleanup_memory()
+                
+            elif USE_AST_MODEL:
+                # Only try to use AST model if it's enabled
                 with ast_lock:
                     np_data = np.array(data, dtype=np.float32)
                     print(f"Processing with AST model, data shape: {np_data.shape}")
@@ -378,41 +360,13 @@ def handle_source(json_data):
                         np_data, 
                         RATE, 
                         models["ast"], 
-                        models["feature_extractor"], 
-                        threshold=PREDICTION_THRES
+                        models["feature_extractor"],
+                        top_k=10
                     )
-                    print("===== AST MODEL RAW PREDICTIONS =====")
-                    for pred in ast_predictions["top_predictions"][:5]:
-                        print(f"  {pred['label']}: {pred['confidence']:.6f}")
                     
-                    raw_predictions = ast_predictions["raw_predictions"]
-                    is_speech_prediction = False
-                    for pred in ast_predictions["top_predictions"]:
-                        if pred["label"].lower() == "speech" and pred["confidence"] > SPEECH_DETECTION_THRES:
-                            is_speech_prediction = True
-                            logger.info(f"AST detected potential speech with confidence: {pred['confidence']:.4f}")
-                            break
-                    
-                    if raw_predictions is not None and len(raw_predictions) > 0:
-                        aggregated_predictions = aggregate_predictions(
-                            raw_predictions, 
-                            ast_model.class_labels,
-                            is_speech=is_speech_prediction
-                        )
-                        ast_predictions = ast_model.process_predictions(
-                            aggregated_predictions, 
-                            ast_model.class_labels,
-                            threshold=PREDICTION_THRES
-                        )
-                        print("===== AGGREGATED AST MODEL PREDICTIONS =====")
-                        for pred in ast_predictions["top_predictions"][:5]:
-                            print(f"  {pred['label']}: {pred['confidence']:.6f}")
-                    
-                    finger_snap_detected = False
-                    for pred in ast_predictions["top_predictions"]:
-                        if (pred["label"] == "Finger snapping" or pred["label"] == "Snap") and pred["confidence"] > FINGER_SNAP_THRES:
-                            finger_snap_detected = True
-                            print(f"Finger snap detected with confidence: {pred['confidence']:.6f}")
+                    # Check for finger snap
+                    for pred in ast_predictions["raw_predictions"]:
+                        if "finger-snap" in pred["label"].lower() and pred["confidence"] > FINGER_SNAP_THRES:
                             socketio.emit('audio_label', {
                                 'label': 'Finger Snap',
                                 'accuracy': str(pred["confidence"]),
@@ -485,167 +439,53 @@ def handle_source(json_data):
                                             'emotion': emotion,
                                             'sentiment_score': str(confidence)
                                         })
-                                        print(f"EMITTING SPEECH WITH BASIC SENTIMENT: {label}")
                                     else:
                                         socketio.emit('audio_label', {
                                             'label': 'Speech',
-                                            'accuracy': '0.6',
+                                            'accuracy': str(top_confidence),
                                             'db': str(db)
                                         })
-                                        print("EMITTING BASIC SPEECH DETECTION (no sentiment)")
-                                    cleanup_memory()
-                                    return
-                        
-                        if top_confidence > PREDICTION_THRES or (top_label == "finger-snap" and top_confidence > FINGER_SNAP_THRES):
+                                    print(f"EMITTING SPEECH: {label}")
+                            else:
+                                socketio.emit('audio_label', {
+                                    'label': 'Speech',
+                                    'accuracy': str(top_confidence),
+                                    'db': str(db)
+                                })
+                                print(f"EMITTING: Speech ({top_confidence:.6f})")
+                        else:
                             socketio.emit('audio_label', {
                                 'label': human_label,
                                 'accuracy': str(top_confidence),
                                 'db': str(db)
                             })
-                            print(f"EMITTING AST PREDICTION: {human_label} ({top_confidence:.6f})")
-                        else:
-                            print(f"Top AST prediction {human_label} ({top_confidence:.6f}) below threshold")
-                            if not finger_snap_detected:
-                                socketio.emit('audio_label', {
-                                    'label': 'Unrecognized Sound',
-                                    'accuracy': '0.2',
-                                    'db': str(db)
-                                })
+                            print(f"EMITTING: {human_label} ({top_confidence:.6f})")
                     else:
-                        print("No mapped predictions found from AST model")
-                        if not finger_snap_detected:
-                            socketio.emit('audio_label', {
-                                'label': 'Unrecognized Sound',
-                                'accuracy': '0.2',
-                                'db': str(db)
-                            })
-            else:
-                with tf_lock:
-                    np_data = np.array(data, dtype=np.float32)
-                    np_data = np.reshape(np_data, (1, 96, 64, 1))
-                    print(f"Successfully convert to NP rep {np_data[0][0][0]}")
-                    print(f"Db... {-db}")
-                    print("Making prediction with TensorFlow model...")
-                    with tf_graph.as_default():
-                        with tf_session.as_default():
-                            predictions = models["tensorflow"].predict(np_data)
-                    
-                    if np.ndim(predictions) > 0 and len(predictions) > 0:
-                        debug_predictions(predictions[0], homesounds.labels)
-                        is_speech_prediction = False
-                        speech_idx = -1
-                        for idx, label in enumerate(homesounds.labels):
-                            if label.lower() == "speech":
-                                speech_idx = idx
-                                break
-                        if speech_idx >= 0 and speech_idx < len(predictions[0]):
-                            if predictions[0][speech_idx] > SPEECH_DETECTION_THRES:
-                                is_speech_prediction = True
-                                logger.info(f"Detected potential speech with confidence: {predictions[0][speech_idx]:.4f}")
-                        
-                        aggregated_predictions = aggregate_predictions(
-                            predictions[0], 
-                            homesounds.labels,
-                            is_speech=is_speech_prediction
-                        )
-                        logger.info("Aggregated predictions:")
-                        debug_predictions(aggregated_predictions, homesounds.labels)
-                        
-                        pred_max = -1
-                        pred_max_val = 0
-                        pred_label = None
-                        for l in active_context:
-                            i = homesounds.labels.get(l, -1)
-                            if i >= 0 and i < len(aggregated_predictions) and aggregated_predictions[i] > pred_max_val:
-                                pred_max = i
-                                pred_max_val = aggregated_predictions[i]
-                        
-                        if pred_max != -1 and pred_max_val > PREDICTION_THRES:
-                            for label, index in homesounds.labels.items():
-                                if index == pred_max:
-                                    human_label = homesounds.to_human_labels.get(label, label)
-                                    print(f"Top prediction: {human_label} ({pred_max_val:.4f})")
-                                    if human_label == "Chopping" and pred_max_val < CHOPPING_THRES:
-                                        print(f"Ignoring Chopping sound with confidence {pred_max_val:.4f} < {CHOPPING_THRES} threshold")
-                                        socketio.emit('audio_label', {
-                                            'label': 'Unrecognized Sound',
-                                            'accuracy': '0.2',
-                                            'db': str(db)
-                                        })
-                                        cleanup_memory()
-                                        return
-                                    if human_label == "Speech" and pred_max_val > SPEECH_SENTIMENT_THRES:
-                                        print("Speech detected with TensorFlow model. Processing sentiment...")
-                                        sentiment_result = process_speech_with_sentiment(np_data)
-                                        if sentiment_result:
-                                            if isinstance(sentiment_result, dict) and 'sentiment' in sentiment_result and isinstance(sentiment_result['sentiment'], dict) and 'category' in sentiment_result['sentiment']:
-                                                label = f"Speech {sentiment_result['sentiment']['category']}"
-                                                socketio.emit('audio_label', {
-                                                    'label': label,
-                                                    'accuracy': str(sentiment_result['sentiment']['confidence']),
-                                                    'db': str(db),
-                                                    'emoji': sentiment_result['sentiment']['emoji'],
-                                                    'transcription': sentiment_result['text'],
-                                                    'emotion': sentiment_result['sentiment']['original_emotion'],
-                                                    'sentiment_score': str(sentiment_result['sentiment']['confidence'])
-                                                })
-                                                print(f"EMITTING SPEECH WITH SENTIMENT: {label} with emoji {sentiment_result['sentiment']['emoji']}")
-                                            else:
-                                                label = "Speech"
-                                                if isinstance(sentiment_result, dict):
-                                                    transcription = sentiment_result.get('transcription', sentiment_result.get('text', ''))
-                                                    sentiment_value = sentiment_result.get('sentiment', 'neutral')
-                                                    confidence = sentiment_result.get('confidence', 0.5)
-                                                    if isinstance(sentiment_value, dict):
-                                                        category = sentiment_value.get('category', 'Neutral')
-                                                        emoji = sentiment_value.get('emoji', '😐')
-                                                        emotion = sentiment_value.get('original_emotion', 'neutral')
-                                                        confidence = sentiment_value.get('confidence', confidence)
-                                                    else:
-                                                        category = 'Neutral' if isinstance(sentiment_value, str) else 'Neutral'
-                                                        emoji = '😐'
-                                                        emotion = 'neutral'
-                                                    label = f"Speech {category}"
-                                                    socketio.emit('audio_label', {
-                                                        'label': label,
-                                                        'accuracy': str(confidence),
-                                                        'db': str(db),
-                                                        'emoji': emoji,
-                                                        'transcription': transcription,
-                                                        'emotion': emotion,
-                                                        'sentiment_score': str(confidence)
-                                                    })
-                                                    print(f"EMITTING SPEECH WITH BASIC SENTIMENT: {label}")
-                                                else:
-                                                    socketio.emit('audio_label', {
-                                                    'label': 'Speech',
-                                                    'accuracy': '0.6',
-                                                    'db': str(db)
-                                                })
-                                                    print("EMITTING BASIC SPEECH DETECTION (no sentiment)")
-                                                cleanup_memory()
-                                            return
-                                    socketio.emit('audio_label', {
-                                        'label': human_label,
-                                        'accuracy': str(pred_max_val),
-                                        'db': str(db)
-                                    })
-                                    cleanup_memory()
-                                    break
-                        else:
-                            print(f"No prediction above threshold: {pred_max_val:.4f}")
-                            socketio.emit('audio_label', {
-                                'label': 'Unrecognized Sound',
-                                'accuracy': '0.2',
-                                'db': str(db)
-                            })
-                    else:
-                        print("Invalid prediction format")
                         socketio.emit('audio_label', {
-                            'label': 'Error Processing',
-                            'accuracy': '0.0',
+                            'label': 'Unrecognized Sound',
+                            'accuracy': '0.2',
                             'db': str(db)
                         })
+                        print("No valid predictions from AST model")
+                    
+                    cleanup_memory()
+            else:
+                # Fallback to TensorFlow model if available
+                if "tensorflow" in models:
+                    # Process with TensorFlow model
+                    # (Implementation would go here)
+                    socketio.emit('audio_label', {
+                        'label': 'Using TensorFlow Model',
+                        'accuracy': '0.5',
+                        'db': str(db)
+                    })
+                else:
+                    # No models available
+                    socketio.emit('audio_label', {
+                        'label': 'No Sound Recognition Models Available',
+                        'accuracy': '0.0',
+                        'db': str(db)
+                    })
         else:
             print(f"Sound level ({-db} dB) below threshold ({DBLEVEL_THRES} dB)")
             socketio.emit('audio_label', {
@@ -654,12 +494,12 @@ def handle_source(json_data):
                 'db': str(db)
             })
     except Exception as e:
-        print(f"Error in handle_source: {str(e)}")
+        print(f"Error in handle_source: {e}")
         traceback.print_exc()
         socketio.emit('audio_label', {
             'label': 'Error Processing Audio',
             'accuracy': '0.0',
-            'db': '-100'
+            'db': str(db) if 'db' in locals() else '-100'
         })
 
 @socketio.on('audio_data')
