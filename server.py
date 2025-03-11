@@ -234,10 +234,10 @@ def audio_samples(in_data, frame_count, time_info, status_flags):
         
         audio_stats = {
             'length': len(np_wav),
-            'min': np.min(np_wav),
-            'max': np.max(np_wav),
-            'mean': np.mean(np_wav),
-            'rms': rms,
+            'min': float(np.min(np_wav)),
+            'max': float(np.max(np_wav)),
+            'mean': float(np.mean(np_wav)),
+            'rms': float(rms),
         }
         log_audio_stats(audio_stats)
         log_status(f"Live audio capture: {len(np_wav)} samples, {db:.2f} dB", "info")
@@ -486,7 +486,16 @@ def handle_audio(data):
             db_level = calculate_db(audio_data)
         
         # Log audio statistics for debugging
-        log_audio_stats(audio_data)
+        print("\nAUDIO STATS:")
+        # Create a stats dictionary for log_audio_stats
+        audio_stats = {
+            'length': len(audio_data),
+            'min': float(np.min(audio_data)),
+            'max': float(np.max(audio_data)),
+            'mean': float(np.mean(audio_data)),
+            'rms': float(np.sqrt(np.mean(audio_data**2)))
+        }
+        log_audio_stats(audio_stats)
         
         # Process the audio with our model directly without buffering 
         # (since the client now sends the correct size)
@@ -640,7 +649,15 @@ def process_audio_with_panns(audio_data, db_level=None, timestamp=None, config=N
             audio_data = audio_data.astype(np.float32)
         
         # Log detailed audio statistics
-        log_audio_stats(audio_data)
+        # Create a stats dictionary for log_audio_stats
+        audio_stats = {
+            'length': len(audio_data),
+            'min': float(np.min(audio_data)),
+            'max': float(np.max(audio_data)),
+            'mean': float(np.mean(audio_data)),
+            'rms': float(np.sqrt(np.mean(audio_data**2)))
+        }
+        log_audio_stats(audio_stats)
         
         # Fix NaN or Inf values if present
         if np.any(np.isnan(audio_data)) or np.any(np.isinf(audio_data)):
