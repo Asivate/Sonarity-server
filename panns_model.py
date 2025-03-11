@@ -45,7 +45,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(level
 logger = logging.getLogger(__name__)
 
 # Define model paths and constants
-MODEL_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'assets')
+MODEL_DIR = '/home/hirwa0250/Sonarity-server/assets'  # Use absolute path to ensure correct location
 MODEL_PATH = os.path.join(MODEL_DIR, 'Cnn9_GMP_64x64_300000_iterations_mAP=0.37.pth')
 SCALAR_FN = os.path.join(MODEL_DIR, 'scalar.h5')
 CSV_FNAME = os.path.join(MODEL_DIR, 'audioset_labels.csv')

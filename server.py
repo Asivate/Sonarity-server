@@ -24,6 +24,7 @@ import queue
 from transformers import pipeline
 import logging
 import json
+import netifaces
 
 # Import our PANNs model implementation
 import panns_model
@@ -80,26 +81,24 @@ os.path.dirname(os.path.abspath(__file__))
 
 # Helper function to get the computer's IP addresses
 def get_ip_addresses():
+    """Get available IP addresses for the server."""
     ip_list = []
+    # Add the external IP first (prioritize this one)
+    ip_list.append('34.16.101.179')  # External IP address for physical devices
+    
     try:
-        hostname = socket.gethostname()
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        try:
-            s.connect(('10.255.255.255', 1))
-            primary_ip = s.getsockname()[0]
-            ip_list.append(primary_ip)
-        except Exception:
-            pass
-        finally:
-            s.close()
-        
-        # Get all IP addresses
-        try:
-            for ip in socket.gethostbyname_ex(hostname)[2]:
-                if ip not in ip_list:
-                    ip_list.append(ip)
-        except:
-            pass
+        # Then add the local IPs for completeness
+        interfaces = netifaces.interfaces()
+        for interface in interfaces:
+            try:
+                addresses = netifaces.ifaddresses(interface)
+                if netifaces.AF_INET in addresses:
+                    for link in addresses[netifaces.AF_INET]:
+                        ip = link['addr']
+                        if ip != '127.0.0.1' and ip != '0.0.0.0' and ip != '34.16.101.179':
+                            ip_list.append(ip)
+            except:
+                pass
     except:
         pass
     return ip_list
@@ -253,18 +252,44 @@ def handle_source(json_data):
     - time: timestamp (optional)
     """
     try:
+        # Log received data for debugging (truncating large feature arrays)
+        debug_data = json_data.copy() if isinstance(json_data, dict) else json_data
+        if isinstance(debug_data, dict) and 'features' in debug_data:
+            features_len = len(debug_data['features']) if debug_data['features'] else 0
+            debug_data['features'] = f"[features array, length: {features_len}]"
+        print(f"Received audio feature data: {debug_data}")
+        
         # Parse JSON if it's a string
         if isinstance(json_data, str):
             try:
                 json_data = json.loads(json_data)
-            except json.JSONDecodeError:
-                print("Invalid JSON in audio_feature_data")
+                print("Successfully parsed JSON string data")
+            except json.JSONDecodeError as e:
+                print(f"Invalid JSON in audio_feature_data: {e}")
                 return
         
-        # Get audio features, DB level, and timestamp
-        audio_features = json_data.get('features')
+        # Check for features in different possible field names
+        if 'features' in json_data:
+            audio_features = json_data.get('features')
+        elif 'audioFeatures' in json_data:
+            audio_features = json_data.get('audioFeatures')
+            print("Using 'audioFeatures' field instead of 'features'")
+        elif 'data' in json_data:
+            audio_features = json_data.get('data')
+            print("Using 'data' field instead of 'features'")
+        else:
+            print("Missing audio features in request - no recognized features field found")
+            print(f"Available fields: {list(json_data.keys()) if isinstance(json_data, dict) else 'None'}")
+            socketio.emit('prediction', {
+                "predictions": [{"label": "No Audio", "score": 1.0}],
+                "timestamp": time.time(),
+                "db": None
+            })
+            return
+            
+        # Get other parameters
         db = json_data.get('db')
-        timestamp = json_data.get('time', time.time())
+        timestamp = json_data.get('time', json_data.get('timestamp', time.time()))
         
         # Validate audio features
         if not audio_features or len(audio_features) == 0:
@@ -278,7 +303,17 @@ def handle_source(json_data):
         
         # Convert audio features to numpy array if needed
         if not isinstance(audio_features, np.ndarray):
-            audio_features = np.array(audio_features, dtype=np.float32)
+            try:
+                audio_features = np.array(audio_features, dtype=np.float32)
+                print(f"Converted audio features to numpy array, shape: {audio_features.shape}")
+            except Exception as e:
+                print(f"Error converting audio features to numpy array: {e}")
+                socketio.emit('prediction', {
+                    "predictions": [{"label": "Invalid Features", "score": 1.0}],
+                    "timestamp": timestamp,
+                    "db": db
+                })
+                return
         
         # Calculate dB level if not provided
         if db is None:
@@ -307,11 +342,11 @@ def handle_source(json_data):
             return
         
         # Process with PANNs model
-        print(f"Processing audio features (db: {db})")
+        print(f"Processing audio features (db: {db}, features shape: {audio_features.shape})")
         
         # Process the audio with PANNs model
         result = process_audio_with_panns(
-            audio_data=audio_features, 
+            audio_features, 
             timestamp=timestamp, 
             db_level=db,
             config={
@@ -349,29 +384,55 @@ def handle_audio(data):
     - timestamp: optional timestamp
     """
     try:
+        # Log complete received data for debugging (without large audio data)
+        debug_data = data.copy() if isinstance(data, dict) else data
+        if isinstance(debug_data, dict) and 'audio' in debug_data:
+            audio_length = len(debug_data['audio']) if debug_data['audio'] else 0
+            debug_data['audio'] = f"[base64 audio data, length: {audio_length}]"
+        print(f"Received audio data: {debug_data}")
+        
         # Extract data from JSON
         if isinstance(data, str):
             # Parse JSON if it's a string
             try:
                 json_data = json.loads(data)
-            except json.JSONDecodeError:
-                print("Invalid JSON data received")
+                print("Successfully parsed JSON string data")
+            except json.JSONDecodeError as e:
+                print(f"Invalid JSON data received: {e}")
                 return
         else:
             json_data = data
-        
-        # Validate the required fields
-        if 'audio' not in json_data:
-            print("Missing audio data in request")
+            
+        # Handle different client formats - some clients might send data in different fields
+        # Check for 'audio' field
+        if 'audio' in json_data:
+            audio_base64 = json_data['audio']
+        # Check for alternative fields that might contain audio data
+        elif 'audioData' in json_data:
+            audio_base64 = json_data['audioData']
+            print("Using 'audioData' field instead of 'audio'")
+        elif 'data' in json_data:
+            audio_base64 = json_data['data']
+            print("Using 'data' field instead of 'audio'")
+        else:
+            print("Missing audio data in request - no recognized audio field found")
+            print(f"Available fields: {list(json_data.keys()) if isinstance(json_data, dict) else 'None'}")
             return
         
-        # Get audio format and convert base64 to numpy array
+        # Validate audio data
+        if not audio_base64:
+            print("Empty audio data received")
+            return
+            
+        # Get audio format and other parameters
         audio_format = json_data.get('format', 'float32')
-        base64_audio = json_data['audio']
+        db_level = json_data.get('db')
+        timestamp = json_data.get('timestamp', time.time())
         
         # Decode base64 audio data
         try:
-            audio_bytes = base64.b64decode(base64_audio)
+            audio_bytes = base64.b64decode(audio_base64)
+            print(f"Successfully decoded base64 audio data, length: {len(audio_bytes)} bytes")
             
             # Convert bytes to numpy array based on format
             if audio_format == 'float32':
@@ -380,26 +441,25 @@ def handle_audio(data):
                 # Convert int16 to float32 normalized between -1 and 1
                 audio_data = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
             else:
-                print(f"Unsupported audio format: {audio_format}")
-                return
+                print(f"Unsupported audio format: {audio_format}, defaulting to float32")
+                audio_data = np.frombuffer(audio_bytes, dtype=np.float32)
             
             # Log audio statistics
             audio_length = len(audio_data)
-            audio_min = np.min(audio_data)
-            audio_max = np.max(audio_data)
-            audio_mean = np.mean(audio_data)
-            audio_rms = np.sqrt(np.mean(np.square(audio_data)))
-            
-            print(f"Received audio: {audio_length} samples, min={audio_min:.4f}, max={audio_max:.4f}, mean={audio_mean:.4f}, rms={audio_rms:.4f}")
+            if audio_length > 0:
+                audio_min = np.min(audio_data)
+                audio_max = np.max(audio_data)
+                audio_mean = np.mean(audio_data)
+                audio_rms = np.sqrt(np.mean(np.square(audio_data)))
+                print(f"Processed audio: {audio_length} samples, min={audio_min:.4f}, max={audio_max:.4f}, mean={audio_mean:.4f}, rms={audio_rms:.4f}")
+            else:
+                print("Warning: Audio data has 0 samples after conversion")
+                return
             
             # Calculate dB level if not provided
-            db_level = json_data.get('db')
             if db_level is None:
                 db_level = dbFS(audio_rms)
                 print(f"Calculated dB level: {db_level}")
-            
-            # Get timestamp or use current time
-            timestamp = json_data.get('timestamp', time.time())
             
             # Process audio with PANNs model
             result = process_audio_with_panns(audio_data, timestamp, db_level)
@@ -909,17 +969,19 @@ def handle_connect(auth=None):
         ip_str = ", ".join(ip_addresses)
         print(f"Server running on: {ip_str}")
         
+        # Always prioritize the external IP for client connections
+        primary_ip = "34.16.101.179"
+        
         # Send server status to the client
         status_data = {
             "server_status": "connected",
             "model_loaded": True,  # Always show model as loaded for better UX
             "server_time": time.time(),
-            "server_ip": ip_addresses[0] if ip_addresses else "unknown"
+            "server_ip": primary_ip
         }
         
         # Get available labels
         try:
-            # First try importing from the module level
             from panns_model import get_available_labels
             status_data["available_labels"] = get_available_labels()
         except Exception as e:
@@ -1327,48 +1389,41 @@ def get_labels():
     })
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Sonarity Audio Analysis Server')
-    parser.add_argument('--port', type=int, default=8080, help='Port to run the server on (default: 8080)')
-    parser.add_argument('--debug', action='store_true', help='Run in debug mode')
-    parser.add_argument('--use-google-speech', action='store_true', help='Use Google Cloud Speech-to-Text instead of Whisper')
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description="SoundWatch Server")
+    parser.add_argument("--port", type=int, default=8080, help="Port to run the server on")
+    parser.add_argument("--host", type=str, default="0.0.0.0", help="Host to run the server on")
+    parser.add_argument("--use-google-speech", action="store_true", help="Use Google Speech-to-Text instead of local speech recognition")
+    parser.add_argument("--debug", action="store_true", help="Run in debug mode")
     args = parser.parse_args()
     
-    if args.use_google_speech:
-        USE_GOOGLE_SPEECH = True
-        logger.info("Using Google Cloud Speech-to-Text for speech recognition")
-    else:
-        USE_GOOGLE_SPEECH = False
-        logger.info("Using Whisper for speech recognition")
-    
-    print("=====")
-    print("Setting up sound recognition models...")
+    # Load models
+    print("=====\nSetting up sound recognition models...")
     load_models()
     
-    # Set primary_model to PANNs
-    primary_model = "panns"
+    # Set up background thread
+    with thread_lock:
+        if thread is None:
+            thread = socketio.start_background_task(background_thread)
     
+    # Display startup banner
     ip_addresses = get_ip_addresses()
+    external_ip = "34.16.101.179"  # Your external IP address
     
-    print("\n" + "="*60)
+    print("\n============================================================")
     print("SONARITY SERVER STARTED")
-    print("="*60)
+    print("============================================================")
+    print("Server is available at:")
+    for i, ip in enumerate(ip_addresses):
+        print(f"{i+1}. http://{ip}:{args.port}")
+        print(f"   WebSocket: ws://{ip}:{args.port}")
     
-    if ip_addresses:
-        print("Server is available at:")
-        for i, ip in enumerate(ip_addresses):
-            print(f"{i+1}. http://{ip}:{args.port}")
-            print(f"   WebSocket: ws://{ip}:{args.port}")
-        print("\nExternal access: http://34.16.101.179:%d" % args.port)
-        print("External WebSocket: ws://34.16.101.179:%d" % args.port)
-        print("\nPreferred connection address: http://%s:%d" % (ip_addresses[0], args.port))
-        print("Preferred WebSocket address: ws://%s:%d" % (ip_addresses[0], args.port))
-    else:
-        print("Could not determine IP address. Make sure you're connected to a network.")
-        print(f"Try connecting to your server's IP address on port {args.port}")
-        print("\nExternal access: http://34.16.101.179:%d" % args.port)
-        print("External WebSocket: ws://34.16.101.179:%d" % args.port)
+    print(f"\nExternal access: http://{external_ip}:{args.port}")
+    print(f"External WebSocket: ws://{external_ip}:{args.port}")
     
-    print("="*60 + "\n")
+    print(f"\nPreferred connection address: http://{external_ip}:{args.port}")
+    print(f"Preferred WebSocket address: ws://{external_ip}:{args.port}")
+    print("============================================================\n")
     
-    port = int(os.environ.get('PORT', args.port))
-    socketio.run(app, host='0.0.0.0', port=port, debug=args.debug)
+    # Start the server - make sure to listen on all interfaces
+    socketio.run(app, host=args.host, port=args.port, debug=args.debug)
