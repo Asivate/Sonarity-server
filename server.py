@@ -118,7 +118,7 @@ RATE = 16000  # Audio sample rate
 CHUNK = 1024  # Audio chunk size
 CHANNELS = 1  # Mono audio
 SILENCE_THRES = 30  # Silence threshold in dB
-DBLEVEL_THRES = 60  # Decibel level threshold
+DBLEVEL_THRES = 30  # Decibel level threshold (changed from 60 to 30)
 PREDICTION_THRES = 0.15  # Prediction confidence threshold
 SPEECH_DETECTION_THRES = 0.3  # Threshold for speech detection
 MINIMUM_AUDIO_LENGTH = 16000  # Minimum audio length (1 second at 16kHz)
@@ -501,9 +501,9 @@ def process_audio_with_panns(audio_data, timestamp=None, db_level=None, config=N
             "db": db_level
         }
     
-    # Check if sound is too quiet
-    if db_level is not None and -db_level > db_level_threshold:
-        print(f"Sound level ({-db_level} dB) above threshold ({db_level_threshold} dB), processing...")
+    # Check if sound is loud enough to process
+    if db_level is not None and -db_level < db_level_threshold:
+        print(f"Sound level ({-db_level} dB) below threshold ({db_level_threshold} dB), processing...")
     else:
         print(f"Sound too quiet (dB: {db_level}, threshold: {db_level_threshold})")
         return {
