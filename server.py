@@ -184,7 +184,7 @@ def load_models():
     # Load PANNs model if enabled
     if USE_PANNS_MODEL:
         print("Loading PANNs model...")
-        panns_model.initialize()
+        panns_model.load_panns_model()
         models["panns"] = True
         print("PANNs model loaded successfully")
     
