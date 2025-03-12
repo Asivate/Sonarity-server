@@ -483,7 +483,8 @@ def handle_audio(data):
         
         # Calculate dB level if not provided
         if db_level is None:
-            db_level = calculate_db(audio_data)
+            rms = np.sqrt(np.mean(np.square(audio_data)))
+            db_level = dbFS(rms)
         
         # Log audio statistics for debugging
         print("\nAUDIO STATS:")
@@ -891,11 +892,15 @@ def emit_prediction(predictions, db_level, timestamp=None):
 recent_audio_buffer = []
 MAX_BUFFER_SIZE = 5
 
-def process_speech_with_sentiment(audio_data):
+def process_speech_with_sentiment(audio_data, record_time=None, confidence=0.8):
     """Process speech audio, transcribe it and analyze sentiment."""
     SPEECH_MAX_BUFFER_SIZE = 5
     MIN_WORD_COUNT = 3
     MIN_CONFIDENCE = 0.7
+    
+    # Set default values if not provided
+    if record_time is None:
+        record_time = time.time() * 1000
     
     if not hasattr(process_speech_with_sentiment, "recent_audio_buffer"):
         process_speech_with_sentiment.recent_audio_buffer = []
@@ -951,76 +956,81 @@ def process_speech_with_sentiment(audio_data):
     logger.info("Transcribing speech to text...")
     print("Transcribing with enhanced audio processing...")
     
-    transcription_result = None
-    
-    if os.environ.get('USE_GOOGLE_SPEECH', '0') == '1':
-        if models.get("google_speech_processor", None) is None:
-            from google_speech import GoogleSpeechToText
-            models["google_speech_processor"] = GoogleSpeechToText()
+    try:
+        transcription_result = None
         
-        transcription_result = models["google_speech_processor"].transcribe(audio_data, RATE)
-        logger.info(f"Used Google Cloud Speech for transcription")
-    else:
-        transcription_result = models["speech_processor"].transcribe(audio_data, RATE)
-        logger.info(f"Used Whisper for transcription")
-    
-    if not transcription_result or not transcription_result.get('text'):
-        logger.info(f"No valid transcription found")
+        if os.environ.get('USE_GOOGLE_SPEECH', '0') == '1':
+            if models.get("google_speech_processor", None) is None:
+                from google_speech import GoogleSpeechToText
+                models["google_speech_processor"] = GoogleSpeechToText()
+            
+            transcription_result = models["google_speech_processor"].transcribe(concatenated_audio, RATE)
+            logger.info(f"Used Google Cloud Speech for transcription")
+        else:
+            if models.get("speech_processor", None) is None:
+                from speech_to_text import SpeechToText
+                models["speech_processor"] = SpeechToText()
+                
+            transcription_result = models["speech_processor"].transcribe(concatenated_audio, RATE)
+            logger.info(f"Used Whisper for transcription")
+        
+        if not transcription_result or not transcription_result.get('text'):
+            logger.info(f"No valid transcription found")
+            socketio.emit('audio_label', {
+                'label': 'Speech',
+                'accuracy': str(confidence),
+                'db': '-30',
+                'timestamp': record_time
+            })
+            return
+        
+        text = transcription_result['text']
+        print(f"Transcribed: '{text}'")
+        
+        if os.environ.get('USE_SENTIMENT', '0') == '1':
+            sentiment_result = analyze_sentiment(text)
+            if sentiment_result:
+                category = sentiment_result.get('category', 'Neutral')
+                emoji = sentiment_result.get('emoji', '😐')
+                emotion = sentiment_result.get('original_emotion', 'neutral')
+                sentiment_score = sentiment_result.get('confidence', 0.5)
+                
+                label = f"Speech {category}"
+                
+                socketio.emit('audio_label', {
+                    'label': label,
+                    'accuracy': str(confidence),
+                    'db': '-30',
+                    'timestamp': record_time,
+                    'emoji': emoji,
+                    'transcription': text,
+                    'emotion': emotion,
+                    'sentiment_score': str(sentiment_score)
+                })
+                print(f"Emitting speech with sentiment: {label} ({emoji})")
+                return
+        
+        socketio.emit('audio_label', {
+            'label': 'Speech',
+            'accuracy': str(confidence),
+            'db': '-30',
+            'timestamp': record_time,
+            'transcription': text
+        })
+        print(f"Emitting speech with transcription (no sentiment)")
+        
+    except Exception as e:
+        print(f"Error processing speech: {str(e)}")
+        traceback.print_exc()
         socketio.emit('audio_label', {
             'label': 'Speech',
             'accuracy': str(confidence),
             'db': '-30',
             'timestamp': record_time
         })
-        return
-    
-    text = transcription_result['text']
-    print(f"Transcribed: '{text}'")
-    
-    if os.environ.get('USE_SENTIMENT', '0') == '1':
-        sentiment_result = analyze_sentiment(text)
-        if sentiment_result:
-            category = sentiment_result.get('category', 'Neutral')
-            emoji = sentiment_result.get('emoji', '😐')
-            emotion = sentiment_result.get('original_emotion', 'neutral')
-            sentiment_score = sentiment_result.get('confidence', 0.5)
-            
-            label = f"Speech {category}"
-            
-            socketio.emit('audio_label', {
-                'label': label,
-                'accuracy': str(confidence),
-                'db': '-30',
-                'timestamp': record_time,
-                'emoji': emoji,
-                'transcription': text,
-                'emotion': emotion,
-                'sentiment_score': str(sentiment_score)
-            })
-            print(f"Emitting speech with sentiment: {label} ({emoji})")
-            return
-    
-    socketio.emit('audio_label', {
-        'label': 'Speech',
-        'accuracy': str(confidence),
-        'db': '-30',
-        'timestamp': record_time,
-        'transcription': text
-    })
-    print(f"Emitting speech with transcription (no sentiment)")
-    
-except Exception as e:
-    print(f"Error processing speech: {str(e)}")
-    traceback.print_exc()
-    socketio.emit('audio_label', {
-        'label': 'Speech',
-        'accuracy': str(confidence),
-        'db': '-30',
-        'timestamp': record_time
-    })
-    print("Emitting basic speech (error in processing)")
-finally:
-    cleanup_memory()
+        print("Emitting basic speech (error in processing)")
+    finally:
+        cleanup_memory()
 
 # Audio Enhancement Functions
 def pre_emphasis(audio_data, emphasis=0.97):
