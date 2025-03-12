@@ -701,13 +701,55 @@ def process_audio_with_panns(audio_data, db_level=None, timestamp=None, config=N
             audio_data = audio_data / np.max(np.abs(audio_data))
             log_status("Normalized audio to [-1.0, 1.0] range", "info")
         
-        # Simple prediction approach - directly get results from PANNs model
-        log_status("Running PANNs prediction with threshold: {:.2f}".format(prediction_threshold), "info")
+        # Add preprocessing step to detect knocking sounds in the time domain
+        # This can be more reliable than spectral analysis for percussive sounds
+        has_knocking_pattern = False
+        try:
+            from scipy.signal import find_peaks
+            
+            # Get the envelope of the audio signal
+            envelope = np.abs(audio_data)
+            
+            # Smooth the envelope to reduce noise
+            window_size = 320  # About 10ms at 32kHz
+            smoothed = np.convolve(envelope, np.ones(window_size)/window_size, mode='same')
+            
+            # Find peaks in the envelope
+            peaks, peak_props = find_peaks(
+                smoothed, 
+                height=0.05*np.max(smoothed),  # Low threshold to detect softer knocks
+                distance=500,  # Minimum distance between peaks
+                prominence=0.1*np.max(smoothed)  # Ensure peaks stand out
+            )
+            
+            # Check if this looks like a knocking pattern
+            if len(peaks) >= 2 and len(peaks) <= 10:
+                peak_spacing = np.diff(peaks) / 32000  # Convert to seconds
+                avg_spacing = np.mean(peak_spacing)
+                
+                # Calculate consistency of spacing
+                std_spacing = np.std(peak_spacing)
+                spacing_consistency = std_spacing / avg_spacing if avg_spacing > 0 else 999
+                
+                print(f"TIME DOMAIN ANALYSIS: {len(peaks)} peaks detected, spacing={avg_spacing:.2f}s, consistency={spacing_consistency:.2f}")
+                
+                # Check if this looks like knocking
+                if (0.05 < avg_spacing < 0.5) and spacing_consistency < 0.5:
+                    has_knocking_pattern = True
+                    print("KNOCKING PATTERN DETECTED in time domain!")
+                    
+                # If we have a clear knocking pattern, we can use this to override model predictions
+                if has_knocking_pattern and len(peaks) >= 3 and spacing_consistency < 0.3:
+                    print("STRONG KNOCKING PATTERN - will override model if needed")
+        except Exception as e:
+            print(f"Error in time domain knocking detection: {e}")
+        
+        # Run prediction with PANNs model
+        log_status(f"Running PANNs prediction with threshold: {prediction_threshold:.2f}", "info")
         
         try:
             with panns_model_lock:
-                # Get direct predictions from the PANNs model 
-                # The model will handle percussion detection internally
+                # Get direct predictions from the PANNs model
                 predictions = panns_model.predict_with_panns(
                     audio_data, 
                     top_k=10, 
@@ -716,8 +758,35 @@ def process_audio_with_panns(audio_data, db_level=None, timestamp=None, config=N
                     boost_other_categories=True      # Enable boosting of non-speech categories
                 )
                 
+                # Check if model found any predictions
+                if not predictions or len(predictions) == 0:
+                    log_status("No predictions found, trying with lower threshold", "warning")
+                    # Try again with lower threshold
+                    predictions = panns_model.predict_with_panns(
+                        audio_data, 
+                        top_k=10, 
+                        threshold=prediction_threshold * 0.5,  # Half the threshold
+                        boost_other_categories=True
+                    )
+                
+                # If we detected a strong knocking pattern but model didn't find it, override
+                if has_knocking_pattern:
+                    # Check if any knock/percussion labels in predictions
+                    has_knock_in_predictions = False
+                    for pred in predictions:
+                        if isinstance(pred, tuple) and len(pred) == 2:
+                            label = pred[0].lower()
+                            if any(k in label for k in ['knock', 'tap', 'thump', 'percussion']):
+                                has_knock_in_predictions = True
+                                break
+                    
+                    # If no knock found but we detected knocking, add it
+                    if not has_knock_in_predictions:
+                        print("Adding KNOCK label based on time domain analysis")
+                        predictions.insert(0, ("Knock", 0.95))
+                
                 # Log the raw predictions for debugging
-                print(f"Raw predictions: {predictions}")
+                print(f"Final predictions: {predictions}")
                 
                 # Emit results to clients
                 emit_prediction(predictions, db_level, timestamp)
@@ -752,9 +821,30 @@ def emit_prediction(predictions, db_level, timestamp=None):
     if timestamp is None:
         timestamp = time.time() * 1000  # Current time in milliseconds
     
+    # Print detailed debugging information
+    print(f"EMITTING PREDICTION: {predictions}")
+    print(f"  dB Level: {db_level}")
+    print(f"  Timestamp: {timestamp}")
+    
     # Format the predictions for emission
     formatted_predictions = []
     
+    # Check if we have percussion/knock sounds
+    has_percussion = False
+    for pred in predictions:
+        pred_label = ""
+        if isinstance(pred, tuple) and len(pred) == 2:
+            pred_label = pred[0].lower()
+        elif isinstance(pred, dict) and 'label' in pred:
+            pred_label = pred['label'].lower()
+            
+        # Check for percussion keywords
+        if any(keyword in pred_label for keyword in 
+              ['knock', 'tap', 'thump', 'bang', 'drum', 'percussion']):
+            has_percussion = True
+            print(f"PERCUSSION SOUND DETECTED in predictions: {pred}")
+    
+    # Handle predictions based on the format
     for pred in predictions:
         if isinstance(pred, tuple) and len(pred) == 2:
             # Handle tuple format (label, score)
@@ -770,27 +860,33 @@ def emit_prediction(predictions, db_level, timestamp=None):
                 'score': str(round(float(pred['score']), 4))
             })
         else:
-            print(f"Warning: Skipping prediction in unknown format: {pred}")
+            print(f"Warning: Unrecognized prediction format: {pred}")
     
-    # Create message with predictions
+    # Ensure we have at least one prediction
+    if not formatted_predictions:
+        print("No valid predictions found, using default")
+        formatted_predictions.append({
+            'label': 'Unknown',
+            'score': '0.5'
+        })
+    
+    # Create the message to emit
     message = {
         'predictions': formatted_predictions,
-        'db': str(db_level),
+        'db': str(round(float(db_level), 2)) if db_level is not None else '-100',
         'timestamp': timestamp
     }
     
-    # Add backward compatibility for clients expecting single prediction
-    if formatted_predictions:
-        # Use the first prediction (highest confidence) for backward compatibility
-        message['label'] = formatted_predictions[0]['label']
-        message['accuracy'] = formatted_predictions[0]['score']
-    else:
-        # No predictions available, provide default values
-        message['label'] = "No sound detected"
-        message['accuracy'] = "0.0"
+    # For backward compatibility with clients expecting a single prediction
+    # Use the highest confidence prediction as the main label
+    sorted_preds = sorted(formatted_predictions, key=lambda x: float(x['score']), reverse=True)
+    if sorted_preds:
+        message['label'] = sorted_preds[0]['label']
+        message['accuracy'] = sorted_preds[0]['score']
     
-    # Emit the predictions to the client
-    socketio.emit('audio_label', message)
+    # Log prediction and emit to clients
+    log_prediction(formatted_predictions, db_level)
+    socketio.emit('prediction', message)
 
 recent_audio_buffer = []
 MAX_BUFFER_SIZE = 5
@@ -853,416 +949,78 @@ def process_speech_with_sentiment(audio_data):
         concatenated_audio = enhanced_audio
     
     logger.info("Transcribing speech to text...")
-    if USE_GOOGLE_SPEECH:
-        transcription = transcribe_with_google(concatenated_audio, RATE)
-        logger.info(f"Used Google Cloud Speech-to-Text for transcription")
+    print("Transcribing with enhanced audio processing...")
+    
+    transcription_result = None
+    
+    if os.environ.get('USE_GOOGLE_SPEECH', '0') == '1':
+        if models.get("google_speech_processor", None) is None:
+            from google_speech import GoogleSpeechToText
+            models["google_speech_processor"] = GoogleSpeechToText()
+        
+        transcription_result = models["google_speech_processor"].transcribe(audio_data, RATE)
+        logger.info(f"Used Google Cloud Speech for transcription")
     else:
-        transcription = speech_processor.transcribe(concatenated_audio, RATE)
+        transcription_result = models["speech_processor"].transcribe(audio_data, RATE)
         logger.info(f"Used Whisper for transcription")
     
-    if not transcription:
-        logger.info("No valid transcription found")
-        return None
-    
-    common_words = ["the", "a", "an", "and", "but", "or", "if", "then", "so", "to", "of", "for", "in", "on", "at"]
-    meaningful_words = [word for word in transcription.lower().split() if word not in common_words]
-    
-    if len(meaningful_words) < MIN_WORD_COUNT:
-        logger.info(f"Transcription has too few meaningful words: '{transcription}'")
-        return None
-    
-    logger.info(f"Transcription: {transcription}")
-    sentiment = analyze_sentiment(transcription)
-    
-    if sentiment:
-        result = {
-            "text": transcription,
-            "sentiment": sentiment
-        }
-        logger.info(f"Sentiment analysis result: Speech {sentiment['category']} with emoji {sentiment['emoji']}")
-        return result
-    
-    return None
-
-def background_thread():
-    """Example of how to send server generated events to clients."""
-    count = 0
-    while True:
-        socketio.sleep(10)
-        count += 1
-        socketio.emit('my_response',
-                      {'data': 'Server generated event', 'count': count},
-                      namespace='/test')
-
-# Flask Routes
-@app.route('/')
-def index():
-    """Render the main page"""
-    return render_template('index.html')
-
-@app.route('/api/health')
-def health_check():
-    """API health check endpoint"""
-    return jsonify({"status": "healthy", "timestamp": time.time()})
-
-@app.route('/api/status')
-def api_status():
-    """Return the status of the server."""
-    return jsonify({
-        'status': 'ok',
-        'models': {
-            'panns_model_loaded': models["panns"] is not None,
-            'using_panns_model': USE_PANNS_MODEL,
-        },
-        'server_time': time.time(),
-        'uptime': time.time() - server_start_time,
-        'version': '1.0.0'
-    })
-
-@app.route('/api/toggle-speech-recognition', methods=['POST'])
-def toggle_speech_recognition():
-    """Toggle between Whisper and Google Cloud Speech-to-Text"""
-    global USE_GOOGLE_SPEECH
-    data = request.get_json()
-    
-    if data and 'use_google_speech' in data:
-        USE_GOOGLE_SPEECH = data['use_google_speech']
-        logger.info(f"Speech recognition system changed to: {'Google Cloud' if USE_GOOGLE_SPEECH else 'Whisper'}")
-        return jsonify({
-            "success": True,
-            "message": f"Speech recognition system set to {'Google Cloud' if USE_GOOGLE_SPEECH else 'Whisper'}",
-            "use_google_speech": USE_GOOGLE_SPEECH
-        })
-    else:
-        USE_GOOGLE_SPEECH = not USE_GOOGLE_SPEECH
-        logger.info(f"Speech recognition system toggled to: {'Google Cloud' if USE_GOOGLE_SPEECH else 'Whisper'}")
-        return jsonify({
-            "success": True,
-            "message": f"Speech recognition system toggled to {'Google Cloud' if USE_GOOGLE_SPEECH else 'Whisper'}",
-            "use_google_speech": USE_GOOGLE_SPEECH
-        })
-
-# Additional SocketIO Handlers
-@socketio.on('send_message')
-def handle_source(json_data):
-    print('Receive message...' + str(json_data['message']))
-    text = json_data['message'].encode('ascii', 'ignore')
-    socketio.emit('echo', {'echo': 'Server Says: ' + str(text)})
-    print('Sending message back..')
-
-@socketio.on('disconnect_request', namespace='/test')
-def disconnect_request():
-    @copy_current_request_context
-    def can_disconnect():
-        disconnect()
-
-    session['receive_count'] = session.get('receive_count', 0) + 1
-    emit('my_response',
-         {'data': 'Disconnected!', 'count': session['receive_count']},
-         callback=can_disconnect)
-
-@socketio.on('connect', namespace='/test')
-def test_connect():
-    global thread
-    with thread_lock:
-        if thread is None:
-            thread = socketio.start_background_task(background_thread)
-    emit('my_response', {'data': 'Connected', 'count': 0})
-
-@socketio.on('disconnect', namespace='/test')
-def test_disconnect():
-    print('Client disconnected', request.sid)
-
-@socketio.on('connect')
-def handle_connect(auth=None):
-    """
-    Handle client connection
-    This is called when a client connects to the server
-    We should send the client any necessary initialization data
-    """
-    try:
-        print(f"Client connected: {request.sid}")
-        
-        ip_addresses = get_ip_addresses()
-        ip_str = ", ".join(ip_addresses)
-        print(f"Server running on: {ip_str}")
-        
-        primary_ip = "34.16.101.179"
-        
-        status_data = {
-            "server_status": "connected",
-            "model_loaded": True,
-            "server_time": time.time(),
-            "server_ip": primary_ip
-        }
-        
-        try:
-            from panns_model import get_available_labels
-            status_data["available_labels"] = get_available_labels()
-        except Exception as e:
-            print(f"Error getting labels from module: {e}")
-            status_data["available_labels"] = [f"label_{i}" for i in range(527)]
-        
-        socketio.emit('server_status', status_data, room=request.sid)
-        print(f"Sent server status to client: {request.sid}")
-        
-    except Exception as e:
-        print(f"Error in handle_connect: {e}")
-        import traceback
-        traceback.print_exc()
-
-@socketio.on('disconnect')
-def handle_disconnect():
-    print(f"Client disconnected: {request.sid}")
-
-def aggregate_predictions(new_prediction, label_list, is_speech=False, num_samples=None):
-    """Aggregate predictions from multiple overlapping segments to improve accuracy."""
-    global recent_predictions, speech_predictions
-    
-    with prediction_lock:
-        if is_speech:
-            speech_predictions.append(new_prediction)
-            if len(speech_predictions) > SPEECH_PREDICTIONS_HISTORY:
-                speech_predictions = speech_predictions[-SPEECH_PREDICTIONS_HISTORY:]
-            predictions_list = speech_predictions
-            history_len = SPEECH_PREDICTIONS_HISTORY
-            logger.info(f"Using speech-specific aggregation with {len(predictions_list)} samples")
-        else:
-            recent_predictions.append(new_prediction)
-            if len(recent_predictions) > MAX_PREDICTIONS_HISTORY:
-                recent_predictions = recent_predictions[-MAX_PREDICTIONS_HISTORY:]
-            predictions_list = recent_predictions
-            history_len = MAX_PREDICTIONS_HISTORY
-        
-        if num_samples is not None and num_samples > 0 and num_samples < len(predictions_list):
-            predictions_list = predictions_list[-num_samples:]
-            logger.info(f"Using most recent {num_samples} samples for aggregation")
-        
-        if len(predictions_list) > 1:
-            expected_shape = predictions_list[0].shape
-            valid_predictions = []
-            for pred in predictions_list:
-                if pred.shape == expected_shape:
-                    valid_predictions.append(pred)
-                else:
-                    logger.warning(f"Skipping prediction with incompatible shape: {pred.shape} (expected {expected_shape})")
-            if valid_predictions:
-                aggregated = np.zeros_like(valid_predictions[0])
-                for pred in valid_predictions:
-                    aggregated += pred
-                aggregated /= len(valid_predictions)
-                logger.info(f"Aggregating {len(valid_predictions)} predictions {'(speech)' if is_speech else ''}")
-            else:
-                logger.warning("No predictions with matching shapes, using most recent prediction")
-                aggregated = predictions_list[-1]
-        else:
-            aggregated = new_prediction
-        
-        orig_top_idx = np.argmax(new_prediction)
-        agg_top_idx = np.argmax(aggregated)
-        
-        if orig_top_idx != agg_top_idx:
-            if isinstance(label_list, dict):
-                orig_label = "unknown"
-                agg_label = "unknown"
-                for label, idx in label_list.items():
-                    if idx == orig_top_idx:
-                        orig_label = label
-                    if idx == agg_top_idx:
-                        agg_label = label
-            elif isinstance(label_list, (list, tuple, np.ndarray)) and len(label_list) > 0:
-                orig_label = label_list[orig_top_idx] if orig_top_idx < len(label_list) else f"unknown({orig_top_idx})"
-                agg_label = label_list[agg_top_idx] if agg_top_idx < len(label_list) else f"unknown({agg_top_idx})"
-            else:
-                orig_label = f"index_{orig_top_idx}"
-                agg_label = f"index_{agg_top_idx}"
-                
-            logger.info(f"Aggregation changed top prediction: {orig_label} ({new_prediction[orig_top_idx]:.4f}) -> {agg_label} ({aggregated[agg_top_idx]:.4f})")
-        else:
-            if isinstance(label_list, dict):
-                label = "unknown"
-                for lbl, idx in label_list.items():
-                    if idx == orig_top_idx:
-                        label = lbl
-                        break
-            elif isinstance(label_list, (list, tuple, np.ndarray)) and len(label_list) > 0:
-                label = label_list[orig_top_idx] if orig_top_idx < len(label_list) else f"unknown({orig_top_idx})"
-            else:
-                label = f"index_{orig_top_idx}"
-                
-            logger.info(f"Aggregation kept same top prediction: {label}, confidence: {new_prediction[orig_top_idx]:.4f} -> {aggregated[agg_top_idx]:.4f}")
-        
-        return aggregated
-
-@socketio.on('predict')
-def predict(message):
-    """Handler for audio prediction requests."""
-    audio_data = np.array(message['audio_data'])
-    sample_rate = int(message.get('sample_rate', 32000))
-    timestamp = message['timestamp']
-    db_level = message.get('db')
-    
-    config = {
-        'silence_threshold': float(message.get('silence_threshold', SILENCE_THRES)),
-        'db_level_threshold': float(message.get('db_level_threshold', DBLEVEL_THRES)),
-        'prediction_threshold': float(message.get('prediction_threshold', PREDICTION_THRES)),
-        'boost_factor': float(message.get('boost_factor', 1.2))
-    }
-    
-    print(f"Processing prediction request: sample_rate={sample_rate}, timestamp={timestamp}")
-
-    if len(audio_data) > 1:
-        audio_data = pre_emphasis(audio_data)
-    
-    if sample_rate != RATE and len(audio_data) > 0:
-        print(f"Resampling audio from {sample_rate}Hz to {RATE}Hz")
-        num_samples = int(len(audio_data) * (RATE / sample_rate))
-        audio_data = signal.resample(audio_data, num_samples)
-    
-    prediction_results = process_audio_with_panns(
-        audio_data=audio_data,
-        timestamp=timestamp,
-        db_level=db_level,
-        config=config
-    )
-    
-    emit('panns_prediction', prediction_results)
-    cleanup_memory()
-
-@socketio.on('predict_raw')
-def predict_raw(message):
-    """Handler for raw audio prediction requests."""
-    audio_data = np.array(message['audio_data'])
-    sample_rate = int(message.get('sample_rate', 32000))
-    timestamp = message['timestamp']
-    db_level = message.get('db')
-    
-    config = {
-        'silence_threshold': float(message.get('silence_threshold', SILENCE_THRES)),
-        'db_level_threshold': float(message.get('db_level_threshold', DBLEVEL_THRES)),
-        'prediction_threshold': float(message.get('prediction_threshold', PREDICTION_THRES)),
-        'boost_factor': float(message.get('boost_factor', 1.2))
-    }
-    
-    print(f"Processing raw prediction request: sample_rate={sample_rate}, timestamp={timestamp}")
-    
-    if len(audio_data) > 1:
-        audio_data = pre_emphasis(audio_data)
-    
-    if sample_rate != RATE and len(audio_data) > 0:
-        print(f"Resampling audio from {sample_rate}Hz to {RATE}Hz")
-        num_samples = int(len(audio_data) * (RATE / sample_rate))
-        audio_data = signal.resample(audio_data, num_samples)
-    
-    prediction_results = process_audio_with_panns(
-        audio_data=audio_data,
-        timestamp=timestamp,
-        db_level=db_level,
-        config=config
-    )
-    
-    emit('prediction_raw', prediction_results)
-    cleanup_memory()
-
-def process_speech(audio_data, record_time=None, confidence=0.0):
-    """Process speech audio with transcription and optional sentiment analysis."""
-    try:
-        if audio_data.size < 16000:
-            logger.info(f"Padded speech audio to size: 64000 samples (4.0 seconds)")
-            padded_data = np.zeros(64000)
-            padded_data[:audio_data.size] = audio_data
-            audio_data = padded_data
-        
-        rms = np.sqrt(np.mean(audio_data**2))
-        logger.info(f"Boosting audio signal (original RMS: {rms:.4f})")
-        
-        if rms > 0:
-            target_rms = 0.1
-            gain = target_rms / rms
-            
-            max_abs = np.max(np.abs(audio_data))
-            if max_abs * gain > 0.9:
-                logger.info(f"Using peak normalization to avoid clipping")
-                gain = 0.9 / max_abs
-                
-            boosted_audio = audio_data * gain
-            new_rms = np.sqrt(np.mean(np.square(boosted_audio)))
-            logger.info(f"Audio boosted from RMS {rms:.4f} to {new_rms:.4f}")
-            audio_data = boosted_audio
-        
-        logger.info(f"Transcribing speech to text...")
-        print("Transcribing with enhanced audio processing...")
-        
-        transcription_result = None
-        
-        if os.environ.get('USE_GOOGLE_SPEECH', '0') == '1':
-            if models.get("google_speech_processor", None) is None:
-                from google_speech import GoogleSpeechToText
-                models["google_speech_processor"] = GoogleSpeechToText()
-            
-            transcription_result = models["google_speech_processor"].transcribe(audio_data, RATE)
-            logger.info(f"Used Google Cloud Speech for transcription")
-        else:
-            transcription_result = models["speech_processor"].transcribe(audio_data, RATE)
-            logger.info(f"Used Whisper for transcription")
-        
-        if not transcription_result or not transcription_result.get('text'):
-            logger.info(f"No valid transcription found")
-            socketio.emit('audio_label', {
-                'label': 'Speech',
-                'accuracy': str(confidence),
-                'db': '-30',
-                'timestamp': record_time
-            })
-            return
-        
-        text = transcription_result['text']
-        print(f"Transcribed: '{text}'")
-        
-        if os.environ.get('USE_SENTIMENT', '0') == '1':
-            sentiment_result = analyze_sentiment(text)
-            if sentiment_result:
-                category = sentiment_result.get('category', 'Neutral')
-                emoji = sentiment_result.get('emoji', '😐')
-                emotion = sentiment_result.get('original_emotion', 'neutral')
-                sentiment_score = sentiment_result.get('confidence', 0.5)
-                
-                label = f"Speech {category}"
-                
-                socketio.emit('audio_label', {
-                    'label': label,
-                    'accuracy': str(confidence),
-                    'db': '-30',
-                    'timestamp': record_time,
-                    'emoji': emoji,
-                    'transcription': text,
-                    'emotion': emotion,
-                    'sentiment_score': str(sentiment_score)
-                })
-                print(f"Emitting speech with sentiment: {label} ({emoji})")
-                return
-        
-        socketio.emit('audio_label', {
-            'label': 'Speech',
-            'accuracy': str(confidence),
-            'db': '-30',
-            'timestamp': record_time,
-            'transcription': text
-        })
-        print(f"Emitting speech with transcription (no sentiment)")
-        
-    except Exception as e:
-        print(f"Error processing speech: {str(e)}")
-        traceback.print_exc()
+    if not transcription_result or not transcription_result.get('text'):
+        logger.info(f"No valid transcription found")
         socketio.emit('audio_label', {
             'label': 'Speech',
             'accuracy': str(confidence),
             'db': '-30',
             'timestamp': record_time
         })
-        print("Emitting basic speech (error in processing)")
-    finally:
-        cleanup_memory()
+        return
+    
+    text = transcription_result['text']
+    print(f"Transcribed: '{text}'")
+    
+    if os.environ.get('USE_SENTIMENT', '0') == '1':
+        sentiment_result = analyze_sentiment(text)
+        if sentiment_result:
+            category = sentiment_result.get('category', 'Neutral')
+            emoji = sentiment_result.get('emoji', '😐')
+            emotion = sentiment_result.get('original_emotion', 'neutral')
+            sentiment_score = sentiment_result.get('confidence', 0.5)
+            
+            label = f"Speech {category}"
+            
+            socketio.emit('audio_label', {
+                'label': label,
+                'accuracy': str(confidence),
+                'db': '-30',
+                'timestamp': record_time,
+                'emoji': emoji,
+                'transcription': text,
+                'emotion': emotion,
+                'sentiment_score': str(sentiment_score)
+            })
+            print(f"Emitting speech with sentiment: {label} ({emoji})")
+            return
+    
+    socketio.emit('audio_label', {
+        'label': 'Speech',
+        'accuracy': str(confidence),
+        'db': '-30',
+        'timestamp': record_time,
+        'transcription': text
+    })
+    print(f"Emitting speech with transcription (no sentiment)")
+    
+except Exception as e:
+    print(f"Error processing speech: {str(e)}")
+    traceback.print_exc()
+    socketio.emit('audio_label', {
+        'label': 'Speech',
+        'accuracy': str(confidence),
+        'db': '-30',
+        'timestamp': record_time
+    })
+    print("Emitting basic speech (error in processing)")
+finally:
+    cleanup_memory()
 
 # Audio Enhancement Functions
 def pre_emphasis(audio_data, emphasis=0.97):

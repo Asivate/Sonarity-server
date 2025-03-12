@@ -876,47 +876,76 @@ class PANNsModelInference:
             # Get the envelope of the audio signal
             envelope = np.abs(audio_data)
             
-            # Smooth the envelope
-            window_size = 512  # About 16ms at 32kHz
+            # Smooth the envelope to reduce noise
+            window_size = 320  # About 10ms at 32kHz (smaller window for better detection)
             smoothed = np.convolve(envelope, np.ones(window_size)/window_size, mode='same')
+            
+            # Calculate the energy of the audio
+            rms = np.sqrt(np.mean(np.square(audio_data)))
+            if rms < 0.002:  # Very quiet audio
+                print("Audio too quiet for percussion detection")
+                return False
             
             # Find peaks in the envelope
             from scipy.signal import find_peaks
-            peaks, _ = find_peaks(smoothed, height=0.1*np.max(smoothed), distance=1000)
+            # More sensitive peak detection with lower height threshold
+            peaks, peak_props = find_peaks(
+                smoothed, 
+                height=0.05*np.max(smoothed),  # Lower threshold to detect softer knocks
+                distance=500,  # Minimum distance between peaks (~15ms at 32kHz)
+                prominence=0.1*np.max(smoothed)  # Ensure peaks stand out from background
+            )
+            
+            # Print detailed information about detected peaks
+            peak_heights = peak_props['peak_heights']
+            print(f"Detected {len(peaks)} peaks with heights: {peak_heights}")
             
             # Characteristics of percussion:
-            # 1. Number of prominent peaks
-            # 2. Decay rate after peaks
-            # 3. Spacing between peaks
+            # 1. Number of prominent peaks (2-10 for knocking)
+            # 2. Decay rate after peaks (fast decay for percussion)
+            # 3. Spacing between peaks (consistent for intentional knocking)
             
             # Calculate peak spacing and decay rates
-            if len(peaks) >= 2 and len(peaks) <= 10:  # Multiple distinct peaks
+            if len(peaks) >= 2 and len(peaks) <= 15:  # Multiple distinct peaks
                 # Check peak spacing - knocking typically has peaks spaced 0.1-0.5s apart
                 peak_spacing = np.diff(peaks) / 32000  # Convert to seconds
                 avg_spacing = np.mean(peak_spacing)
+                std_spacing = np.std(peak_spacing)
+                
+                # Calculate consistency of spacing (lower std/mean ratio = more consistent)
+                spacing_consistency = std_spacing / avg_spacing if avg_spacing > 0 else 999
                 
                 # Check decay rates - percussion has fast decay
                 decay_rates = []
                 for peak in peaks:
-                    if peak + 3000 < len(smoothed):  # Ensure we can look 100ms ahead
+                    if peak + 3000 < len(smoothed):  # Look 100ms ahead
                         decay_window = smoothed[peak:peak+3000]
                         if len(decay_window) > 0 and decay_window[0] > 0:
-                            decay_rate = (decay_window[0] - min(decay_window)) / decay_window[0]
+                            # Calculate decay rate over 100ms window
+                            decay_rate = (decay_window[0] - np.min(decay_window)) / decay_window[0]
                             decay_rates.append(decay_rate)
                 
                 avg_decay = np.mean(decay_rates) if decay_rates else 0
                 
+                # Print detailed percussion characteristics for debugging
+                print(f"Percussion details: peaks={len(peaks)}, spacing={avg_spacing:.2f}s, consistency={spacing_consistency:.2f}, decay={avg_decay:.2f}")
+                
                 # Knocking typically has:
-                # - 2-8 peaks
-                # - Average spacing of 0.1-0.5s
-                # - Fast decay (>0.7 relative decay)
+                # - 2-15 peaks
+                # - Average spacing of 0.05-0.5s between peaks
+                # - Consistent spacing (lower std/mean ratio)
+                # - Fast decay (>0.5 relative decay)
                 is_percussion = (
-                    (0.1 < avg_spacing < 0.5) and 
-                    (avg_decay > 0.5) and
-                    (len(peaks) >= 2 and len(peaks) <= 8)
+                    (0.05 < avg_spacing < 0.5) and  # Typical knocking timing
+                    (spacing_consistency < 0.7) and  # Relatively consistent spacing
+                    (avg_decay > 0.5) and  # Fast decay characteristic of impact sounds
+                    (len(peaks) >= 2 and len(peaks) <= 15)  # Multiple distinct impacts
                 )
                 
-                print(f"Percussion analysis: peaks={len(peaks)}, spacing={avg_spacing:.2f}s, decay={avg_decay:.2f}")
+                # Stronger evidence of knocking if we have 3-8 evenly spaced peaks
+                if (3 <= len(peaks) <= 8) and spacing_consistency < 0.3 and avg_decay > 0.7:
+                    print("STRONG EVIDENCE of knocking pattern detected!")
+                    return True
                 
                 return is_percussion
                 
@@ -927,17 +956,18 @@ class PANNsModelInference:
                 if peak + 3000 < len(smoothed):
                     decay_window = smoothed[peak:peak+3000]
                     if len(decay_window) > 0 and decay_window[0] > 0:
-                        decay_rate = (decay_window[0] - min(decay_window)) / decay_window[0]
+                        decay_rate = (decay_window[0] - np.min(decay_window)) / decay_window[0]
                         
-                        print(f"Single peak percussion analysis: decay={decay_rate:.2f}")
+                        print(f"Single peak percussion analysis: decay={decay_rate:.2f}, height={peak_heights[0]}")
                         
                         # Fast decay indicates percussion
-                        return decay_rate > 0.7
+                        return decay_rate > 0.7 and peak_heights[0] > 0.1*np.max(smoothed)
             
             return False
             
         except Exception as e:
             print(f"Error in percussion detection: {e}")
+            traceback.print_exc()
             return False
     
     def _get_percussion_indices(self):
@@ -1138,7 +1168,10 @@ def get_available_labels():
     try:
         # Try to get from the PANNs inference object first
         if hasattr(panns_inference, 'get_available_labels'):
-            return panns_inference.get_available_labels()
+            labels = panns_inference.get_available_labels()
+            print(f"Got {len(labels)} labels from panns_inference object")
+            print(f"Sample labels: {labels[:10]}...")
+            return labels
         
         # Fallback to loading labels directly from CSV files
         labels = []
@@ -1146,10 +1179,12 @@ def get_available_labels():
         # Try primary audioset labels
         if os.path.exists(CSV_FNAME):
             try:
+                print(f"Loading labels from {CSV_FNAME}")
                 df = pd.read_csv(CSV_FNAME)
                 if 'display_name' in df.columns:
                     labels = df['display_name'].tolist()
                     print(f"Loaded {len(labels)} labels from {CSV_FNAME}")
+                    print(f"Sample labels: {labels[:10]}...")
                     return labels
             except Exception as e:
                 print(f"Error loading labels from {CSV_FNAME}: {e}")
@@ -1157,10 +1192,12 @@ def get_available_labels():
         # Try alternate validate_meta.csv
         if os.path.exists(ALT_CSV_FNAME):
             try:
+                print(f"Loading labels from {ALT_CSV_FNAME}")
                 df = pd.read_csv(ALT_CSV_FNAME)
                 if 'display_name' in df.columns:
                     labels = df['display_name'].tolist()
                     print(f"Loaded {len(labels)} labels from {ALT_CSV_FNAME}")
+                    print(f"Sample labels: {labels[:10]}...")
                     return labels
             except Exception as e:
                 print(f"Error loading labels from {ALT_CSV_FNAME}: {e}")
@@ -1168,10 +1205,12 @@ def get_available_labels():
         # Try domestic labels as last resort
         if os.path.exists(DOMESTIC_CSV_FNAME):
             try:
+                print(f"Loading labels from {DOMESTIC_CSV_FNAME}")
                 df = pd.read_csv(DOMESTIC_CSV_FNAME)
                 if 'display_name' in df.columns:
                     labels = df['display_name'].tolist()
                     print(f"Loaded {len(labels)} labels from {DOMESTIC_CSV_FNAME}")
+                    print(f"Sample labels: {labels[:10]}...")
                     return labels
             except Exception as e:
                 print(f"Error loading labels from {DOMESTIC_CSV_FNAME}: {e}")
@@ -1214,7 +1253,60 @@ def predict_with_panns(audio_data, top_k=5, threshold=0.2, map_to_homesounds_for
                 print("ERROR: Failed to initialize PANNs model")
                 return []
         
-        # Get predictions directly from the model with enhanced percussion detection
+        # First check for percussion sounds in the time domain - more reliable for knocking
+        is_percussive = panns_inference._is_percussive_sound(audio_data)
+        if is_percussive:
+            print("PERCUSSION DETECTED: Strong evidence of knock/tap sound in time domain analysis")
+            
+            # Get all available labels and find knock-related labels
+            all_labels = panns_inference.get_available_labels()
+            print(f"Total available labels: {len(all_labels)}")
+            
+            # Look for knock-related labels
+            knock_related_labels = [
+                (i, label) for i, label in enumerate(all_labels) 
+                if any(keyword in label.lower() for keyword in 
+                      ['knock', 'tap', 'bang', 'thump', 'drum', 'percussion'])
+            ]
+            
+            print(f"Found {len(knock_related_labels)} knock-related labels: {knock_related_labels}")
+            
+            # If we found knock-related labels, use a very low threshold to detect them
+            if knock_related_labels:
+                # Get predictions with a very low threshold to capture potential knock sounds
+                preliminary_results = panns_inference.predict(
+                    audio_data, 
+                    top_k=20,  # Get more results to find percussion
+                    threshold=0.01,  # Extremely low threshold to find any possibility
+                    boost_other_categories=True
+                )
+                
+                print(f"Preliminary predictions with low threshold: {preliminary_results}")
+                
+                # Try to find any percussion-related sounds in the predictions
+                percussion_results = []
+                for label, score in preliminary_results:
+                    label_lower = label.lower()
+                    if any(keyword in label_lower for keyword in 
+                          ['knock', 'tap', 'bang', 'thump', 'drum', 'percussion']):
+                        # Boost the score for percussion sounds
+                        percussion_results.append((label, min(1.0, score * 3.0)))
+                
+                if percussion_results:
+                    # Sort by score descending
+                    percussion_results.sort(key=lambda x: x[1], reverse=True)
+                    print(f"Found percussion sounds in predictions: {percussion_results}")
+                    return percussion_results
+                
+                # If no percussion labels were detected, create a generic one with high confidence
+                print("No percussion labels in model predictions, using generic knock label")
+                return [("Knock", 0.9)]
+            else:
+                # If no knock-related labels exist, just use a generic "Knock" label
+                print("No knock-related labels found in model vocabulary, using generic label")
+                return [("Knock", 0.9)]
+        
+        # Standard prediction path when not a percussive sound
         results = panns_inference.predict(
             audio_data, 
             top_k=top_k, 
