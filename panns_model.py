@@ -81,7 +81,7 @@ if not os.path.exists(ASSET_DIR):
 # Try to find scalar file in both directories
 SCALAR_FN = os.path.join(ASSET_DIR, 'scalar.h5')
 if not os.path.exists(SCALAR_FN):
-SCALAR_FN = os.path.join(MODEL_DIR, 'scalar.h5')
+    SCALAR_FN = os.path.join(MODEL_DIR, 'scalar.h5')
 
 # CSV files for label mapping
 CSV_FNAME = os.path.join(ASSET_DIR, 'audioset_labels.csv')
@@ -397,7 +397,7 @@ class PANNsModelInference:
     def initialize(self):
         """Initialize the PANNs model, loading weights and preparing for inference."""
         try:
-        if self._initialized:
+            if self._initialized:
                 print("PANNs model already initialized")
                 return True
             
@@ -476,13 +476,13 @@ class PANNsModelInference:
                     elif 'state_dict' in checkpoint:
                         print("Loading from 'state_dict' key in checkpoint")
                         state_dict = checkpoint['state_dict']
-                else:
+                    else:
                         print("Using checkpoint directly as state dictionary")
                         state_dict = checkpoint
-                    else:
+                else:
                     print("Checkpoint is not a dictionary, cannot load model")
-                        return False
-            
+                    return False
+                
                 # Filter the state dict to match the model architecture
                 model_state_dict = self.model.state_dict()
                 
@@ -523,11 +523,11 @@ class PANNsModelInference:
                 # Create thread lock for prediction
                 self.lock = threading.Lock()
                 
-            self._initialized = True
+                self._initialized = True
                 print("PANNs model initialized successfully")
-            return True
+                return True
             
-        except Exception as e:
+            except Exception as e:
                 print(f"Error loading model weights: {e}")
                 print("Detailed error information:")
                 traceback.print_exc()
@@ -559,11 +559,11 @@ class PANNsModelInference:
             fmax = 16000  # Maximum frequency (Hz)
             
             # Compute STFT
-        stft = librosa.stft(
-            y=audio, 
+            stft = librosa.stft(
+                y=audio, 
                 n_fft=n_fft,
                 hop_length=hop_length,
-            window='hann', 
+                window='hann', 
                 center=True,
                 pad_mode='reflect'
             )
@@ -831,10 +831,10 @@ class PANNsModelInference:
             
             return result
                 
-            except Exception as e:
+        except Exception as e:
             print(f"Error in PANNs prediction: {e}")
             traceback.print_exc()
-                return []
+            return []
             
     def _is_percussive_sound(self, audio_data):
         """
