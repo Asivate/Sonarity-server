@@ -47,14 +47,14 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(level
 logger = logging.getLogger(__name__)
 
 # Constants for file paths and resources
-MODEL_PATH = os.path.join(os.path.dirname(__file__), 'models', 'panns')
+MODEL_PATH = os.path.join(os.path.dirname(__file__), 'models')  # Updated to match server structure
 ASSETS_PATH = os.path.join(os.path.dirname(__file__), 'assets')
-MODEL_FN = os.path.join(MODEL_PATH, 'Cnn14_16k_mAP=0.438.h5')  # Model file path
+MODEL_FN = os.path.join(MODEL_PATH, 'Cnn13_GMP_64x64_520000_iterations_mAP=0.42.pth')  # Updated to use available model
 SCALAR_FN = os.path.join(ASSETS_PATH, 'scalar.h5')  # Scalar values for normalization
 CSV_FNAME = os.path.join(ASSETS_PATH, 'audioset_labels.csv')  # AudioSet labels CSV
 ALT_CSV_FNAME = os.path.join(ASSETS_PATH, 'validate_meta.csv')  # Alternative AudioSet labels
 DOMESTIC_CSV_FNAME = os.path.join(ASSETS_PATH, 'domestic_labels.csv')  # Curated domestic sounds
-CLASS_LABELS_CSV = os.path.join(os.path.dirname(__file__), 'class_labels_indices.csv')  # Direct path to class labels
+CLASS_LABELS_CSV = os.path.join(ASSETS_PATH, 'class_labels_indices.csv')  # Updated path to class labels
 
 # Global variables
 panns_model = None  # The PyTorch model object
@@ -333,6 +333,8 @@ class PANNsModelInference:
         self.scalar = None
         self._initialized = False
         self.sample_rate = SAMPLE_RATE
+        # Add a threading lock for thread safety during prediction
+        self.lock = threading.Lock()
         
     def initialize(self):
         """Initialize the PANNs model, loading weights and preparing for inference."""
@@ -359,6 +361,7 @@ class PANNsModelInference:
                         self.scalar = {
                             'mean': hf['mean'][:],
                             'std': hf['std'][:]
+                        }
                     print(f"Loaded scalar values from {SCALAR_FN}")
                 except Exception as e:
                     print(f"Error loading scalar values: {e}")
@@ -385,7 +388,7 @@ class PANNsModelInference:
                 if os.path.exists(model_dir):
                     potential_models = [
                         file for file in os.listdir(model_dir) 
-                        if file.endswith('.h5') and ('Cnn' in file or 'cnn' in file)
+                        if (file.endswith('.h5') or file.endswith('.pth')) and ('Cnn' in file or 'cnn' in file)
                     ]
                     
                     if potential_models:
@@ -604,7 +607,7 @@ class PANNsModelInference:
             # Normalize with mean and std values (essential for correct predictions)
             try:
                 # Check if we need to reshape the mean/std vectors
-                if len(self.mean) != x.shape[0]:
+                if hasattr(self, 'mean') and hasattr(self, 'std') and len(self.mean) != x.shape[0]:
                     print(f"Reshaping normalization vectors from {len(self.mean)} to {x.shape[0]}")
                     # Create new mean/std vectors of the right size
                     new_mean = np.zeros(x.shape[0], dtype=np.float32)
@@ -617,7 +620,7 @@ class PANNsModelInference:
                     
                     # Apply the normalization
                     x = (x - new_mean.reshape(-1, 1)) / new_std.reshape(-1, 1)
-                else:
+                elif hasattr(self, 'mean') and hasattr(self, 'std'):
                     # Apply the normalization as usual
                     x = (x - self.mean.reshape(-1, 1)) / self.std.reshape(-1, 1)
             except Exception as e:
@@ -629,24 +632,9 @@ class PANNsModelInference:
             # Convert to PyTorch tensor and reshape for model input
             x = torch.tensor(x, dtype=torch.float32)
             
-            # The CNN13 model expects input with shape (batch_size, channels, mel_bins, time)
-            # where mel_bins=128 and time=64
-            # Ensure x has the right dimensions (128, 64) before adding batch and channel dimensions
-            if x.shape != (128, 64):
-                print(f"Reshaping tensor from {x.shape} to (128, 64)")
-                # Create a properly sized tensor
-                fixed_tensor = torch.zeros((128, 64), dtype=torch.float32)
-                
-                # Copy what we can from the original tensor
-                h = min(x.shape[0], 128)
-                w = min(x.shape[1], 64)
-                fixed_tensor[:h, :w] = x[:h, :w]
-                
-                x = fixed_tensor
-            
-            # Add batch and channel dimensions: (128, 64) -> (1, 1, 128, 64)
-            x = x.unsqueeze(0).unsqueeze(0)
-            print(f"Input tensor shape: {x.shape}, expected (1, 1, 128, 64)")
+            # Add batch dimension: (time_steps, freq_bins) -> (1, time_steps, freq_bins)
+            x = x.unsqueeze(0)
+            print(f"Input tensor shape: {x.shape}")
 
             # Thread safety - don't allow multiple predictions at once
             with self.lock:
@@ -682,7 +670,7 @@ class PANNsModelInference:
                         # Return just this one prediction if it's strong enough
                         if best_percussion_prob > threshold:
                             return [(self.labels[best_percussion_idx], float(best_percussion_prob))]
-                
+            
             # Get top-k indices and their probabilities
             indices = np.argsort(probs)[-top_k:][::-1]
             selected_probs = probs[indices]
@@ -692,7 +680,7 @@ class PANNsModelInference:
             indices = indices[mask]
             selected_probs = selected_probs[mask]
             
-            # If no predictions above threshold, return top prediction anyway
+            # If no predictions above threshold, include at least the top prediction
             if len(indices) == 0 and len(probs) > 0:
                 indices = [np.argmax(probs)]
                 selected_probs = [probs[indices[0]]]
@@ -1065,7 +1053,7 @@ def get_available_labels():
         
         labels = []
         
-        # First check if class_labels_indices.csv exists in the current directory (most reliable source)
+        # First check if class_labels_indices.csv exists in the assets directory (most reliable source)
         if os.path.exists(CLASS_LABELS_CSV):
             try:
                 print(f"Loading labels from {CLASS_LABELS_CSV}")
@@ -1216,10 +1204,31 @@ def load_panns_model():
         # Check for model file
         checkpoint_path = MODEL_FN
         
-        # If not found, return False
+        # If not found, look for alternatives
         if not os.path.exists(checkpoint_path):
             print(f"Model checkpoint not found at {checkpoint_path}")
-            return False
+            
+            # Look for PTH models in the models directory
+            model_dir = MODEL_PATH
+            print(f"Searching for alternative models in {model_dir}...")
+            
+            if os.path.exists(model_dir):
+                potential_models = [
+                    file for file in os.listdir(model_dir) 
+                    if (file.endswith('.h5') or file.endswith('.pth')) and ('Cnn' in file or 'cnn' in file)
+                ]
+                
+                if potential_models:
+                    # Use the first available model
+                    alt_model_path = os.path.join(model_dir, potential_models[0])
+                    print(f"Found alternative model: {alt_model_path}")
+                    checkpoint_path = alt_model_path
+                else:
+                    print(f"No alternative models found in {model_dir}")
+                    return False
+            else:
+                print(f"Model directory {model_dir} does not exist")
+                return False
         
         print(f"Loading PANNs model from {checkpoint_path}")
         
@@ -1227,23 +1236,34 @@ def load_panns_model():
             # Initialize the model
             panns_model = Cnn13(classes_num=527)
             
-            # Load weights
-            checkpoint = torch.load(checkpoint_path, map_location=lambda storage, loc: storage)
-            
-            # Check if it's a dict containing the model state
-            if isinstance(checkpoint, dict):
-                if 'model' in checkpoint:
-                    print("Loading from 'model' key in checkpoint")
-                    panns_model.load_state_dict(checkpoint['model'])
-                elif 'state_dict' in checkpoint:
-                    print("Loading from 'state_dict' key in checkpoint")
-                    panns_model.load_state_dict(checkpoint['state_dict'])
+            # Load weights - use appropriate method based on file extension
+            if checkpoint_path.endswith('.pth'):
+                checkpoint = torch.load(checkpoint_path, map_location=lambda storage, loc: storage)
+                
+                # Check if it's a dict containing the model state
+                if isinstance(checkpoint, dict):
+                    if 'model' in checkpoint:
+                        print("Loading from 'model' key in checkpoint")
+                        panns_model.load_state_dict(checkpoint['model'])
+                    elif 'state_dict' in checkpoint:
+                        print("Loading from 'state_dict' key in checkpoint")
+                        panns_model.load_state_dict(checkpoint['state_dict'])
+                    else:
+                        print("Using checkpoint directly as state dictionary")
+                        panns_model.load_state_dict(checkpoint)
                 else:
-                    print("Using checkpoint directly as state dictionary")
+                    print("Loading direct model weights")
                     panns_model.load_state_dict(checkpoint)
             else:
-                print("Loading direct model weights")
-                panns_model.load_state_dict(checkpoint)
+                # For h5 files
+                print("Loading h5 model file - this may require conversion")
+                
+                # Simple h5 loading for PyTorch (this might need to be adapted)
+                import h5py
+                with h5py.File(checkpoint_path, 'r') as f:
+                    for name, param in panns_model.named_parameters():
+                        if name in f:
+                            param.data = torch.from_numpy(f[name][()])
             
             panns_model.eval()
             print("PANNs model loaded successfully")
