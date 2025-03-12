@@ -70,8 +70,31 @@ def log_audio_stats(stats):
 def log_prediction(prediction, db_level):
     """Format log for prediction results"""
     print(f"\n{TermColors.GREEN}PREDICTION RESULT:{TermColors.ENDC}")
-    for pred in prediction['predictions']:
-        print(f"  {TermColors.BOLD}{pred['label']}:{TermColors.ENDC} {pred['score']:.2f}")
+    
+    # Check if prediction is already a dictionary with 'predictions' key
+    if isinstance(prediction, dict) and 'predictions' in prediction:
+        predictions_list = prediction['predictions']
+    # Check if prediction is a list of dictionaries with 'label' and 'score'
+    elif isinstance(prediction, list) and all(isinstance(p, dict) and 'label' in p and 'score' in p for p in prediction):
+        predictions_list = prediction
+    # Check if prediction is a list of tuples (label, score)
+    elif isinstance(prediction, list) and all(isinstance(p, tuple) and len(p) == 2 for p in prediction):
+        # Convert tuples to dictionaries
+        predictions_list = [{'label': p[0], 'score': p[1]} for p in prediction]
+    else:
+        # Fallback for unknown format
+        print(f"  {TermColors.RED}WARNING:{TermColors.ENDC} Unknown prediction format: {prediction}")
+        return
+    
+    # Now log each prediction
+    for pred in predictions_list:
+        if isinstance(pred, dict):
+            label = pred.get('label', 'Unknown')
+            score = float(pred.get('score', 0))
+            print(f"  {TermColors.BOLD}{label}:{TermColors.ENDC} {score:.2f}")
+        else:
+            print(f"  {TermColors.BOLD}Unknown format:{TermColors.ENDC} {pred}")
+    
     print(f"  {TermColors.BLUE}dB Level:{TermColors.ENDC} {db_level:.2f}")
     print(f"{TermColors.HEADER}{'-'*80}{TermColors.ENDC}\n")
 
