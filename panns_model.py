@@ -1145,6 +1145,7 @@ def get_available_labels():
     
     # Return cached labels if available
     if available_labels is not None and len(available_labels) > 0:
+        print(f"Using cached labels, {len(available_labels)} labels available")
         return available_labels
         
     try:
@@ -1152,12 +1153,76 @@ def get_available_labels():
         if hasattr(panns_inference, 'get_available_labels'):
             labels = panns_inference.get_available_labels()
             print(f"Got {len(labels)} labels from panns_inference object")
-            print(f"Sample labels: {labels[:10]}...")
+            print(f"Sample labels: {labels[:5]}...")
             available_labels = labels
             return labels
         
         # Fallback to loading labels directly from CSV files
         labels = []
+        
+        # First, try class_labels_indices.csv in model directory which is the standard AudioSet format
+        if os.path.exists(CLASS_LABELS_CSV):
+            try:
+                print(f"Loading labels from {CLASS_LABELS_CSV}")
+                df = pd.read_csv(CLASS_LABELS_CSV)
+                
+                if 'display_name' in df.columns:
+                    labels = df['display_name'].tolist()
+                    print(f"Loaded {len(labels)} labels from {CLASS_LABELS_CSV} using display_name column")
+                    print(f"Sample labels: {labels[:5]}...")
+                    available_labels = labels
+                    return labels
+                elif 'name' in df.columns:  # Different format
+                    labels = df['name'].tolist()
+                    print(f"Loaded {len(labels)} labels from {CLASS_LABELS_CSV} using name column")
+                    print(f"Sample labels: {labels[:5]}...")
+                    available_labels = labels
+                    return labels
+                else:
+                    print(f"Could not find display_name or name column in {CLASS_LABELS_CSV}")
+                    print(f"Available columns: {df.columns.tolist()}")
+            except Exception as e:
+                print(f"Error loading labels from {CLASS_LABELS_CSV}: {e}")
+                print(f"Attempting alternative loading methods...")
+        
+        # Try loading manually with CSV reader
+        if os.path.exists(CLASS_LABELS_CSV):
+            try:
+                print(f"Loading labels from {CLASS_LABELS_CSV} using CSV reader")
+                labels = []
+                with open(CLASS_LABELS_CSV, 'r', encoding='utf-8') as f:
+                    reader = csv.reader(f, delimiter=',')
+                    header = next(reader, None)
+                    print(f"CSV header: {header}")
+                    
+                    # Find the appropriate column index for display_name or name
+                    name_col_idx = None
+                    if header:
+                        for i, col in enumerate(header):
+                            if col.lower() in ['display_name', 'name', 'label']:
+                                name_col_idx = i
+                                print(f"Using column {i} ({col}) for labels")
+                                break
+                    
+                    # If we found a column, use it, otherwise default to the last column
+                    if name_col_idx is None:
+                        name_col_idx = -1 if len(header) > 2 else 1
+                        print(f"No explicit name column found, using column {name_col_idx}")
+                    
+                    # Read the labels
+                    for row in reader:
+                        if len(row) > abs(name_col_idx):
+                            labels.append(row[name_col_idx])
+                
+                if labels:
+                    print(f"Loaded {len(labels)} labels from {CLASS_LABELS_CSV} using CSV reader")
+                    print(f"Sample labels: {labels[:5]}...")
+                    available_labels = labels
+                    return labels
+                else:
+                    print(f"No labels found in {CLASS_LABELS_CSV} using CSV reader")
+            except Exception as e:
+                print(f"Error loading labels from {CLASS_LABELS_CSV} using CSV reader: {e}")
         
         # Try primary audioset labels
         if os.path.exists(CSV_FNAME):
@@ -1167,7 +1232,7 @@ def get_available_labels():
                 if 'display_name' in df.columns:
                     labels = df['display_name'].tolist()
                     print(f"Loaded {len(labels)} labels from {CSV_FNAME}")
-                    print(f"Sample labels: {labels[:10]}...")
+                    print(f"Sample labels: {labels[:5]}...")
                     available_labels = labels
                     return labels
             except Exception as e:
@@ -1181,7 +1246,7 @@ def get_available_labels():
                 if 'display_name' in df.columns:
                     labels = df['display_name'].tolist()
                     print(f"Loaded {len(labels)} labels from {ALT_CSV_FNAME}")
-                    print(f"Sample labels: {labels[:10]}...")
+                    print(f"Sample labels: {labels[:5]}...")
                     available_labels = labels
                     return labels
             except Exception as e:
@@ -1195,68 +1260,34 @@ def get_available_labels():
                 if 'display_name' in df.columns:
                     labels = df['display_name'].tolist()
                     print(f"Loaded {len(labels)} labels from {DOMESTIC_CSV_FNAME}")
-                    print(f"Sample labels: {labels[:10]}...")
+                    print(f"Sample labels: {labels[:5]}...")
                     available_labels = labels
                     return labels
             except Exception as e:
                 print(f"Error loading labels from {DOMESTIC_CSV_FNAME}: {e}")
         
-        # Try class_labels_indices.csv in model directory
-        if os.path.exists(CLASS_LABELS_CSV):
-            try:
-                print(f"Loading labels from {CLASS_LABELS_CSV}")
-                df = pd.read_csv(CLASS_LABELS_CSV)
-                if 'display_name' in df.columns:
-                    labels = df['display_name'].tolist()
-                    print(f"Loaded {len(labels)} labels from {CLASS_LABELS_CSV}")
-                    print(f"Sample labels: {labels[:10]}...")
-                    available_labels = labels
-                    return labels
-                elif 'name' in df.columns:  # Different format
-                    labels = df['name'].tolist()
-                    print(f"Loaded {len(labels)} labels from {CLASS_LABELS_CSV}")
-                    print(f"Sample labels: {labels[:10]}...")
-                    available_labels = labels
-                    return labels
-            except Exception as e:
-                print(f"Error loading labels from {CLASS_LABELS_CSV}: {e}")
-        
-        # Try loading manually with CSV reader as a last resort
-        if os.path.exists(CLASS_LABELS_CSV):
-            try:
-                print(f"Loading labels from {CLASS_LABELS_CSV} using CSV reader")
-                labels = []
-                with open(CLASS_LABELS_CSV, 'r') as f:
-                    reader = csv.reader(f, delimiter=',')
-                    # Skip header
-                    next(reader, None)
-                    for row in reader:
-                        if len(row) >= 3:  # index,mid,display_name format
-                            labels.append(row[2])
-                        elif len(row) >= 2:  # Simplified format
-                            labels.append(row[1])
-                
-                if labels:
-                    print(f"Loaded {len(labels)} labels from {CLASS_LABELS_CSV} using CSV reader")
-                    print(f"Sample labels: {labels[:10]}...")
-                    available_labels = labels
-                    return labels
-            except Exception as e:
-                print(f"Error loading labels from {CLASS_LABELS_CSV} using CSV reader: {e}")
-        
         # If all else fails, return default labels
         if not labels:
-            print("Could not load labels from any source, using default labels")
-            labels = [f"label_{i}" for i in range(527)]
+            print("Could not load labels from any source, using default AudioSet labels")
+            # Create default labels for the 527 AudioSet classes
+            labels = [f"AudioSet_Class_{i}" for i in range(527)]
             available_labels = labels
         
         return labels
     except Exception as e:
         print(f"Error getting available labels: {e}")
-        # Return default labels as fallback
-        default_labels = [f"label_{i}" for i in range(527)]
-        available_labels = default_labels
-        return default_labels
+        return []
+
+# Add a new function that matches what server.py is expecting
+def get_labels():
+    """
+    Alias for get_available_labels() to maintain compatibility with server.py
+    Returns a list of label strings
+    """
+    return get_available_labels()
+
+# Load the model
+panns_model = None
 
 def load_panns_model():
     """
@@ -1380,11 +1411,11 @@ def predict_with_panns(audio_data, top_k=5, threshold=0.1, map_to_homesounds_for
             success = load_panns_model()
             if not success:
                 print("Failed to load PANNs model")
-                return [("Error", 1.0)]
+                return [("Error loading model", 1.0)]
         
         if panns_model is None:
             print("PANNs model is not loaded")
-            return [("Error", 1.0)]
+            return [("Model not loaded", 1.0)]
 
         # Process audio
         audio_data = np.array(audio_data).astype(np.float32)
@@ -1466,6 +1497,18 @@ def predict_with_panns(audio_data, top_k=5, threshold=0.1, map_to_homesounds_for
         # Create output predictions
         output_dict = {"output": []}
         
+        # Always print the top 5 predictions for debugging
+        print("Top 5 raw predictions:")
+        for i in range(min(len(sorted_indexes), 5)):
+            idx = sorted_indexes[i]
+            score = float(output[idx])
+            if idx < len(labels_list):
+                label_name = labels_list[idx]
+                print(f"  {i+1}. {label_name}: {score:.4f}")
+            else:
+                print(f"  {i+1}. Unknown_{idx}: {score:.4f}")
+        
+        # Get top K predictions above threshold
         for i in range(min(len(sorted_indexes), top_k * 4)):  # Get more candidates for filtering
             idx = sorted_indexes[i]
             score = float(output[idx])
@@ -1481,8 +1524,9 @@ def predict_with_panns(audio_data, top_k=5, threshold=0.1, map_to_homesounds_for
                 })
             else:
                 # Handle the case where idx is out of range
+                label_name = f"Unknown_{idx}"
                 output_dict["output"].append({
-                    "label": f"Unknown_{idx}",
+                    "label": label_name,
                     "score": score
                 })
             
@@ -1494,6 +1538,17 @@ def predict_with_panns(audio_data, top_k=5, threshold=0.1, map_to_homesounds_for
         
         print(f"Raw model predictions: {output_dict['output']}")
         print(f"PANNs prediction results: {predictions}")
+        
+        # If no predictions have meaningful labels, try to map them
+        if all(pred[0].startswith(("label_", "Unknown_", "AudioSet_Class_")) for pred in predictions):
+            print("All predictions have generic labels, attempting to improve labeling")
+            # Try to map label_X to more meaningful labels
+            for i, (label, score) in enumerate(predictions):
+                if label.startswith("label_") and label[6:].isdigit():
+                    idx = int(label[6:])
+                    if idx < len(labels_list) and not labels_list[idx].startswith(("label_", "Unknown_", "AudioSet_Class_")):
+                        predictions[i] = (labels_list[idx], score)
+                        print(f"Mapped {label} to {labels_list[idx]}")
         
         # Map to homesounds format if requested
         if map_to_homesounds_format and panns_inference:
