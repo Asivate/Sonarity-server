@@ -507,7 +507,7 @@ def handle_audio(data):
         traceback.print_exc()
         
         # Return an error prediction with safely initialized variables
-        emit_prediction([{"label": "Error", "score": 1.0}], db_level, timestamp)
+        emit_prediction([("Error", 1.0)], db_level, timestamp)
 
 # Remaining functions and code are unchanged
 def process_with_panns_model(np_wav, record_time=None, db=None):
@@ -641,7 +641,7 @@ def process_audio_with_panns(audio_data, db_level=None, timestamp=None, config=N
                 log_status("Converted audio to numpy array", "info")
             except Exception as e:
                 log_status(f"Error converting audio_data to numpy array: {e}", "error")
-                emit_prediction([{"label": "Invalid Audio Format", "score": 1.0}], db_level, timestamp)
+                emit_prediction([("Invalid Audio Format", 1.0)], db_level, timestamp)
                 return
         
         # Ensure we have float32 data
@@ -672,13 +672,13 @@ def process_audio_with_panns(audio_data, db_level=None, timestamp=None, config=N
         # Check for silence
         if db_level < silence_threshold:
             log_status(f"Sound is silence (dB: {db_level:.2f}, threshold: {silence_threshold})", "info")
-            emit_prediction([{"label": "Silence", "score": 0.95}], db_level, timestamp)
+            emit_prediction([("Silence", 0.95)], db_level, timestamp)
             return
             
         # Check if sound is too quiet
         if db_level < db_level_threshold:
             log_status(f"Sound too quiet (dB: {db_level:.2f}, threshold: {db_level_threshold})", "info")
-            emit_prediction([{"label": "Too Quiet", "score": 0.90}], db_level, timestamp)
+            emit_prediction([("Too Quiet", 0.90)], db_level, timestamp)
             return
         
         # Sound level is good, proceed with PANNs model
@@ -734,19 +734,20 @@ def process_audio_with_panns(audio_data, db_level=None, timestamp=None, config=N
         except Exception as e:
             log_status(f"Error in PANNs prediction: {str(e)}", "error")
             traceback.print_exc()
-            emit_prediction([{"label": "Prediction Error", "score": 1.0}], db_level, timestamp)
+            emit_prediction([("Prediction Error", 1.0)], db_level, timestamp)
             
     except Exception as e:
         log_status(f"Error processing audio: {str(e)}", "error")
         traceback.print_exc()
-        emit_prediction([{"label": "Processing Error", "score": 1.0}], db_level, timestamp)
+        emit_prediction([("Processing Error", 1.0)], db_level, timestamp)
 
 def emit_prediction(predictions, db_level, timestamp=None):
     """
     Emit prediction results via socketio.
     
     Args:
-        predictions: List of predictions as tuples of (label, score)
+        predictions: List of predictions, either as tuples of (label, score) 
+                    or dictionaries with 'label' and 'score' keys
         db_level: Audio decibel level or None
         timestamp: Timestamp of the audio data or None
         
@@ -763,8 +764,16 @@ def emit_prediction(predictions, db_level, timestamp=None):
     # Format the predictions for emission
     formatted_predictions = []
     
-    if predictions:
-        for label, score in predictions:
+    for pred in predictions:
+        if isinstance(pred, dict) and 'label' in pred and 'score' in pred:
+            # Handle dictionary format
+            formatted_predictions.append({
+                'label': pred['label'],
+                'score': str(round(float(pred['score']), 4))
+            })
+        elif isinstance(pred, tuple) and len(pred) == 2:
+            # Handle tuple format (label, score)
+            label, score = pred
             formatted_predictions.append({
                 'label': label,
                 'score': str(round(float(score), 4))
