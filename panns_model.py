@@ -81,7 +81,7 @@ if not os.path.exists(ASSET_DIR):
 # Try to find scalar file in both directories
 SCALAR_FN = os.path.join(ASSET_DIR, 'scalar.h5')
 if not os.path.exists(SCALAR_FN):
-    SCALAR_FN = os.path.join(MODEL_DIR, 'scalar.h5')
+SCALAR_FN = os.path.join(MODEL_DIR, 'scalar.h5')
 
 # CSV files for label mapping
 CSV_FNAME = os.path.join(ASSET_DIR, 'audioset_labels.csv')
@@ -297,7 +297,7 @@ class Cnn9_GMP_64x64(nn.Module):
         """Process input through convolutional layers to get bottleneck features.
         
         Args:
-            input: Tensor with shape [batch_size, channels, mel_bins, time]
+            input: Tensor with shape [batch_size, times_steps, freq_bins]
         
         Returns:
             Tensor with shape [batch_size, 512]
@@ -305,74 +305,44 @@ class Cnn9_GMP_64x64(nn.Module):
         # Debug input shape
         logger.info(f"get_bottleneck input shape: {input.shape}")
         
-        # Ensure the input has the right shape for the CNN
-        # CNN9 expects [batch, channels, mel_bins, time] where time is at least 64
-        if input.shape[3] < 64:
-            # Pad the time dimension to at least 64 frames
-            padding_needed = 64 - input.shape[3]
-            logger.info(f"Padding time dimension by {padding_needed} frames to reach 64")
-            padding = torch.zeros(input.shape[0], input.shape[1], input.shape[2], padding_needed, device=input.device)
-            input = torch.cat([input, padding], dim=3)
+        # Add channel dimension to input: [batch_size, 1, times_steps, freq_bins]
+        # This matches the original implementation
+        x = input[:, None, :, :]
+        logger.info(f"After adding channel dimension: {x.shape}")
         
-        # Use smaller pooling sizes to preserve more spatial features
-        # Original model uses (2,2) pooling which reduces dimensions too quickly
-        # for our small spectrograms
-        
-        # First conv block with reduced pooling
-        x = self.conv_block1(input, pool_size=(1, 2), pool_type='avg')  # Using (1,2) instead of (2,2)
+        # Process through the CNN blocks with original pooling settings
+        x = self.conv_block1(x, pool_size=(2, 2), pool_type='avg')
         logger.info(f"After conv_block1: {x.shape}")
-        x = F.dropout(x, p=0.2)
         
-        # Second conv block with reduced pooling
-        x = self.conv_block2(x, pool_size=(1, 2), pool_type='avg')  # Using (1,2) instead of (2,2)
+        x = self.conv_block2(x, pool_size=(2, 2), pool_type='avg')
         logger.info(f"After conv_block2: {x.shape}")
-        x = F.dropout(x, p=0.2)
         
-        # Third conv block with smaller pooling
-        x = self.conv_block3(x, pool_size=(1, 2), pool_type='avg')  # Using (1,2) instead of (2,2)
+        x = self.conv_block3(x, pool_size=(2, 2), pool_type='avg')
         logger.info(f"After conv_block3: {x.shape}")
-        x = F.dropout(x, p=0.2)
         
-        # Fourth conv block with smaller pooling
-        x = self.conv_block4(x, pool_size=(1, 2), pool_type='avg')  # Using (1,2) instead of (2,2)
+        x = self.conv_block4(x, pool_size=(1, 1), pool_type='avg')
         logger.info(f"After conv_block4: {x.shape}")
-        x = F.dropout(x, p=0.2)
-        
-        # Reshape features to 512 if needed
-        if x.shape[2] * x.shape[3] != 512:
-            logger.info(f"Reshaping features: current shape = {x.shape}")
-            
-            # Flatten and resize to 512 features
-            x_flat = x.view(x.shape[0], x.shape[1], -1)  # Flatten spatial dimensions
-            logger.info(f"Flattened shape: {x_flat.shape}")
-            
-            # Ensure we have at least 512 features
-            if x_flat.shape[2] < 512:
-                # Upsample features to 512
-                x_flat = F.interpolate(x_flat, size=512, mode='linear', align_corners=False)
-                logger.info(f"Upsampled to: {x_flat.shape}")
-            elif x_flat.shape[2] > 512:
-                # Downsample features to 512
-                x_flat = F.adaptive_avg_pool1d(x_flat, 512)
-                logger.info(f"Downsampled to: {x_flat.shape}")
-                
-            # Convert back to expected format for further processing
-            x = x_flat
         
         # Global pooling
-        x = torch.mean(x, dim=2)
-        logger.info(f"After global pooling: {x.shape}")
+        x = torch.mean(x, dim=3)
+        logger.info(f"After mean pooling on freq dimension: {x.shape}")
         
-        # Final FC layer
-        x = F.dropout(x, p=0.5)
+        (x, _) = torch.max(x, dim=2)
+        logger.info(f"After max pooling on time dimension: {x.shape}")
+        
+        # Final FC layer for feature refinement
         x = F.relu_(self.fc(x))
         logger.info(f"Final bottleneck features: {x.shape}")
         
         return x
         
     def forward(self, input):
+        """
+        Input: (batch_size, times_steps, freq_bins)
+        Output: (batch_size, classes_num)
+        """
         x = self.get_bottleneck(input)
-        x = F.dropout(x, p=0.5)
+        x = F.dropout(x, p=0.5, training=self.training)
         x = self.fc_audioset(x)
         x = torch.sigmoid(x)
         return x
@@ -427,7 +397,7 @@ class PANNsModelInference:
     def initialize(self):
         """Initialize the PANNs model, loading weights and preparing for inference."""
         try:
-            if self._initialized:
+        if self._initialized:
                 print("PANNs model already initialized")
                 return True
             
@@ -506,13 +476,13 @@ class PANNsModelInference:
                     elif 'state_dict' in checkpoint:
                         print("Loading from 'state_dict' key in checkpoint")
                         state_dict = checkpoint['state_dict']
-                    else:
+                else:
                         print("Using checkpoint directly as state dictionary")
                         state_dict = checkpoint
-                else:
+                    else:
                     print("Checkpoint is not a dictionary, cannot load model")
-                    return False
-                
+                        return False
+            
                 # Filter the state dict to match the model architecture
                 model_state_dict = self.model.state_dict()
                 
@@ -553,11 +523,11 @@ class PANNsModelInference:
                 # Create thread lock for prediction
                 self.lock = threading.Lock()
                 
-                self._initialized = True
+            self._initialized = True
                 print("PANNs model initialized successfully")
-                return True
+            return True
             
-            except Exception as e:
+        except Exception as e:
                 print(f"Error loading model weights: {e}")
                 print("Detailed error information:")
                 traceback.print_exc()
@@ -589,11 +559,11 @@ class PANNsModelInference:
             fmax = 16000  # Maximum frequency (Hz)
             
             # Compute STFT
-            stft = librosa.stft(
-                y=audio, 
+        stft = librosa.stft(
+            y=audio, 
                 n_fft=n_fft,
                 hop_length=hop_length,
-                window='hann', 
+            window='hann', 
                 center=True,
                 pad_mode='reflect'
             )
@@ -689,7 +659,7 @@ class PANNsModelInference:
             if audio_data is None or len(audio_data) == 0:
                 print("Empty audio data received")
                 return []
-            
+        
             # Check for non-finite values
             if not np.all(np.isfinite(audio_data)):
                 print("Audio contains non-finite values, fixing...")
@@ -861,11 +831,11 @@ class PANNsModelInference:
             
             return result
                 
-        except Exception as e:
+            except Exception as e:
             print(f"Error in PANNs prediction: {e}")
             traceback.print_exc()
-            return []
-    
+                return []
+            
     def _is_percussive_sound(self, audio_data):
         """
         Analyzes the audio to determine if it's likely a percussive sound like knocking.
@@ -972,7 +942,7 @@ class PANNsModelInference:
                         return decay_rate > 0.7 and peak_heights[0] > 0.1*np.max(smoothed)
             
             return False
-            
+                
         except Exception as e:
             print(f"Error in percussion detection: {e}")
             traceback.print_exc()
@@ -1009,7 +979,7 @@ class PANNsModelInference:
                 indices.append(i)
         
         return indices
-
+    
     def map_to_homesounds(self, results, threshold=0.2):
         """
         Map PANNs AudioSet labels to homesounds categories.
