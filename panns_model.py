@@ -1241,7 +1241,7 @@ def load_panns_model():
     try:
         if is_panns_loaded and panns_model is not None:
             print("PANNs model already loaded, skipping load")
-            return
+            return True
             
         print("Loading PANNs model...")
         start_time = time.time()
@@ -1275,43 +1275,99 @@ def load_panns_model():
             
         print(f"Loaded {len(labels)} class labels")
         
-        # Use smaller Cnn9_GMP_64x64 model instead of Cnn13_GMP_64x64
-        # This model has fewer layers and parameters but still good performance
-        panns_model = Cnn9_GMP_64x64(classes_num=len(lines))
+        # Check for CNN9 model file - first check model_dir path
+        checkpoint_path = os.path.join(model_dir, 'Cnn9_GMP_64x64_300000_iterations_mAP=0.37.pth')
         
-        # Load pre-trained model weights
-        checkpoint_path = os.path.join(model_dir, 'Cnn9_GMP_64x64_300000.pth')
+        # If not found in model_dir, try the global MODEL_PATH
+        if not os.path.exists(checkpoint_path) and os.path.exists(MODEL_PATH):
+            print(f"Using model from configured path: {MODEL_PATH}")
+            checkpoint_path = MODEL_PATH
         
+        # Try alternate locations
+        alt_paths = [
+            os.path.join(model_dir, 'Cnn9_GMP_64x64_300000.pth'),
+            os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'models', 'Cnn9_GMP_64x64_300000_iterations_mAP=0.37.pth'),
+            '/home/hirwa0250/Sonarity-server/models/Cnn9_GMP_64x64_300000_iterations_mAP=0.37.pth'
+        ]
+        
+        for alt_path in alt_paths:
+            if not os.path.exists(checkpoint_path) and os.path.exists(alt_path):
+                print(f"Found model at alternate path: {alt_path}")
+                checkpoint_path = alt_path
+                break
+                
         if not os.path.exists(checkpoint_path):
             print("Model checkpoint not found, downloading...")
             # Using a mirror URL since the original might be unstable
-            model_url = "https://zenodo.org/record/3987831/files/Cnn9_GMP_64x64_300000_iterations_mAP%3D0.37.pth"
+            model_url = "https://zenodo.org/records/3576599/files/Cnn9_GMP_64x64_300000_iterations_mAP=0.37.pth?download=1"
             try:
                 wget.download(model_url, out=checkpoint_path)
             except Exception as e:
                 print(f"Error downloading model from primary source: {e}")
                 # Try alternative source if available
                 try:
-                    alt_url = "https://github.com/qiuqiangkong/audioset_tagging_cnn/releases/download/v0.1/Cnn9_GMP_64x64_300000_iterations_mAP%3D0.37.pth"
+                    alt_url = "https://github.com/qiuqiangkong/audioset_tagging_cnn/releases/download/v0.1/Cnn9_GMP_64x64_300000_iterations_mAP=0.37.pth"
                     wget.download(alt_url, out=checkpoint_path)
                 except Exception as e2:
                     print(f"Error downloading model from alternative source: {e2}")
-                    raise Exception("Failed to download model weights.")
+                    # One last attempt - try to find the model anywhere in the project
+                    found_model = False
+                    for root, dirs, files in os.walk(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))):
+                        for file in files:
+                            if file.endswith('.pth') and 'Cnn9' in file:
+                                model_path = os.path.join(root, file)
+                                print(f"Found model file at: {model_path}")
+                                checkpoint_path = model_path
+                                found_model = True
+                                break
+                        if found_model:
+                            break
+                    
+                    if not found_model:
+                        raise Exception("Failed to download model weights and couldn't find existing model.")
+        
+        print(f"Using model file: {checkpoint_path}")
+        
+        # Use smaller Cnn9_GMP_64x64 model
+        panns_model = Cnn9_GMP_64x64(classes_num=len(lines))
         
         # Load model weights
-        checkpoint = torch.load(checkpoint_path, map_location='cpu')
-        panns_model.load_state_dict(checkpoint['model'])
+        try:
+            checkpoint = torch.load(checkpoint_path, map_location='cpu')
+            
+            # Handle different checkpoint formats
+            if isinstance(checkpoint, dict):
+                if 'model' in checkpoint:
+                    print("Loading from 'model' key in checkpoint")
+                    panns_model.load_state_dict(checkpoint['model'])
+                elif 'state_dict' in checkpoint:
+                    print("Loading from 'state_dict' key in checkpoint")
+                    panns_model.load_state_dict(checkpoint['state_dict'])
+                else:
+                    print("Loading directly from checkpoint")
+                    panns_model.load_state_dict(checkpoint)
+            else:
+                print("Checkpoint is not a dictionary, trying direct load")
+                panns_model.load_state_dict(checkpoint)
+                
+        except Exception as e:
+            print(f"Error loading model weights: {e}")
+            print("Attempting to load with strict=False")
+            
+            try:
+                checkpoint = torch.load(checkpoint_path, map_location='cpu')
+                if isinstance(checkpoint, dict) and 'model' in checkpoint:
+                    panns_model.load_state_dict(checkpoint['model'], strict=False)
+                else:
+                    panns_model.load_state_dict(checkpoint, strict=False)
+            except Exception as e2:
+                print(f"Second attempt failed: {e2}")
+                raise Exception(f"Could not load model weights: {e2}")
         
         # Move to GPU if available
         device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
         panns_model = panns_model.to(device)
         panns_model.eval()
-        
-        # Load normalization parameters
-        # Mean and std values for feature normalization should be adjusted for the Cnn9 model
-        # These values are commonly used for AudioSet normalization
-        mel_mean = -6.6268077
-        mel_std = 5.358466
         
         print(f"PANNs model loaded successfully in {time.time() - start_time:.2f}s")
         is_panns_loaded = True
