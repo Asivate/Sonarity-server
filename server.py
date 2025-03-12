@@ -158,7 +158,7 @@ def get_ip_addresses():
             s.connect(('8.8.8.8', 80))
             primary_ip = s.getsockname()[0]
             if primary_ip != '127.0.0.1' and primary_ip != '0.0.0.0' and primary_ip != '34.16.101.179':
-            ip_list.append(primary_ip)
+                ip_list.append(primary_ip)
         except Exception:
             pass
         finally:
@@ -257,10 +257,10 @@ def load_models():
         USE_PANNS_MODEL = True
 
     if USE_PANNS_MODEL:
-            print("Loading PANNs model...")
+        print("Loading PANNs model...")
         panns_model.load_panns_model()
-                models["panns"] = True
-                print("PANNs model loaded successfully")
+        models["panns"] = True
+        print("PANNs model loaded successfully")
 
 # Audio Processing Functions
 def audio_samples(in_data, frame_count, time_info, status_flags):
@@ -369,7 +369,7 @@ def handle_source(json_data):
                 "timestamp": timestamp,
                 "db": db
             })
-                            return
+            return
                     
         if not isinstance(audio_features, np.ndarray):
             try:
@@ -396,7 +396,7 @@ def handle_source(json_data):
                 "timestamp": timestamp,
                 "db": db
             })
-                                    return
+            return
                         
         if db < DBLEVEL_THRES:
             print(f"Sound too quiet (dB: {db}, threshold: {DBLEVEL_THRES})")
@@ -484,7 +484,7 @@ def handle_audio(data):
         # Handle case where no valid audio data was found
         if audio_data is None:
             log_status("No valid audio data found in message", "error")
-        return
+            return
     
         # Log the received data info
         log_status(f"Length: {len(audio_data)} samples", "info")
@@ -513,7 +513,7 @@ def handle_audio(data):
                 if audio_format == 'int16':
                     # Convert bytes to int16 array
                     audio_data = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
-                                    else:
+                else:
                     # Assume float32
                     audio_data = np.frombuffer(audio_bytes, dtype=np.float32)
             except Exception as e:
@@ -549,7 +549,7 @@ def handle_audio(data):
         # Return an error prediction with safely initialized variables
         emit_prediction([("Error", 1.0)], db_level, timestamp)
 
-# Remaining functions and code are unchanged
+# Remaining functions and code
 def process_with_panns_model(np_wav, record_time=None, db=None):
     """Process audio using PANNs model"""
     try:
@@ -575,13 +575,13 @@ def process_with_panns_model(np_wav, record_time=None, db=None):
             np_wav = padded
         
         with panns_lock:
-        panns_results = panns_model.predict_with_panns(
-            np_wav, 
-            top_k=10, 
-            threshold=PREDICTION_THRES,
+            panns_results = panns_model.predict_with_panns(
+                np_wav, 
+                top_k=10, 
+                threshold=PREDICTION_THRES,
                 map_to_homesounds_format=False,
-            boost_other_categories=True
-        )
+                boost_other_categories=True
+            )
         
         if panns_results and "output" in panns_results and len(panns_results["output"]) > 0:
             print("===== PANNs MODEL PREDICTIONS =====")
@@ -886,7 +886,7 @@ def process_audio_with_panns(audio_data, db_level=None, timestamp=None, config=N
                             percussion_labels.sort(key=lambda x: x[1], reverse=True)
                             final_predictions.append(percussion_labels[0])
                             print(f"Using percussion label from model: {percussion_labels[0]}")
-            else:
+                        else:
                             # Force a knock label with high confidence
                             print("No percussion labels in model predictions, using generic knock label")
                             final_predictions.append(("Knock", 0.9))
@@ -896,7 +896,7 @@ def process_audio_with_panns(audio_data, db_level=None, timestamp=None, config=N
                             if pred[0].lower() not in ["speech", "music"] and pred[1] > prediction_threshold * 1.5:
                                 if pred not in final_predictions:
                                     final_predictions.append(pred)
-        else:
+                    else:
                         # No knocking pattern - use standard predictions but boost other categories
                         print(f"PANNs model predictions: {predictions_list[:5]}")
                         
@@ -917,7 +917,7 @@ def process_audio_with_panns(audio_data, db_level=None, timestamp=None, config=N
                     
                     print(f"Final predictions: {final_predictions}")
                     emit_prediction(final_predictions, db_level, timestamp)
-        else:
+                else:
                     log_status("No predictions returned from model", "warning")
                     emit_prediction([("No Sound Detected", 0.8)], db_level, timestamp)
                 
@@ -989,7 +989,7 @@ def emit_prediction(predictions, db_level, timestamp=None):
                 'label': pred['label'],
                 'score': str(round(float(pred['score']), 4))
             })
-                                else:
+        else:
             print(f"Warning: Unrecognized prediction format: {pred}")
     
     # Ensure we have at least one prediction
@@ -1043,7 +1043,7 @@ def process_speech_with_sentiment(audio_data, record_time=None, confidence=0.8):
         num_chunks = min(SPEECH_MAX_BUFFER_SIZE, len(process_speech_with_sentiment.recent_audio_buffer))
         logger.info(f"Using concatenated audio from {num_chunks} chunks for speech transcription")
         concatenated_audio = np.concatenate(process_speech_with_sentiment.recent_audio_buffer[-num_chunks:])
-                                else:
+    else:
         concatenated_audio = audio_data
     
     min_samples = RATE * 4.0
@@ -1067,7 +1067,7 @@ def process_speech_with_sentiment(audio_data, record_time=None, confidence=0.8):
     
     if rms < 0.05:
         logger.info(f"Boosting audio signal (original RMS: {rms:.4f})")
-            target_rms = 0.1
+        target_rms = 0.1
         gain_factor = target_rms / (rms + 1e-10)
         enhanced_audio = concatenated_audio * gain_factor
         if np.max(np.abs(enhanced_audio)) > 0.99:
@@ -1079,11 +1079,11 @@ def process_speech_with_sentiment(audio_data, record_time=None, confidence=0.8):
             else:
                 enhanced_audio = concatenated_audio
         new_rms = np.sqrt(np.mean(np.square(enhanced_audio)))
-            logger.info(f"Audio boosted from RMS {rms:.4f} to {new_rms:.4f}")
+        logger.info(f"Audio boosted from RMS {rms:.4f} to {new_rms:.4f}")
         concatenated_audio = enhanced_audio
         
     logger.info("Transcribing speech to text...")
-        print("Transcribing with enhanced audio processing...")
+    print("Transcribing with enhanced audio processing...")
         
     try:
         transcription_result = None
@@ -1212,7 +1212,7 @@ def boost_other_categories(predictions, boost_factor=1.2):
         boosted = predictions.copy()
         return boosted
     else:
-    return predictions
+        return predictions
 
 @app.route('/api/labels')
 def get_labels():
@@ -1269,10 +1269,10 @@ if __name__ == '__main__':
     print("\n============================================================")
     print("SONARITY SERVER STARTED")
     print("============================================================")
-        print("Server is available at:")
-        for i, ip in enumerate(ip_addresses):
-            print(f"{i+1}. http://{ip}:{args.port}")
-            print(f"   WebSocket: ws://{ip}:{args.port}")
+    print("Server is available at:")
+    for i, ip in enumerate(ip_addresses):
+        print(f"{i+1}. http://{ip}:{args.port}")
+        print(f"   WebSocket: ws://{ip}:{args.port}")
     
     print(f"\nExternal access: http://{external_ip}:{args.port}")
     print(f"External WebSocket: ws://{external_ip}:{args.port}")
