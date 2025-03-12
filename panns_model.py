@@ -26,6 +26,8 @@ import psutil
 import threading
 import json
 import traceback
+import wget
+import csv
 
 # CPU optimization - set number of threads to use all cores
 # Get the number of CPU cores and set torch to use all of them
@@ -51,24 +53,24 @@ if not os.path.exists(MODEL_DIR):
     # Fallback to the absolute path if needed
     MODEL_DIR = '/home/hirwa0250/Sonarity-server/models'
 
-# Prioritize the larger CNN13 model first (the 1GB model)
-CNN13_MODEL_PATH = os.path.join(MODEL_DIR, 'Cnn13_GMP_64x64_520000_iterations_mAP=0.42.pth')
+# Prioritize the smaller CNN9 model first (better for diverse sound recognition)
 CNN9_MODEL_PATH = os.path.join(MODEL_DIR, 'Cnn9_GMP_64x64_300000_iterations_mAP=0.37.pth')
+CNN13_MODEL_PATH = os.path.join(MODEL_DIR, 'Cnn13_GMP_64x64_520000_iterations_mAP=0.42.pth')
 
 # Check which model exists and set it as the default
-if os.path.exists(CNN13_MODEL_PATH):
-    print(f"Using the larger CNN13 model (1GB): {CNN13_MODEL_PATH}")
-    MODEL_PATH = CNN13_MODEL_PATH
-    USE_CNN13 = True
-elif os.path.exists(CNN9_MODEL_PATH):
+if os.path.exists(CNN9_MODEL_PATH):
     print(f"Using the smaller CNN9 model: {CNN9_MODEL_PATH}")
     MODEL_PATH = CNN9_MODEL_PATH
     USE_CNN13 = False
-else:
-    print("No pre-trained PANNs models found in models directory")
-    # Just set a default, we'll handle the missing file during initialization
+elif os.path.exists(CNN13_MODEL_PATH):
+    print(f"Using the larger CNN13 model (1GB): {CNN13_MODEL_PATH}")
     MODEL_PATH = CNN13_MODEL_PATH
     USE_CNN13 = True
+else:
+    print("No pre-trained PANNs models found in models directory")
+    # Default to the smaller model
+    MODEL_PATH = CNN9_MODEL_PATH
+    USE_CNN13 = False
 
 # Define asset directory for CSV files and scalar file
 ASSET_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'assets')
@@ -1227,108 +1229,247 @@ def get_available_labels():
         return [f"label_{i}" for i in range(527)]  # Return default labels on error
 
 def load_panns_model():
-    """Initialize the PANNs model"""
-    panns_inference.initialize()
+    """Load PANNs model for sound recognition"""
+    global panns_model, classmap, is_panns_loaded
+    
+    try:
+        if is_panns_loaded and panns_model is not None:
+            print("PANNs model already loaded, skipping load")
+            return
+            
+        print("Loading PANNs model...")
+        start_time = time.time()
+        
+        # Load labels and class mappings
+        model_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
+        label_csv = os.path.join(model_dir, "class_labels_indices.csv")
+        
+        if not os.path.exists(label_csv):
+            print("Labels file not found, downloading...")
+            if not os.path.exists(model_dir):
+                os.makedirs(model_dir)
+            wget.download("https://raw.githubusercontent.com/qiuqiangkong/audioset_tagging_cnn/master/metadata/class_labels_indices.csv", out=label_csv)
+        
+        # Read labels
+        with open(label_csv, 'r') as f:
+            reader = csv.reader(f, delimiter=',')
+            lines = list(reader)
+        
+        # Skip header
+        lines = lines[1:]
+        
+        # Create class indices dictionary
+        classmap = {}
+        labels = []
+        for i in range(len(lines)):
+            id = lines[i][0]
+            name = lines[i][2]
+            classmap[name] = i
+            labels.append(name)
+            
+        print(f"Loaded {len(labels)} class labels")
+        
+        # Use smaller Cnn9_GMP_64x64 model instead of Cnn13_GMP_64x64
+        # This model has fewer layers and parameters but still good performance
+        panns_model = Cnn9_GMP_64x64(classes_num=len(lines))
+        
+        # Load pre-trained model weights
+        checkpoint_path = os.path.join(model_dir, 'Cnn9_GMP_64x64_300000.pth')
+        
+        if not os.path.exists(checkpoint_path):
+            print("Model checkpoint not found, downloading...")
+            # Using a mirror URL since the original might be unstable
+            model_url = "https://zenodo.org/record/3987831/files/Cnn9_GMP_64x64_300000_iterations_mAP%3D0.37.pth"
+            try:
+                wget.download(model_url, out=checkpoint_path)
+            except Exception as e:
+                print(f"Error downloading model from primary source: {e}")
+                # Try alternative source if available
+                try:
+                    alt_url = "https://github.com/qiuqiangkong/audioset_tagging_cnn/releases/download/v0.1/Cnn9_GMP_64x64_300000_iterations_mAP%3D0.37.pth"
+                    wget.download(alt_url, out=checkpoint_path)
+                except Exception as e2:
+                    print(f"Error downloading model from alternative source: {e2}")
+                    raise Exception("Failed to download model weights.")
+        
+        # Load model weights
+        checkpoint = torch.load(checkpoint_path, map_location='cpu')
+        panns_model.load_state_dict(checkpoint['model'])
+        
+        # Move to GPU if available
+        device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+        panns_model = panns_model.to(device)
+        panns_model.eval()
+        
+        # Load normalization parameters
+        # Mean and std values for feature normalization should be adjusted for the Cnn9 model
+        # These values are commonly used for AudioSet normalization
+        mel_mean = -6.6268077
+        mel_std = 5.358466
+        
+        print(f"PANNs model loaded successfully in {time.time() - start_time:.2f}s")
+        is_panns_loaded = True
+        
+        # Return success status
+        return True
+        
+    except Exception as e:
+        print(f"Error loading PANNs model: {e}")
+        traceback.print_exc()
+        return False
 
-def predict_with_panns(audio_data, top_k=5, threshold=0.2, map_to_homesounds_format=False, boost_other_categories=False):
+def predict_with_panns(audio_data, top_k=5, threshold=0.1, map_to_homesounds_format=False, boost_other_categories=False):
     """
-    Predict audio categories using PANNs model
+    Process audio data with PANNs model
     
     Args:
-        audio_data: Audio waveform as numpy array
-        top_k: Number of top predictions to return
-        threshold: Confidence threshold for predictions
-        map_to_homesounds_format: Whether to map results to homesounds categories
-        boost_other_categories: Whether to boost non-speech/music categories
+        audio_data: numpy array of audio samples (mono)
+        top_k: number of top predictions to return
+        threshold: minimum confidence threshold for predictions
+        map_to_homesounds_format: whether to map AudioSet labels to HomeSounds format
+        boost_other_categories: whether to boost confidence of non-speech/non-music categories
         
     Returns:
-        List of (label, confidence) tuples or formatted predictions based on map_to_homesounds_format
+        Dictionary with predictions
     """
+    global panns_model, classmap, is_panns_loaded
+    
+    if not is_panns_loaded or panns_model is None:
+        success = load_panns_model()
+        if not success:
+            return {"output": [{"label": "Error loading model", "score": 1.0}]}
+    
     try:
-        # Check if model is initialized
-        if not hasattr(panns_inference, '_initialized') or not panns_inference._initialized:
-            print("WARNING: PANNs model not initialized, initializing now...")
-            panns_inference.initialize()
-            if not hasattr(panns_inference, '_initialized') or not panns_inference._initialized:
-                print("ERROR: Failed to initialize PANNs model")
-                return []
+        # Make sure audio is normalized to [-1.0, 1.0] range
+        if np.max(np.abs(audio_data)) > 1.0:
+            audio_data = audio_data / np.max(np.abs(audio_data))
+            
+        # Get audio length
+        audio_length = len(audio_data)
         
-        # First check for percussion sounds in the time domain - more reliable for knocking
-        is_percussive = panns_inference._is_percussive_sound(audio_data)
-        if is_percussive:
-            print("PERCUSSION DETECTED: Strong evidence of knock/tap sound in time domain analysis")
+        # Handle audio that's too short
+        MINIMUM_LENGTH = 32000  # 1 second at 32 kHz
+        if audio_length < MINIMUM_LENGTH:
+            padding = np.zeros(MINIMUM_LENGTH - audio_length, dtype=np.float32)
+            audio_data = np.concatenate([audio_data, padding])
+        elif audio_length > MINIMUM_LENGTH:
+            # Use center part of audio (align with how the Cnn9 model was trained)
+            start = (audio_length - MINIMUM_LENGTH) // 2
+            audio_data = audio_data[start:start + MINIMUM_LENGTH]
             
-            # Get all available labels and find knock-related labels
-            all_labels = panns_inference.get_available_labels()
-            print(f"Total available labels: {len(all_labels)}")
-            
-            # Look for knock-related labels
-            knock_related_labels = [
-                (i, label) for i, label in enumerate(all_labels) 
-                if any(keyword in label.lower() for keyword in 
-                      ['knock', 'tap', 'bang', 'thump', 'drum', 'percussion'])
-            ]
-            
-            print(f"Found {len(knock_related_labels)} knock-related labels: {knock_related_labels}")
-            
-            # If we found knock-related labels, use a very low threshold to detect them
-            if knock_related_labels:
-                # Get predictions with a very low threshold to capture potential knock sounds
-                preliminary_results = panns_inference.predict(
-                    audio_data, 
-                    top_k=20,  # Get more results to find percussion
-                    threshold=0.01,  # Extremely low threshold to find any possibility
-                    boost_other_categories=True
-                )
-                
-                print(f"Preliminary predictions with low threshold: {preliminary_results}")
-                
-                # Try to find any percussion-related sounds in the predictions
-                percussion_results = []
-                for label, score in preliminary_results:
-                    label_lower = label.lower()
-                    if any(keyword in label_lower for keyword in 
-                          ['knock', 'tap', 'bang', 'thump', 'drum', 'percussion']):
-                        # Boost the score for percussion sounds
-                        percussion_results.append((label, min(1.0, score * 3.0)))
-                
-                if percussion_results:
-                    # Sort by score descending
-                    percussion_results.sort(key=lambda x: x[1], reverse=True)
-                    print(f"Found percussion sounds in predictions: {percussion_results}")
-                    return percussion_results
-                
-                # If no percussion labels were detected, create a generic one with high confidence
-                print("No percussion labels in model predictions, using generic knock label")
-                return [("Knock", 0.9)]
-            else:
-                # If no knock-related labels exist, just use a generic "Knock" label
-                print("No knock-related labels found in model vocabulary, using generic label")
-                return [("Knock", 0.9)]
+        # Convert to spectral representation
+        # Using settings that align with the Cnn9 model's training
+        audio_data = torch.tensor(audio_data, dtype=torch.float32)
         
-        # Standard prediction path when not a percussive sound
-        results = panns_inference.predict(
-            audio_data, 
-            top_k=top_k, 
-            threshold=threshold,
-            boost_other_categories=boost_other_categories
-        )
+        # Convert audio to spectral representation
+        # Moving this outside the model to have more control
+        # Adjust spectrogram settings for Cnn9 model
+        SAMPLE_RATE = 32000
+        N_FFT = 1024
+        HOP_LENGTH = 320  # 10ms hop for 32kHz
+        F_MIN = 50
+        F_MAX = 14000
+        N_MELS = 64
         
-        # If no results were found, try again with a lower threshold specifically for knocking sounds
-        if not results or len(results) == 0:
-            print("No results found, trying again with lower threshold for percussion sounds")
-            results = panns_inference.predict(
-                audio_data, 
-                top_k=top_k, 
-                threshold=threshold * 0.5,  # Half the threshold
-                boost_other_categories=True  # Always boost other categories for this retry
+        # Generate log-mel spectrogram using torchaudio
+        try:
+            import torchaudio.transforms as T
+            mel_spec = T.MelSpectrogram(
+                sample_rate=SAMPLE_RATE,
+                n_fft=N_FFT,
+                hop_length=HOP_LENGTH,
+                f_min=F_MIN,
+                f_max=F_MAX,
+                n_mels=N_MELS
+            )(audio_data)
+            log_mel_spec = torch.log10(torch.clamp(mel_spec, min=1e-10)) * 10
+        except ImportError:
+            # Fallback to librosa if torchaudio not available
+            import librosa
+            mel_spec = librosa.feature.melspectrogram(
+                y=audio_data.numpy(),
+                sr=SAMPLE_RATE,
+                n_fft=N_FFT,
+                hop_length=HOP_LENGTH,
+                fmin=F_MIN,
+                fmax=F_MAX,
+                n_mels=N_MELS
             )
+            log_mel_spec = librosa.power_to_db(mel_spec, ref=1.0, amin=1e-10, top_db=None)
+            log_mel_spec = torch.tensor(log_mel_spec, dtype=torch.float32)
         
-        print(f"PANNs model predictions: {results}")
+        # Reshape to match model input requirements for Cnn9
+        # Swap time and frequency dimensions 
+        log_mel_spec = log_mel_spec.transpose(0, 1)
         
-        return results
+        # Normalize features 
+        # Using standardized values for AudioSet
+        mel_mean = -6.6268077
+        mel_std = 5.358466
+        normalized_spec = (log_mel_spec - mel_mean) / mel_std
+        
+        # Add batch and channel dimensions
+        normalized_spec = normalized_spec.unsqueeze(0)
+        
+        # Move to same device as model
+        device = next(panns_model.parameters()).device
+        normalized_spec = normalized_spec.to(device)
+        
+        # Get model predictions
+        with torch.no_grad():
+            output = panns_model(normalized_spec)
+            output = output.cpu().numpy()[0]
+        
+        # Sort predictions and apply threshold
+        sorted_indexes = np.argsort(output)[::-1]
+        
+        # Get labels for all AudioSet classes
+        labels_list = get_labels()
+        
+        # Create output predictions
+        output_dict = {"output": []}
+        
+        for i in range(min(len(sorted_indexes), top_k * 4)):  # Get more candidates for filtering
+            idx = sorted_indexes[i]
+            score = float(output[idx])
             
+            if score < threshold and len(output_dict["output"]) >= top_k:
+                continue
+                
+            label = labels_list[idx] if idx < len(labels_list) else f"Unknown_{idx}"
+            
+            # Boost non-speech, non-music categories if requested
+            if boost_other_categories:
+                if 'speech' not in label.lower() and 'music' not in label.lower():
+                    score = min(1.0, score * 1.25)  # 25% boost
+            
+            # Add prediction if above threshold
+            if score >= threshold:
+                output_dict["output"].append({
+                    "label": label,
+                    "score": score
+                })
+                
+                # Stop after we have top_k predictions above threshold
+                if len(output_dict["output"]) >= top_k:
+                    break
+        
+        # Ensure we return at least one prediction (highest confidence)
+        if len(output_dict["output"]) == 0 and len(sorted_indexes) > 0:
+            idx = sorted_indexes[0]
+            score = float(output[idx])
+            label = labels_list[idx] if idx < len(labels_list) else f"Unknown_{idx}"
+            output_dict["output"].append({
+                "label": label,
+                "score": score
+            })
+        
+        # Ensure we return the raw numpy array of all 527 scores as well, for debugging
+        output_dict["raw_scores"] = output
+        
+        return output_dict
+        
     except Exception as e:
-        print(f"ERROR in predict_with_panns: {e}")
+        print(f"Error processing audio with PANNs: {e}")
         traceback.print_exc()
-        return []
+        return {"output": [{"label": "Error", "score": 1.0}]}
