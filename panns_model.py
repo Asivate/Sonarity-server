@@ -50,45 +50,35 @@ logger = logging.getLogger(__name__)
 # Use a relative path with fallback to absolute path for better compatibility
 MODEL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'models')
 if not os.path.exists(MODEL_DIR):
-    # Fallback to the absolute path if needed
+    print(f"Model directory not found at {MODEL_DIR}, using fallback path")
     MODEL_DIR = '/home/hirwa0250/Sonarity-server/models'
 
-# Prioritize the smaller CNN9 model first (better for diverse sound recognition)
+# Model file paths
 CNN9_MODEL_PATH = os.path.join(MODEL_DIR, 'Cnn9_GMP_64x64_300000_iterations_mAP=0.37.pth')
 CNN13_MODEL_PATH = os.path.join(MODEL_DIR, 'Cnn13_GMP_64x64_520000_iterations_mAP=0.42.pth')
 
-# Check which model exists and set it as the default
-if os.path.exists(CNN9_MODEL_PATH):
-    print(f"Using the smaller CNN9 model: {CNN9_MODEL_PATH}")
-    MODEL_PATH = CNN9_MODEL_PATH
-    USE_CNN13 = False
-elif os.path.exists(CNN13_MODEL_PATH):
-    print(f"Using the larger CNN13 model (1GB): {CNN13_MODEL_PATH}")
-    MODEL_PATH = CNN13_MODEL_PATH
-    USE_CNN13 = True
-else:
-    print("No pre-trained PANNs models found in models directory")
-    # Default to the smaller model
-    MODEL_PATH = CNN9_MODEL_PATH
-    USE_CNN13 = False
+# Set which model to use (CNN13 is more accurate but larger)
+USE_CNN13 = os.path.exists(CNN13_MODEL_PATH)
+MODEL_PATH = CNN13_MODEL_PATH if USE_CNN13 else CNN9_MODEL_PATH
 
-# Define asset directory for CSV files and scalar file
+# Asset directory for label files and scalar values
 ASSET_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'assets')
 if not os.path.exists(ASSET_DIR):
-    # Fallback to model directory if assets dir doesn't exist
-    ASSET_DIR = MODEL_DIR
+    print(f"Asset directory not found at {ASSET_DIR}, using fallback path")
+    ASSET_DIR = '/home/hirwa0250/Sonarity-server/assets'
 
-# Try to find scalar file in both directories
+# Scalar file for normalization
 SCALAR_FN = os.path.join(ASSET_DIR, 'scalar.h5')
 if not os.path.exists(SCALAR_FN):
+    # Fallback to scalar in model directory
     SCALAR_FN = os.path.join(MODEL_DIR, 'scalar.h5')
 
-# CSV files for label mapping
+# CSV files for labels
 CSV_FNAME = os.path.join(ASSET_DIR, 'audioset_labels.csv')
 ALT_CSV_FNAME = os.path.join(ASSET_DIR, 'validate_meta.csv')
 DOMESTIC_CSV_FNAME = os.path.join(ASSET_DIR, 'domestic_labels.csv')
 
-# Fallback path for CSV files
+# Fallback paths in case assets aren't found in assets directory
 if not os.path.exists(CSV_FNAME) and os.path.exists(os.path.join(MODEL_DIR, 'audioset_labels.csv')):
     CSV_FNAME = os.path.join(MODEL_DIR, 'audioset_labels.csv')
 
@@ -98,14 +88,27 @@ if not os.path.exists(ALT_CSV_FNAME) and os.path.exists(os.path.join(MODEL_DIR, 
 if not os.path.exists(DOMESTIC_CSV_FNAME) and os.path.exists(os.path.join(MODEL_DIR, 'domestic_labels.csv')):
     DOMESTIC_CSV_FNAME = os.path.join(MODEL_DIR, 'domestic_labels.csv')
 
-# Additional path for CSV files
-CSV_FILES_FNAME = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'csv_files', 'validate_meta.csv')
+# Fallback to class_labels_indices.csv for AudioSet labels
+CLASS_LABELS_CSV = os.path.join(MODEL_DIR, 'class_labels_indices.csv')
+
+print(f"Model paths:")
+print(f"  CNN9 Model: {CNN9_MODEL_PATH}")
+print(f"  CNN13 Model: {CNN13_MODEL_PATH}")
+print(f"  Using model: {MODEL_PATH}")
+print(f"Label paths:")
+print(f"  AudioSet labels: {CSV_FNAME}")
+print(f"  Alternate labels: {ALT_CSV_FNAME}")
+print(f"  Domestic labels: {DOMESTIC_CSV_FNAME}")
+print(f"  Class labels: {CLASS_LABELS_CSV}")
+print(f"  Scalar file: {SCALAR_FN}")
 
 # Initialize global variables for model management
 is_panns_loaded = False
 panns_model = None
+panns_inference = None
 classmap = {}
 labels = []
+available_labels = None  # Cache for labels
 
 # Default audio parameters
 SAMPLE_RATE = 32000
@@ -197,7 +200,7 @@ class Cnn13(nn.Module):
         """Process input through convolutional layers to get bottleneck features.
         
         Args:
-            input: Tensor with shape [batch_size, channels, mel_bins, time]
+            input: Tensor with shape [batch_size, times_steps, freq_bins]
         
         Returns:
             Tensor with shape [batch_size, 2048]
@@ -205,20 +208,12 @@ class Cnn13(nn.Module):
         # Debug input shape
         logger.info(f"get_bottleneck input shape: {input.shape}")
         
-        # Ensure the input has the right shape for the CNN
-        # CNN13 expects [batch, channels, mel_bins, time] where time is at least 64
-        if input.shape[3] < 64:
-            # Pad the time dimension to at least 64 frames
-            padding_needed = 64 - input.shape[3]
-            logger.info(f"Padding time dimension by {padding_needed} frames to reach 64")
-            padding = torch.zeros(input.shape[0], input.shape[1], input.shape[2], padding_needed, device=input.device)
-            input = torch.cat([input, padding], dim=3)
-        
-        # Use smaller pooling sizes to preserve more spatial features
-        # for small spectrograms
+        # Add channel dimension to input: [batch_size, 1, times_steps, freq_bins]
+        x = input[:, None, :, :]
+        logger.info(f"After adding channel dimension: {x.shape}")
         
         # First conv block with reduced pooling
-        x = self.conv_block1(input, pool_size=(2, 2), pool_type='avg')
+        x = self.conv_block1(x, pool_size=(2, 2), pool_type='avg')
         logger.info(f"After conv_block1: {x.shape}")
         x = F.dropout(x, p=0.2)
         
@@ -247,21 +242,14 @@ class Cnn13(nn.Module):
         logger.info(f"After conv_block6: {x.shape}")
         x = F.dropout(x, p=0.2)
         
-        # Reshape features if needed
-        if x.shape[2] * x.shape[3] < 1:
-            logger.warning(f"Feature dimensions too small: {x.shape}")
-            # Create a minimum viable feature map
-            device = x.device
-            x = torch.zeros(x.shape[0], x.shape[1], 1, 1, device=device)
-            
         # Global pooling
         x = torch.mean(x, dim=3)
-        logger.info(f"After mean pooling: {x.shape}")
-        x = torch.mean(x, dim=2)
-        logger.info(f"After global pooling: {x.shape}")
+        logger.info(f"After mean pooling on freq dimension: {x.shape}")
+        
+        (x, _) = torch.max(x, dim=2)
+        logger.info(f"After max pooling on time dimension: {x.shape}")
         
         # Final FC layer
-        x = F.dropout(x, p=0.5)
         x = F.relu_(self.fc1(x))
         logger.info(f"Final bottleneck features: {x.shape}")
         
@@ -412,45 +400,92 @@ class PANNsModelInference:
                 fmax=14000  # Max frequency
             )
             
+            # Load scalar values for normalization
+            if os.path.exists(SCALAR_FN):
+                try:
+                    with h5py.File(SCALAR_FN, 'r') as hf:
+                        self.scalar = {
+                            'mean': hf['mean'][:],
+                            'std': hf['std'][:]
+                        }
+                    print(f"Loaded scalar values from {SCALAR_FN}")
+                except Exception as e:
+                    print(f"Error loading scalar values: {e}")
+                    self.scalar = {
+                        'mean': self.LOGMEL_MEANS,
+                        'std': self.LOGMEL_STDDEVS
+                    }
+            else:
+                print(f"Scalar file not found at {SCALAR_FN}, using default values")
+                self.scalar = {
+                    'mean': self.LOGMEL_MEANS,
+                    'std': self.LOGMEL_STDDEVS
+                }
+            
             # Load the model if available
-            model_path = MODEL_PATH
+            model_path = CNN9_MODEL_PATH  # Use CNN9 by default
             if not os.path.exists(model_path):
                 print(f"Model checkpoint not found at {model_path}")
                 
-                # Try to find any PANNs model in the models directory
-                model_dir = os.path.dirname(model_path)
-                print(f"Searching for alternative models in {model_dir}...")
-                
-                if os.path.exists(model_dir):
-                    potential_models = [
-                        file for file in os.listdir(model_dir) 
-                        if file.endswith('.pth') and ('Cnn' in file or 'cnn' in file)
-                    ]
-                    
-                    if potential_models:
-                        # Use the first available model
-                        alt_model_path = os.path.join(model_dir, potential_models[0])
-                        print(f"Found alternative model: {alt_model_path}")
-                        model_path = alt_model_path
-                    else:
-                        print(f"No alternative models found in {model_dir}")
-                        return False
+                # Try CNN13 model
+                if os.path.exists(CNN13_MODEL_PATH):
+                    print(f"Using CNN13 model instead: {CNN13_MODEL_PATH}")
+                    model_path = CNN13_MODEL_PATH
                 else:
-                    print(f"Model directory {model_dir} does not exist")
-                    return False
+                    # Try to find any PANNs model in the models directory
+                    model_dir = os.path.dirname(model_path)
+                    print(f"Searching for alternative models in {model_dir}...")
+                    
+                    if os.path.exists(model_dir):
+                        potential_models = [
+                            file for file in os.listdir(model_dir) 
+                            if file.endswith('.pth') and ('Cnn' in file or 'cnn' in file)
+                        ]
+                        
+                        if potential_models:
+                            # Use the first available model
+                            alt_model_path = os.path.join(model_dir, potential_models[0])
+                            print(f"Found alternative model: {alt_model_path}")
+                            model_path = alt_model_path
+                        else:
+                            print(f"No alternative models found in {model_dir}")
+                            return False
+                    else:
+                        print(f"Model directory {model_dir} does not exist")
+                        return False
             
             # Load labels
             if os.path.exists(CSV_FNAME):
                 try:
                     df = pd.read_csv(CSV_FNAME)
                     self.labels = df['display_name'].values
-                    print(f"Loaded {len(self.labels)} labels")
+                    print(f"Loaded {len(self.labels)} labels from {CSV_FNAME}")
                 except Exception as e:
-                    print(f"Error loading labels: {e}")
-                    self.labels = [f"label_{i}" for i in range(527)]  # Default labels
+                    print(f"Error loading labels from {CSV_FNAME}: {e}")
+                    # Try alternate label file
+                    if os.path.exists(ALT_CSV_FNAME):
+                        try:
+                            df = pd.read_csv(ALT_CSV_FNAME)
+                            self.labels = df['display_name'].values
+                            print(f"Loaded {len(self.labels)} labels from {ALT_CSV_FNAME}")
+                        except Exception as e2:
+                            print(f"Error loading labels from {ALT_CSV_FNAME}: {e2}")
+                            self.labels = [f"label_{i}" for i in range(527)]  # Default labels
+                    else:
+                        self.labels = [f"label_{i}" for i in range(527)]  # Default labels
             else:
                 print(f"Labels file not found at {CSV_FNAME}")
-                self.labels = [f"label_{i}" for i in range(527)]  # Default labels
+                # Try alternate label file
+                if os.path.exists(ALT_CSV_FNAME):
+                    try:
+                        df = pd.read_csv(ALT_CSV_FNAME)
+                        self.labels = df['display_name'].values
+                        print(f"Loaded {len(self.labels)} labels from {ALT_CSV_FNAME}")
+                    except Exception as e:
+                        print(f"Error loading labels from {ALT_CSV_FNAME}: {e}")
+                        self.labels = [f"label_{i}" for i in range(527)]  # Default labels
+                else:
+                    self.labels = [f"label_{i}" for i in range(527)]  # Default labels
             
             # Load model
             try:
@@ -507,22 +542,6 @@ class PANNsModelInference:
                 self.model.eval()
                 print(f"Successfully loaded model from {model_path}")
                 
-                # Acquire mean and std for normalization
-                scalar_path = os.path.join(os.path.dirname(model_path), 'scalar.h5')
-                if os.path.exists(scalar_path):
-                    with h5py.File(scalar_path, 'r') as hf:
-                        self.mean = hf['mean'][:]
-                        self.std = hf['std'][:]
-                        print(f"Loaded normalization values from {scalar_path}")
-                else:
-                    # Use default values from the original implementation
-                    self.mean = self.LOGMEL_MEANS
-                    self.std = self.LOGMEL_STDDEVS
-                    print("Using default normalization values")
-                
-                # Create thread lock for prediction
-                self.lock = threading.Lock()
-                
                 self._initialized = True
                 print("PANNs model initialized successfully")
                 return True
@@ -541,22 +560,22 @@ class PANNsModelInference:
     def logmel_extract(self, audio):
         """
         Extract log mel spectrogram features from audio data.
-        The PANNs model expects a spectrogram with shape (128, 64).
+        The PANNs model expects a spectrogram with shape (time_steps, 64).
         
         Args:
             audio: Audio data as numpy array
             
         Returns:
-            Log mel spectrogram with shape (128, 64) for CNN13 model
+            Log mel spectrogram with shape (time_steps, 64) for CNN model
         """
         try:
             # Audio should already be normalized to [-1, 1] and sampled at 32kHz
             # Parameters based on original PANNs implementation
             n_fft = 1024  # FFT window size
-            hop_length = 320  # Hop size - adjusted for CNN13 model
+            hop_length = 320  # Hop size - adjusted for CNN model
             n_mels = 64  # Number of mel bins
-            fmin = 0  # Minimum frequency (Hz)
-            fmax = 16000  # Maximum frequency (Hz)
+            fmin = 50  # Minimum frequency (Hz)
+            fmax = 14000  # Maximum frequency (Hz)
             
             # Compute STFT
             stft = librosa.stft(
@@ -587,48 +606,27 @@ class PANNsModelInference:
             # Convert to log scale
             log_mel_spec = librosa.power_to_db(mel_spec, ref=1.0, amin=1e-10, top_db=None)
             
-            # Ensure proper shape (freq, time) - transpose if needed
-            if log_mel_spec.shape[0] != n_mels:
-                log_mel_spec = log_mel_spec.T
+            # Transpose to get (time_steps, n_mels) shape
+            log_mel_spec = log_mel_spec.T
             
-            # Get current shape
-            current_height, current_width = log_mel_spec.shape
-            print(f"Raw spectrogram shape: {log_mel_spec.shape}")
-            
-            # PANNs CNN13 model expects (128, 64) input
-            # Reshape to match the expected dimensions
-            target_height, target_width = 128, 64
-            
-            # Initialize the reshaped spectrogram with zeros
-            reshaped_spec = np.zeros((target_height, target_width), dtype=np.float32)
-            
-            # For height dimension: if smaller, zero pad; if larger, center crop
-            if current_height < target_height:
-                # Pad with zeros
-                pad_top = (target_height - current_height) // 2
-                reshaped_spec[pad_top:pad_top + current_height, :target_width] = log_mel_spec[:, :target_width]
+            # Normalize the spectrogram
+            if self.scalar is not None:
+                # Use loaded scalar values
+                log_mel_spec = (log_mel_spec - self.scalar['mean']) / self.scalar['std']
             else:
-                # Center crop
-                start_idx = (current_height - target_height) // 2
-                reshaped_spec = log_mel_spec[start_idx:start_idx + target_height, :target_width]
+                # Use hardcoded values
+                log_mel_spec = (log_mel_spec - self.LOGMEL_MEANS) / self.LOGMEL_STDDEVS
             
-            # For width dimension: if width is too small, duplicate columns
-            if current_width < target_width:
-                # Copy what we can
-                reshaped_spec[:, :current_width] = reshaped_spec[:, :current_width]
-                # Then duplicate the last column to fill the remainder
-                for i in range(current_width, target_width):
-                    reshaped_spec[:, i] = reshaped_spec[:, current_width-1]
+            # Log the shape for debugging
+            logger.info(f"Extracted log mel spectrogram with shape {log_mel_spec.shape}")
             
-            # Return the properly shaped log mel spectrogram
-            print(f"Reshaped spectrogram to {reshaped_spec.shape} for PANNs model")
-            return reshaped_spec
+            return log_mel_spec
             
         except Exception as e:
             print(f"Error in logmel_extract: {e}")
             traceback.print_exc()
             # Return an empty spectrogram in case of error
-            return np.zeros((128, 64), dtype=np.float32)
+            return np.zeros((101, 64), dtype=np.float32)  # Default shape for CNN9
     
     def predict(self, audio_data, top_k=5, threshold=0.2, boost_other_categories=False):
         """
@@ -1143,12 +1141,19 @@ def get_available_labels():
     Get the list of available sound labels from the loaded model
     Returns a list of label strings
     """
+    global available_labels
+    
+    # Return cached labels if available
+    if available_labels is not None and len(available_labels) > 0:
+        return available_labels
+        
     try:
         # Try to get from the PANNs inference object first
         if hasattr(panns_inference, 'get_available_labels'):
             labels = panns_inference.get_available_labels()
             print(f"Got {len(labels)} labels from panns_inference object")
             print(f"Sample labels: {labels[:10]}...")
+            available_labels = labels
             return labels
         
         # Fallback to loading labels directly from CSV files
@@ -1163,6 +1168,7 @@ def get_available_labels():
                     labels = df['display_name'].tolist()
                     print(f"Loaded {len(labels)} labels from {CSV_FNAME}")
                     print(f"Sample labels: {labels[:10]}...")
+                    available_labels = labels
                     return labels
             except Exception as e:
                 print(f"Error loading labels from {CSV_FNAME}: {e}")
@@ -1176,6 +1182,7 @@ def get_available_labels():
                     labels = df['display_name'].tolist()
                     print(f"Loaded {len(labels)} labels from {ALT_CSV_FNAME}")
                     print(f"Sample labels: {labels[:10]}...")
+                    available_labels = labels
                     return labels
             except Exception as e:
                 print(f"Error loading labels from {ALT_CSV_FNAME}: {e}")
@@ -1189,274 +1196,272 @@ def get_available_labels():
                     labels = df['display_name'].tolist()
                     print(f"Loaded {len(labels)} labels from {DOMESTIC_CSV_FNAME}")
                     print(f"Sample labels: {labels[:10]}...")
+                    available_labels = labels
                     return labels
             except Exception as e:
                 print(f"Error loading labels from {DOMESTIC_CSV_FNAME}: {e}")
+        
+        # Try class_labels_indices.csv in model directory
+        if os.path.exists(CLASS_LABELS_CSV):
+            try:
+                print(f"Loading labels from {CLASS_LABELS_CSV}")
+                df = pd.read_csv(CLASS_LABELS_CSV)
+                if 'display_name' in df.columns:
+                    labels = df['display_name'].tolist()
+                    print(f"Loaded {len(labels)} labels from {CLASS_LABELS_CSV}")
+                    print(f"Sample labels: {labels[:10]}...")
+                    available_labels = labels
+                    return labels
+                elif 'name' in df.columns:  # Different format
+                    labels = df['name'].tolist()
+                    print(f"Loaded {len(labels)} labels from {CLASS_LABELS_CSV}")
+                    print(f"Sample labels: {labels[:10]}...")
+                    available_labels = labels
+                    return labels
+            except Exception as e:
+                print(f"Error loading labels from {CLASS_LABELS_CSV}: {e}")
+        
+        # Try loading manually with CSV reader as a last resort
+        if os.path.exists(CLASS_LABELS_CSV):
+            try:
+                print(f"Loading labels from {CLASS_LABELS_CSV} using CSV reader")
+                labels = []
+                with open(CLASS_LABELS_CSV, 'r') as f:
+                    reader = csv.reader(f, delimiter=',')
+                    # Skip header
+                    next(reader, None)
+                    for row in reader:
+                        if len(row) >= 3:  # index,mid,display_name format
+                            labels.append(row[2])
+                        elif len(row) >= 2:  # Simplified format
+                            labels.append(row[1])
+                
+                if labels:
+                    print(f"Loaded {len(labels)} labels from {CLASS_LABELS_CSV} using CSV reader")
+                    print(f"Sample labels: {labels[:10]}...")
+                    available_labels = labels
+                    return labels
+            except Exception as e:
+                print(f"Error loading labels from {CLASS_LABELS_CSV} using CSV reader: {e}")
         
         # If all else fails, return default labels
         if not labels:
             print("Could not load labels from any source, using default labels")
             labels = [f"label_{i}" for i in range(527)]
+            available_labels = labels
         
         return labels
     except Exception as e:
-        print(f"Error in get_available_labels: {e}")
-        traceback.print_exc()
-        return [f"label_{i}" for i in range(527)]  # Return default labels on error
+        print(f"Error getting available labels: {e}")
+        # Return default labels as fallback
+        default_labels = [f"label_{i}" for i in range(527)]
+        available_labels = default_labels
+        return default_labels
 
 def load_panns_model():
-    """Load PANNs model for sound recognition"""
-    global panns_model, classmap, is_panns_loaded
+    """
+    Load the PANNs model
+    
+    Returns:
+        bool: Whether the model was loaded successfully
+    """
+    global panns_model, panns_inference, is_panns_loaded
     
     try:
         if is_panns_loaded and panns_model is not None:
-            print("PANNs model already loaded, skipping load")
+            print("PANNs model already loaded")
             return True
             
-        print("Loading PANNs model...")
-        start_time = time.time()
-        
-        # Load labels and class mappings
+        # Create model directory if it doesn't exist
         model_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
         label_csv = os.path.join(model_dir, "class_labels_indices.csv")
         
-        if not os.path.exists(label_csv):
-            print("Labels file not found, downloading...")
-            if not os.path.exists(model_dir):
-                os.makedirs(model_dir)
-            wget.download("https://raw.githubusercontent.com/qiuqiangkong/audioset_tagging_cnn/master/metadata/class_labels_indices.csv", out=label_csv)
+        print(f"Loading PANNs model from {model_dir}...")
         
-        # Read labels
-        with open(label_csv, 'r') as f:
-            reader = csv.reader(f, delimiter=',')
-            lines = list(reader)
+        if not os.path.exists(model_dir):
+            os.makedirs(model_dir)
         
-        # Skip header
-        lines = lines[1:]
-        
-        # Create class indices dictionary
-        classmap = {}
-        labels = []
-        for i in range(len(lines)):
-            id = lines[i][0]
-            name = lines[i][2]
-            classmap[name] = i
-            labels.append(name)
-            
-        print(f"Loaded {len(labels)} class labels")
+        # For the PANNs inference class
+        if panns_inference is None:
+            print("Initializing PANNs inference class...")
+            panns_inference = PANNsModelInference()
+            panns_inference.initialize()
         
         # Check for CNN9 model file - first check model_dir path
         checkpoint_path = os.path.join(model_dir, 'Cnn9_GMP_64x64_300000_iterations_mAP=0.37.pth')
         
         # If not found in model_dir, try the global MODEL_PATH
-        if not os.path.exists(checkpoint_path) and os.path.exists(MODEL_PATH):
-            print(f"Using model from configured path: {MODEL_PATH}")
-            checkpoint_path = MODEL_PATH
-        
-        # Try alternate locations
-        alt_paths = [
-            os.path.join(model_dir, 'Cnn9_GMP_64x64_300000.pth'),
-            os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'models', 'Cnn9_GMP_64x64_300000_iterations_mAP=0.37.pth'),
-            '/home/hirwa0250/Sonarity-server/models/Cnn9_GMP_64x64_300000_iterations_mAP=0.37.pth'
-        ]
-        
-        for alt_path in alt_paths:
-            if not os.path.exists(checkpoint_path) and os.path.exists(alt_path):
-                print(f"Found model at alternate path: {alt_path}")
-                checkpoint_path = alt_path
-                break
-                
+        if not os.path.exists(checkpoint_path) and os.path.exists(CNN9_MODEL_PATH):
+            checkpoint_path = CNN9_MODEL_PATH
+            
+        # Try alternative filenames if still not found
         if not os.path.exists(checkpoint_path):
-            print("Model checkpoint not found, downloading...")
-            # Using a mirror URL since the original might be unstable
-            model_url = "https://zenodo.org/records/3576599/files/Cnn9_GMP_64x64_300000_iterations_mAP=0.37.pth?download=1"
+            alternate_paths = [
+                os.path.join(model_dir, 'Cnn9_GMP_64x64_300000.pth'),
+                os.path.join(model_dir, 'Cnn9_mAP=0.37.pth'),
+                os.path.join(model_dir, 'Cnn9.pth')
+            ]
+            
+            for alt_path in alternate_paths:
+                if os.path.exists(alt_path):
+                    checkpoint_path = alt_path
+                    break
+        
+        # If still not found, try CNN13 model
+        if not os.path.exists(checkpoint_path) and os.path.exists(CNN13_MODEL_PATH):
+            print(f"CNN9 model not found, trying CNN13 model at {CNN13_MODEL_PATH}")
+            checkpoint_path = CNN13_MODEL_PATH
+        
+        # If model still not found, download CNN9 model
+        if not os.path.exists(checkpoint_path):
+            print("PANNs model not found locally, downloading...")
             try:
-                wget.download(model_url, out=checkpoint_path)
+                cnn9_url = "https://zenodo.org/record/3987831/files/Cnn9_GMP_64x64_300000_iterations_mAP%3D0.37.pth?download=1"
+                print(f"Downloading CNN9 model from {cnn9_url}")
+                wget.download(cnn9_url, out=checkpoint_path)
+                print(f"\nDownloaded PANNs model to {checkpoint_path}")
             except Exception as e:
-                print(f"Error downloading model from primary source: {e}")
-                # Try alternative source if available
-                try:
-                    alt_url = "https://github.com/qiuqiangkong/audioset_tagging_cnn/releases/download/v0.1/Cnn9_GMP_64x64_300000_iterations_mAP=0.37.pth"
-                    wget.download(alt_url, out=checkpoint_path)
-                except Exception as e2:
-                    print(f"Error downloading model from alternative source: {e2}")
-                    # One last attempt - try to find the model anywhere in the project
-                    found_model = False
-                    for root, dirs, files in os.walk(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))):
-                        for file in files:
-                            if file.endswith('.pth') and 'Cnn9' in file:
-                                model_path = os.path.join(root, file)
-                                print(f"Found model file at: {model_path}")
-                                checkpoint_path = model_path
-                                found_model = True
-                                break
-                        if found_model:
-                            break
-                    
-                    if not found_model:
-                        raise Exception("Failed to download model weights and couldn't find existing model.")
+                print(f"Failed to download PANNs model: {str(e)}")
+                return False
         
-        print(f"Using model file: {checkpoint_path}")
+        print(f"Loading PANNs model from {checkpoint_path}")
         
-        # Use smaller Cnn9_GMP_64x64 model
-        panns_model = Cnn9_GMP_64x64(classes_num=len(lines))
-        
-        # Load model weights
         try:
-            checkpoint = torch.load(checkpoint_path, map_location='cpu')
-            
-            # Handle different checkpoint formats
-            if isinstance(checkpoint, dict):
-                if 'model' in checkpoint:
-                    print("Loading from 'model' key in checkpoint")
-                    panns_model.load_state_dict(checkpoint['model'])
-                elif 'state_dict' in checkpoint:
-                    print("Loading from 'state_dict' key in checkpoint")
-                    panns_model.load_state_dict(checkpoint['state_dict'])
-                else:
-                    print("Loading directly from checkpoint")
-                    panns_model.load_state_dict(checkpoint)
-            else:
-                print("Checkpoint is not a dictionary, trying direct load")
-                panns_model.load_state_dict(checkpoint)
+            if checkpoint_path.endswith('.pth'):
+                # Load PyTorch model
+                checkpoint = torch.load(checkpoint_path, map_location=lambda storage, loc: storage)
                 
-        except Exception as e:
-            print(f"Error loading model weights: {e}")
-            print("Attempting to load with strict=False")
-            
-            try:
-                checkpoint = torch.load(checkpoint_path, map_location='cpu')
-                if isinstance(checkpoint, dict) and 'model' in checkpoint:
-                    panns_model.load_state_dict(checkpoint['model'], strict=False)
+                # Determine model type based on filename
+                if 'Cnn13' in checkpoint_path:
+                    panns_model = Cnn13(classes_num=527)
                 else:
-                    panns_model.load_state_dict(checkpoint, strict=False)
-            except Exception as e2:
-                print(f"Second attempt failed: {e2}")
-                raise Exception(f"Could not load model weights: {e2}")
-        
-        # Move to GPU if available
-        device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
-        panns_model = panns_model.to(device)
-        panns_model.eval()
-        
-        print(f"PANNs model loaded successfully in {time.time() - start_time:.2f}s")
-        is_panns_loaded = True
-        
-        # Return success status
-        return True
-        
+                    panns_model = Cnn9_GMP_64x64(classes_num=527)
+                
+                if 'model' in checkpoint:
+                    panns_model.load_state_dict(checkpoint['model'])
+                else:
+                    panns_model.load_state_dict(checkpoint)
+                
+                panns_model.eval()
+                print("PANNs model loaded successfully")
+                is_panns_loaded = True
+                return True
+            else:
+                print(f"Unsupported model format: {checkpoint_path}")
+                return False
+        except Exception as e:
+            print(f"Error loading PANNs model: {str(e)}")
+            traceback.print_exc()
+            return False
+            
     except Exception as e:
-        print(f"Error loading PANNs model: {e}")
+        print(f"Error initializing PANNs model: {str(e)}")
         traceback.print_exc()
         return False
 
 def predict_with_panns(audio_data, top_k=5, threshold=0.1, map_to_homesounds_format=False, boost_other_categories=False):
     """
-    Process audio data with PANNs model
+    Run inference on audio data using the PANNs model
     
     Args:
-        audio_data: numpy array of audio samples (mono)
-        top_k: number of top predictions to return
-        threshold: minimum confidence threshold for predictions
-        map_to_homesounds_format: whether to map AudioSet labels to HomeSounds format
-        boost_other_categories: whether to boost confidence of non-speech/non-music categories
-        
+        audio_data: Audio data as numpy array
+        top_k: Number of top predictions to return
+        threshold: Confidence threshold for predictions
+        map_to_homesounds_format: Whether to map predictions to homesounds format
+        boost_other_categories: Whether to boost non-percussion categories
+    
     Returns:
-        Dictionary with predictions
+        List of (label, score) tuples for the top K predictions
     """
-    global panns_model, classmap, is_panns_loaded
-    
-    if not is_panns_loaded or panns_model is None:
-        success = load_panns_model()
-        if not success:
-            return {"output": [{"label": "Error loading model", "score": 1.0}]}
-    
     try:
-        # Make sure audio is normalized to [-1.0, 1.0] range
-        if np.max(np.abs(audio_data)) > 1.0:
-            audio_data = audio_data / np.max(np.abs(audio_data))
+        # Load the model if it hasn't been loaded yet
+        global panns_model, panns_inference
+        if panns_model is None or panns_inference is None:
+            success = load_panns_model()
+            if not success:
+                print("Failed to load PANNs model")
+                return [("Error", 1.0)]
+        
+        if panns_model is None:
+            print("PANNs model is not loaded")
+            return [("Error", 1.0)]
+
+        # Process audio
+        audio_data = np.array(audio_data).astype(np.float32)
+        audio_stats = {
+            "mean": np.mean(audio_data),
+            "std": np.std(audio_data),
+            "min": np.min(audio_data),
+            "max": np.max(audio_data),
+            "abs_max": np.max(np.abs(audio_data))
+        }
+        
+        print(f"Audio stats - Mean: {audio_stats['mean']:.6f}, Std: {audio_stats['std']:.6f}, "
+              f"Min: {audio_stats['min']:.6f}, Max: {audio_stats['max']:.6f}, Abs Max: {audio_stats['abs_max']:.6f}")
+        
+        # Make sure audio is properly normalized
+        if audio_stats['abs_max'] > 1.0:
+            print(f"Audio values exceed range [-1.0, 1.0], normalizing")
+            audio_data = audio_data / audio_stats['abs_max']
+        
+        # Create logmel spectrogram using librosa
+        if panns_inference:
+            print("Using PANNs inference class for feature extraction")
+            logmel_spec = panns_inference.logmel_extract(audio_data)
+            normalized_spec = torch.Tensor(logmel_spec).unsqueeze(0)  # Add batch dimension
+        else:
+            print("Using fallback spectrogram method")
+            # Create logmel spectrogram using librosa
+            hop_length = 320  # Standard hop for 32kHz audio in PANNs
+            n_fft = 1024
+            n_mels = 64
             
-        # Get audio length
-        audio_length = len(audio_data)
-        
-        # Handle audio that's too short
-        MINIMUM_LENGTH = 32000  # 1 second at 32 kHz
-        if audio_length < MINIMUM_LENGTH:
-            padding = np.zeros(MINIMUM_LENGTH - audio_length, dtype=np.float32)
-            audio_data = np.concatenate([audio_data, padding])
-        elif audio_length > MINIMUM_LENGTH:
-            # Use center part of audio (align with how the Cnn9 model was trained)
-            start = (audio_length - MINIMUM_LENGTH) // 2
-            audio_data = audio_data[start:start + MINIMUM_LENGTH]
-            
-        # Convert to spectral representation
-        # Using settings that align with the Cnn9 model's training
-        audio_data = torch.tensor(audio_data, dtype=torch.float32)
-        
-        # Convert audio to spectral representation
-        # Moving this outside the model to have more control
-        # Adjust spectrogram settings for Cnn9 model
-        SAMPLE_RATE = 32000
-        N_FFT = 1024
-        HOP_LENGTH = 320  # 10ms hop for 32kHz
-        F_MIN = 50
-        F_MAX = 14000
-        N_MELS = 64
-        
-        # Generate log-mel spectrogram using torchaudio
-        try:
-            import torchaudio.transforms as T
-            mel_spec = T.MelSpectrogram(
-                sample_rate=SAMPLE_RATE,
-                n_fft=N_FFT,
-                hop_length=HOP_LENGTH,
-                f_min=F_MIN,
-                f_max=F_MAX,
-                n_mels=N_MELS
-            )(audio_data)
-            log_mel_spec = torch.log10(torch.clamp(mel_spec, min=1e-10)) * 10
-        except ImportError:
-            # Fallback to librosa if torchaudio not available
-            import librosa
+            # Generate spectrogram
             mel_spec = librosa.feature.melspectrogram(
-                y=audio_data.numpy(),
-                sr=SAMPLE_RATE,
-                n_fft=N_FFT,
-                hop_length=HOP_LENGTH,
-                fmin=F_MIN,
-                fmax=F_MAX,
-                n_mels=N_MELS
+                y=audio_data, sr=32000, n_fft=n_fft, hop_length=hop_length,
+                n_mels=n_mels, fmin=50, fmax=14000
             )
-            log_mel_spec = librosa.power_to_db(mel_spec, ref=1.0, amin=1e-10, top_db=None)
-            log_mel_spec = torch.tensor(log_mel_spec, dtype=torch.float32)
+            logmel_spec = librosa.power_to_db(mel_spec, ref=1.0, amin=1e-10, top_db=None)
+            
+            # Normalize spectrogram
+            if os.path.exists(SCALAR_FN):
+                print(f"Using scalar values from {SCALAR_FN}")
+                with h5py.File(SCALAR_FN, 'r') as hf:
+                    mean = hf['mean'][:]
+                    std = hf['std'][:]
+            else:
+                print("Using hardcoded scalar values")
+                # Fallback to hardcoded values if scalar file not found
+                mean = PANNsModelInference.LOGMEL_MEANS
+                std = PANNsModelInference.LOGMEL_STDDEVS
+            
+            # Apply normalization and transpose to get (time_steps, freq_bins)    
+            logmel_spec = (logmel_spec - mean.reshape(-1, 1)) / std.reshape(-1, 1)
+            logmel_spec = logmel_spec.T  # Shape: (time_steps, freq_bins)
+            
+            normalized_spec = torch.Tensor(logmel_spec).unsqueeze(0)  # Add batch dimension
         
-        # Reshape to match model input requirements for Cnn9
-        # Swap time and frequency dimensions 
-        log_mel_spec = log_mel_spec.transpose(0, 1)
-        
-        # Normalize features 
-        # Using standardized values for AudioSet
-        mel_mean = -6.6268077
-        mel_std = 5.358466
-        normalized_spec = (log_mel_spec - mel_mean) / mel_std
-        
-        # Add batch and channel dimensions
-        normalized_spec = normalized_spec.unsqueeze(0)
-        
-        # Move to same device as model
-        device = next(panns_model.parameters()).device
-        normalized_spec = normalized_spec.to(device)
+        print(f"Spectrogram shape: {normalized_spec.shape}")
         
         # Get model predictions
         with torch.no_grad():
+            # Set model to evaluation mode
+            panns_model.eval()
+            # Forward pass
             output = panns_model(normalized_spec)
+            # Get output as numpy array
             output = output.cpu().numpy()[0]
         
         # Sort predictions and apply threshold
         sorted_indexes = np.argsort(output)[::-1]
         
         # Get labels for all AudioSet classes
-        labels_list = get_labels()
+        labels_list = get_available_labels()
+        if not labels_list:
+            print("No labels loaded, using default labels")
+            labels_list = [f"label_{i}" for i in range(len(output))]
+        
+        print(f"Number of labels: {len(labels_list)}, Number of predictions: {len(output)}")
         
         # Create output predictions
         output_dict = {"output": []}
@@ -1468,40 +1473,49 @@ def predict_with_panns(audio_data, top_k=5, threshold=0.1, map_to_homesounds_for
             if score < threshold and len(output_dict["output"]) >= top_k:
                 continue
                 
-            label = labels_list[idx] if idx < len(labels_list) else f"Unknown_{idx}"
-            
-            # Boost non-speech, non-music categories if requested
-            if boost_other_categories:
-                if 'speech' not in label.lower() and 'music' not in label.lower():
-                    score = min(1.0, score * 1.25)  # 25% boost
-            
-            # Add prediction if above threshold
-            if score >= threshold:
+            if idx < len(labels_list):
+                label_name = labels_list[idx]
                 output_dict["output"].append({
-                    "label": label,
+                    "label": label_name,
                     "score": score
                 })
-                
-                # Stop after we have top_k predictions above threshold
-                if len(output_dict["output"]) >= top_k:
-                    break
+            else:
+                # Handle the case where idx is out of range
+                output_dict["output"].append({
+                    "label": f"Unknown_{idx}",
+                    "score": score
+                })
+            
+            if len(output_dict["output"]) >= top_k and score < threshold:
+                break
         
-        # Ensure we return at least one prediction (highest confidence)
-        if len(output_dict["output"]) == 0 and len(sorted_indexes) > 0:
-            idx = sorted_indexes[0]
-            score = float(output[idx])
-            label = labels_list[idx] if idx < len(labels_list) else f"Unknown_{idx}"
-            output_dict["output"].append({
-                "label": label,
-                "score": score
-            })
+        # Convert to list of tuples for consistency with other models
+        predictions = [(item["label"], item["score"]) for item in output_dict["output"][:top_k]]
         
-        # Ensure we return the raw numpy array of all 527 scores as well, for debugging
-        output_dict["raw_scores"] = output
+        print(f"Raw model predictions: {output_dict['output']}")
+        print(f"PANNs prediction results: {predictions}")
         
-        return output_dict
+        # Map to homesounds format if requested
+        if map_to_homesounds_format and panns_inference:
+            try:
+                predictions = panns_inference.map_to_homesounds(predictions, threshold=threshold)
+                print(f"Mapped to homesounds format: {predictions}")
+            except Exception as e:
+                print(f"Error mapping to homesounds format: {e}")
         
+        # Make sure we return at least one prediction
+        if not predictions:
+            print("No predictions above threshold, using highest confidence prediction")
+            if len(sorted_indexes) > 0:
+                idx = sorted_indexes[0]
+                score = float(output[idx])
+                label_name = labels_list[idx] if idx < len(labels_list) else f"Unknown_{idx}"
+                predictions = [(label_name, score)]
+            else:
+                predictions = [("Unknown", 0.1)]
+        
+        return predictions
     except Exception as e:
-        print(f"Error processing audio with PANNs: {e}")
+        print(f"Error processing audio with PANNs: {str(e)}")
         traceback.print_exc()
-        return {"output": [{"label": "Error", "score": 1.0}]}
+        return [("Error", 1.0)]
