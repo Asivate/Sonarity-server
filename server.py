@@ -848,9 +848,9 @@ def process_audio_with_panns(audio_data, db_level=None, timestamp=None, config=N
                 )
                 
                 # Log the raw model output
-                if predictions and "output" in predictions:
-                    print(f"Raw model predictions: {predictions['output'][:5]}")
-                    predictions_list = [(pred['label'], float(pred['score'])) for pred in predictions['output']]
+                if predictions and isinstance(predictions, list):
+                    # Already have a list of tuples (label, score)
+                    predictions_list = predictions
                     print(f"PANNs prediction results: {predictions_list[:5]}")
                     
                     # Check if there are any percussion-related labels
@@ -868,8 +868,8 @@ def process_audio_with_panns(audio_data, db_level=None, timestamp=None, config=N
                             map_to_homesounds_format=False
                         )
                         
-                        if retry_predictions and "output" in retry_predictions:
-                            retry_list = [(pred['label'], float(pred['score'])) for pred in retry_predictions['output']]
+                        if retry_predictions and isinstance(retry_predictions, list):
+                            retry_list = retry_predictions
                             print(f"Preliminary predictions with low threshold: {retry_list[:5]}")
                             
                             # Look for percussion labels in retried predictions
