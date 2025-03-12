@@ -536,106 +536,21 @@ class PANNsModelInference:
     
     def predict(self, audio_data, top_k=5, threshold=0.2, boost_other_categories=False):
         """
-        Predict sound classes from audio data.
-        The CNN13 model requires audio to be properly formatted as a 
-        log mel spectrogram with shape (128, 64).
+        Run inference on audio data and return predictions.
         
         Args:
-            audio_data: numpy array of audio samples (32000 samples/sec)
-            top_k: number of top predictions to return
-            threshold: minimum confidence threshold for predictions
-            boost_other_categories: whether to boost non-speech categories
+            audio_data: Audio data as numpy array
+            top_k: Number of top predictions to return
+            threshold: Confidence threshold for predictions
+            boost_other_categories: Whether to boost categories other than speech/music
             
         Returns:
-            list of (label, score) tuples
+            List of (label, score) tuples for the top K predictions
         """
         try:
-            # Log audio statistics for debugging
-            audio_mean = np.mean(audio_data)
-            audio_std = np.std(audio_data)
-            audio_min = np.min(audio_data)
-            audio_max = np.max(audio_data)
-            audio_abs_max = np.max(np.abs(audio_data))
+            # Process audio
+            x = self._preprocess_audio(audio_data)
             
-            print(f"Audio stats - Mean: {audio_mean:.6f}, Std: {audio_std:.6f}, Min: {audio_min:.6f}, Max: {audio_max:.6f}, Abs Max: {audio_abs_max:.6f}")
-            
-            # Check for valid audio data
-            if audio_data is None or len(audio_data) == 0:
-                print("Empty audio data received")
-                return []
-        
-            # Check for non-finite values
-            if not np.all(np.isfinite(audio_data)):
-                print("Audio contains non-finite values, fixing...")
-                audio_data = np.nan_to_num(audio_data)
-            
-            # Normalize audio if needed
-            if np.max(np.abs(audio_data)) > 1.0:
-                print("Normalizing audio...")
-                audio_data = audio_data / np.max(np.abs(audio_data))
-            
-            # Make sure audio is long enough (at least 1 second at 32kHz = 32000 samples)
-            original_length = len(audio_data)
-            if original_length < 32000:
-                print(f"Audio too short ({original_length} samples), padding to 32000 samples")
-                # If it's very short, repeat the audio to reach minimum length
-                if original_length < 16000:
-                    # Repeat the audio multiple times to reach 32000 samples
-                    repeat_count = int(np.ceil(32000 / original_length))
-                    audio_data = np.tile(audio_data, repeat_count)[:32000]
-                else:
-                    # Pad with zeros to reach 32000 samples
-                    padding = np.zeros(32000 - original_length)
-                    audio_data = np.concatenate([audio_data, padding])
-            
-            # Extract log mel spectrogram features
-            x = self.logmel_extract(audio_data)
-            
-            # Verify that we have the correct shape for the CNN13 model
-            if x.shape != (128, 64):
-                print(f"WARNING: Fixing spectrogram shape from {x.shape} to (128, 64)")
-                # Create a properly sized spectrogram
-                fixed_spec = np.zeros((128, 64), dtype=np.float32)
-                
-                # Copy what we can from the original spectrogram
-                h = min(x.shape[0], 128)
-                w = min(x.shape[1], 64)
-                fixed_spec[:h, :w] = x[:h, :w]
-                
-                x = fixed_spec
-            
-            # Normalize with mean and std values (essential for correct predictions)
-            try:
-                # Check if we need to reshape the mean/std vectors
-                if hasattr(self, 'mean') and hasattr(self, 'std') and len(self.mean) != x.shape[0]:
-                    print(f"Reshaping normalization vectors from {len(self.mean)} to {x.shape[0]}")
-                    # Create new mean/std vectors of the right size
-                    new_mean = np.zeros(x.shape[0], dtype=np.float32)
-                    new_std = np.ones(x.shape[0], dtype=np.float32)
-                    
-                    # Copy the values we have
-                    common_len = min(len(self.mean), x.shape[0])
-                    new_mean[:common_len] = self.mean[:common_len]
-                    new_std[:common_len] = self.std[:common_len]
-                    
-                    # Apply the normalization
-                    x = (x - new_mean.reshape(-1, 1)) / new_std.reshape(-1, 1)
-                elif hasattr(self, 'mean') and hasattr(self, 'std'):
-                    # Apply the normalization as usual
-                    x = (x - self.mean.reshape(-1, 1)) / self.std.reshape(-1, 1)
-            except Exception as e:
-                print(f"Error applying normalization: {e}, using default normalization")
-                # Use a simple global normalization as a fallback
-                if np.std(x) > 0:
-                    x = (x - np.mean(x)) / np.std(x)
-            
-            # Convert to PyTorch tensor and reshape for model input
-            x = torch.tensor(x, dtype=torch.float32)
-            
-            # Add batch dimension: (time_steps, freq_bins) -> (1, time_steps, freq_bins)
-            x = x.unsqueeze(0)
-            print(f"Input tensor shape: {x.shape}")
-
             # Thread safety - don't allow multiple predictions at once
             with self.lock:
                 # Run inference
@@ -646,30 +561,12 @@ class PANNsModelInference:
                 # Get probabilities
                 probs = prediction.squeeze().cpu().numpy()
             
-            # Apply different strategies based on audio characteristics
-            # First, check for percussive sounds - they have characteristic time-domain patterns
+            # Check for percussive sounds - they have characteristic time-domain patterns
             is_percussive = self._is_percussive_sound(audio_data)
             
-            # Check for percussive (knocking) sounds with a lower threshold
+            # MODIFIED: Still detect percussion sounds, but don't prioritize them over higher confidence predictions
             if is_percussive:
-                print("Percussive sound detected, using lower threshold for percussion sounds")
-                # Get indices of percussion-related categories
-                percussion_indices = self._get_percussion_indices()
-                
-                # Apply a lower threshold for percussion sounds (0.05 instead of 0.2)
-                percussion_threshold = threshold * 0.25  # Much lower threshold for percussion
-                
-                # Look specifically for percussion sounds
-                percussion_probs = probs[percussion_indices]
-                if len(percussion_probs) > 0:
-                    best_percussion_idx = percussion_indices[np.argmax(percussion_probs)]
-                    best_percussion_prob = probs[best_percussion_idx]
-                    
-                    if best_percussion_prob > percussion_threshold:
-                        print(f"Found percussion sound: {self.labels[best_percussion_idx]} with confidence {best_percussion_prob}")
-                        # Return just this one prediction if it's strong enough
-                        if best_percussion_prob > threshold:
-                            return [(self.labels[best_percussion_idx], float(best_percussion_prob))]
+                print("Percussive sound detected, but using standard prediction logic")
             
             # Get top-k indices and their probabilities
             indices = np.argsort(probs)[-top_k:][::-1]
@@ -684,26 +581,6 @@ class PANNsModelInference:
             if len(indices) == 0 and len(probs) > 0:
                 indices = [np.argmax(probs)]
                 selected_probs = [probs[indices[0]]]
-            
-            # Boost non-speech categories if requested
-            if boost_other_categories:
-                # Get indices of speech and music categories
-                speech_music_indices = self._get_speech_music_indices()
-                
-                # Check if our top prediction is speech or music
-                if len(indices) > 0 and indices[0] in speech_music_indices:
-                    # Check for percussive sounds again but with even lower threshold
-                    percussion_indices = self._get_percussion_indices()
-                    percussion_probs = probs[percussion_indices]
-                    
-                    if len(percussion_probs) > 0:
-                        best_percussion_idx = percussion_indices[np.argmax(percussion_probs)]
-                        best_percussion_prob = probs[best_percussion_idx]
-                        
-                        # If the percussion sound has even a small probability, prefer it over speech/music
-                        if best_percussion_prob > threshold * 0.1:  # Super low threshold
-                            print(f"Boosting percussion sound: {self.labels[best_percussion_idx]}")
-                            return [(self.labels[best_percussion_idx], float(best_percussion_prob * 2.0))]  # Double the confidence
             
             # Convert to labels
             result = []
@@ -1024,6 +901,104 @@ class PANNsModelInference:
             print(f"Error getting available labels: {e}")
             return []
 
+    def _preprocess_audio(self, audio_data):
+        """
+        Preprocess audio data for model inference.
+        
+        Args:
+            audio_data: Audio data as numpy array
+            
+        Returns:
+            PyTorch tensor ready for model input
+        """
+        # Log audio statistics for debugging
+        audio_mean = np.mean(audio_data)
+        audio_std = np.std(audio_data)
+        audio_min = np.min(audio_data)
+        audio_max = np.max(audio_data)
+        audio_abs_max = np.max(np.abs(audio_data))
+        
+        print(f"Audio stats - Mean: {audio_mean:.6f}, Std: {audio_std:.6f}, Min: {audio_min:.6f}, Max: {audio_max:.6f}, Abs Max: {audio_abs_max:.6f}")
+        
+        # Check for valid audio data
+        if audio_data is None or len(audio_data) == 0:
+            print("Empty audio data received")
+            raise ValueError("Empty audio data received")
+    
+        # Check for non-finite values
+        if not np.all(np.isfinite(audio_data)):
+            print("Audio contains non-finite values, fixing...")
+            audio_data = np.nan_to_num(audio_data)
+        
+        # Normalize audio if needed
+        if np.max(np.abs(audio_data)) > 1.0:
+            print("Normalizing audio...")
+            audio_data = audio_data / np.max(np.abs(audio_data))
+        
+        # Make sure audio is long enough (at least 1 second at 32kHz = 32000 samples)
+        original_length = len(audio_data)
+        if original_length < 32000:
+            print(f"Audio too short ({original_length} samples), padding to 32000 samples")
+            # If it's very short, repeat the audio to reach minimum length
+            if original_length < 16000:
+                # Repeat the audio multiple times to reach 32000 samples
+                repeat_count = int(np.ceil(32000 / original_length))
+                audio_data = np.tile(audio_data, repeat_count)[:32000]
+            else:
+                # Pad with zeros to reach 32000 samples
+                padding = np.zeros(32000 - original_length)
+                audio_data = np.concatenate([audio_data, padding])
+        
+        # Extract log mel spectrogram features
+        x = self.logmel_extract(audio_data)
+        
+        # Verify that we have the correct shape for the CNN13 model
+        if x.shape != (128, 64):
+            print(f"WARNING: Fixing spectrogram shape from {x.shape} to (128, 64)")
+            # Create a properly sized spectrogram
+            fixed_spec = np.zeros((128, 64), dtype=np.float32)
+            
+            # Copy what we can from the original spectrogram
+            h = min(x.shape[0], 128)
+            w = min(x.shape[1], 64)
+            fixed_spec[:h, :w] = x[:h, :w]
+            
+            x = fixed_spec
+        
+        # Normalize with mean and std values (essential for correct predictions)
+        try:
+            # Check if we need to reshape the mean/std vectors
+            if hasattr(self, 'mean') and hasattr(self, 'std') and len(self.mean) != x.shape[0]:
+                print(f"Reshaping normalization vectors from {len(self.mean)} to {x.shape[0]}")
+                # Create new mean/std vectors of the right size
+                new_mean = np.zeros(x.shape[0], dtype=np.float32)
+                new_std = np.ones(x.shape[0], dtype=np.float32)
+                
+                # Copy the values we have
+                common_len = min(len(self.mean), x.shape[0])
+                new_mean[:common_len] = self.mean[:common_len]
+                new_std[:common_len] = self.std[:common_len]
+                
+                # Apply the normalization
+                x = (x - new_mean.reshape(-1, 1)) / new_std.reshape(-1, 1)
+            elif hasattr(self, 'mean') and hasattr(self, 'std'):
+                # Apply the normalization as usual
+                x = (x - self.mean.reshape(-1, 1)) / self.std.reshape(-1, 1)
+        except Exception as e:
+            print(f"Error applying normalization: {e}, using default normalization")
+            # Use a simple global normalization as a fallback
+            if np.std(x) > 0:
+                x = (x - np.mean(x)) / np.std(x)
+        
+        # Convert to PyTorch tensor and reshape for model input
+        x = torch.tensor(x, dtype=torch.float32)
+        
+        # Add batch dimension: (time_steps, freq_bins) -> (1, time_steps, freq_bins)
+        x = x.unsqueeze(0)
+        print(f"Input tensor shape: {x.shape}")
+        
+        return x
+
 # Create singleton instance
 panns_inference = PANNsModelInference()
 
@@ -1318,72 +1293,33 @@ def predict_with_panns(audio_data, top_k=5, threshold=0.1, map_to_homesounds_for
         print(f"Audio stats - Mean: {audio_stats['mean']:.6f}, Std: {audio_stats['std']:.6f}, "
               f"Min: {audio_stats['min']:.6f}, Max: {audio_stats['max']:.6f}, Abs Max: {audio_stats['abs_max']:.6f}")
         
-        # Make sure audio is properly normalized
-        if audio_stats['abs_max'] > 1.0:
-            print(f"Audio values exceed range [-1.0, 1.0], normalizing")
-            audio_data = audio_data / audio_stats['abs_max']
-        
-        # Create logmel spectrogram using librosa
-        if panns_inference:
-            print("Using PANNs inference class for feature extraction")
-            logmel_spec = panns_inference.logmel_extract(audio_data)
-            normalized_spec = torch.Tensor(logmel_spec).unsqueeze(0)  # Add batch dimension
-        else:
-            print("Using fallback spectrogram method")
-            # Create logmel spectrogram using librosa
-            hop_length = 320  # Standard hop for 32kHz audio in PANNs
-            n_fft = 1024
-            n_mels = 64
-            
-            # Generate spectrogram
-            mel_spec = librosa.feature.melspectrogram(
-                y=audio_data, sr=32000, n_fft=n_fft, hop_length=hop_length,
-                n_mels=n_mels, fmin=50, fmax=14000
-            )
-            logmel_spec = librosa.power_to_db(mel_spec, ref=1.0, amin=1e-10, top_db=None)
-            
-            # Normalize spectrogram
-            if os.path.exists(SCALAR_FN):
-                print(f"Using scalar values from {SCALAR_FN}")
-                with h5py.File(SCALAR_FN, 'r') as hf:
-                    mean = hf['mean'][:]
-                    std = hf['std'][:]
-            else:
-                print("Using hardcoded scalar values")
-                # Fallback to hardcoded values if scalar file not found
-                mean = PANNsModelInference.LOGMEL_MEANS
-                std = PANNsModelInference.LOGMEL_STDDEVS
-            
-            # Apply normalization and transpose to get (time_steps, freq_bins)    
-            logmel_spec = (logmel_spec - mean.reshape(-1, 1)) / std.reshape(-1, 1)
-            logmel_spec = logmel_spec.T  # Shape: (time_steps, freq_bins)
-            
-            normalized_spec = torch.Tensor(logmel_spec).unsqueeze(0)  # Add batch dimension
-        
-        print(f"Spectrogram shape: {normalized_spec.shape}")
+        # Process the audio using the PANNsModelInference class
+        x = panns_inference._preprocess_audio(audio_data)
         
         # Get model predictions
         with torch.no_grad():
-            # Set model to evaluation mode
             panns_model.eval()
             # Forward pass
-            output = panns_model(normalized_spec)
+            output = panns_model(x)
             # Get output as numpy array
             output = output.cpu().numpy()[0]
         
-        # Sort predictions and apply threshold
+        # Sort predictions and create output
         sorted_indexes = np.argsort(output)[::-1]
         
-        # Get labels for all AudioSet classes
+        # Get labels if available
         labels_list = get_available_labels()
         if not labels_list:
-            print("No labels loaded, using default labels")
-            labels_list = [f"label_{i}" for i in range(len(output))]
+            print("No labels available, using generic labels")
+            labels_list = [f"Class_{i}" for i in range(len(output))]
         
-        print(f"Number of labels: {len(labels_list)}, Number of predictions: {len(output)}")
-        
-        # Create output predictions
-        output_dict = {"output": []}
+        # Check if number of model outputs matches number of labels
+        if len(output) != len(labels_list):
+            print(f"WARNING: Model output size ({len(output)}) does not match labels size ({len(labels_list)})")
+            # If model output is larger, use default labels for the extra outputs
+            if len(output) > len(labels_list):
+                for i in range(len(labels_list), len(output)):
+                    labels_list.append(f"Unknown_{i}")
         
         # Always print the top 5 predictions for debugging
         print("Top 5 raw predictions:")
@@ -1395,39 +1331,70 @@ def predict_with_panns(audio_data, top_k=5, threshold=0.1, map_to_homesounds_for
                 print(f"  {i+1}. {label_name}: {score:.4f}")
             else:
                 print(f"  {i+1}. Unknown_{idx}: {score:.4f}")
-        
-        # Get top K predictions above threshold
-        predictions_collected = 0
-        for i in range(min(len(sorted_indexes), 100)):  # Try up to 100 candidates
-            idx = sorted_indexes[i]
-            score = float(output[idx])
-            
-            if idx < len(labels_list):
-                label_name = labels_list[idx]
                 
-                # Add prediction if score is above threshold or we haven't collected enough
-                if score >= threshold or predictions_collected < top_k:
-                    output_dict["output"].append({
-                        "label": label_name,
-                        "score": score
-                    })
-                    predictions_collected += 1
+        # Format results based on whether we want homesounds format or not
+        if map_to_homesounds_format:
+            # Homesounds format is a dict with an "output" key containing predictions
+            output_dict = {"output": []}
+            predictions_collected = 0
+            
+            # Add predictions above threshold
+            for i in range(min(len(sorted_indexes), 100)):  # Try up to 100 candidates
+                idx = sorted_indexes[i]
+                score = float(output[idx])
+                
+                if idx < len(labels_list):
+                    label_name = labels_list[idx]
                     
-                    # Stop if we have enough predictions above threshold
-                    if predictions_collected >= top_k and score < threshold:
-                        break
-            else:
-                # Handle the case where idx is out of range
-                if predictions_collected < top_k:
-                    label_name = f"Unknown_{idx}"
-                    output_dict["output"].append({
-                        "label": label_name,
-                        "score": score
-                    })
-                    predictions_collected += 1
-        
-        # Convert to list of tuples for consistency with other models
-        predictions = [(item["label"], item["score"]) for item in output_dict["output"]]
+                    # Add prediction if score is above threshold or we haven't collected enough
+                    if score >= threshold or predictions_collected < top_k:
+                        output_dict["output"].append({
+                            "label": label_name,
+                            "score": score
+                        })
+                        predictions_collected += 1
+                        
+                        # Stop if we have enough predictions above threshold
+                        if predictions_collected >= top_k and score < threshold:
+                            break
+                else:
+                    # Handle the case where idx is out of range
+                    if predictions_collected < top_k:
+                        label_name = f"Unknown_{idx}"
+                        output_dict["output"].append({
+                            "label": label_name,
+                            "score": score
+                        })
+                        predictions_collected += 1
+            
+            # Convert to list of tuples for consistency with other models
+            predictions = [(item["label"], item["score"]) for item in output_dict["output"]]
+        else:
+            # Standard format is just a list of (label, score) tuples
+            predictions = []
+            predictions_collected = 0
+            
+            for i in range(min(len(sorted_indexes), 100)):
+                idx = sorted_indexes[i]
+                score = float(output[idx])
+                
+                if idx < len(labels_list):
+                    label_name = labels_list[idx]
+                    
+                    # Add prediction if score is above threshold or we haven't collected enough
+                    if score >= threshold or predictions_collected < top_k:
+                        predictions.append((label_name, score))
+                        predictions_collected += 1
+                        
+                        # Stop if we have enough predictions above threshold
+                        if predictions_collected >= top_k and score < threshold:
+                            break
+                else:
+                    # Handle the case where idx is out of range
+                    if predictions_collected < top_k:
+                        label_name = f"Unknown_{idx}"
+                        predictions.append((label_name, score))
+                        predictions_collected += 1
         
         # If no predictions meet the threshold, include at least the top prediction
         if not predictions and len(sorted_indexes) > 0:
@@ -1438,18 +1405,9 @@ def predict_with_panns(audio_data, top_k=5, threshold=0.1, map_to_homesounds_for
         
         print(f"Final prediction results: {predictions}")
         
-        # Map to homesounds format if requested
-        if map_to_homesounds_format and panns_inference:
-            try:
-                mapped_predictions = panns_inference.map_to_homesounds(predictions, threshold=threshold)
-                print(f"Mapped to homesounds format: {mapped_predictions}")
-                return mapped_predictions
-            except Exception as e:
-                print(f"Error mapping to homesounds format: {e}")
-                # Continue with original predictions if mapping fails
-        
         return predictions
+        
     except Exception as e:
-        print(f"Error processing audio with PANNs: {str(e)}")
+        print(f"Error in predict_with_panns: {e}")
         traceback.print_exc()
-        return [("Error", 1.0)]
+        return [("Error", 0.0)]

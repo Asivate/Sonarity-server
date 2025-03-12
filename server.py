@@ -877,43 +877,28 @@ def process_audio_with_panns(audio_data, db_level=None, timestamp=None, config=N
                                              if any(keyword in pred[0].lower() for keyword in 
                                                 ['knock', 'tap', 'thump', 'bang', 'drum', 'percussion'])]
                     
-                    # If we have strong time-domain evidence of knocking but no percussion labels found
-                    # Override with a generic "Knock" label
+                    # MODIFIED: Use the highest confidence predictions, regardless of whether they're percussion
+                    # Still note when percussion is detected, but don't force it to be the only prediction
                     final_predictions = []
-                    if has_knocking_pattern:
-                        if percussion_labels:
-                            # Use the highest confidence percussion label
-                            percussion_labels.sort(key=lambda x: x[1], reverse=True)
-                            final_predictions.append(percussion_labels[0])
-                            print(f"Using percussion label from model: {percussion_labels[0]}")
-                        else:
-                            # Force a knock label with high confidence
-                            print("No percussion labels in model predictions, using generic knock label")
-                            final_predictions.append(("Knock", 0.9))
-                            
-                        # Add other high-confidence predictions that aren't speech/music
-                        for pred in predictions_list:
-                            if pred[0].lower() not in ["speech", "music"] and pred[1] > prediction_threshold * 1.5:
-                                if pred not in final_predictions:
-                                    final_predictions.append(pred)
-                    else:
-                        # No knocking pattern - use standard predictions but boost other categories
-                        print(f"PANNs model predictions: {predictions_list[:5]}")
+                    
+                    # Filter out low confidence predictions
+                    final_predictions = [pred for pred in predictions_list if pred[1] > prediction_threshold]
+                    
+                    # If we have strong time-domain evidence of knocking and found percussion labels
+                    # add the highest confidence percussion label if it's not already in the list
+                    if has_knocking_pattern and percussion_labels:
+                        percussion_labels.sort(key=lambda x: x[1], reverse=True)
+                        best_percussion = percussion_labels[0]
+                        print(f"Using percussion label from model: {best_percussion}")
                         
-                        # Filter out low confidence predictions
-                        final_predictions = [pred for pred in predictions_list if pred[1] > prediction_threshold]
-                        
-                        # If everything is low confidence but we have some predictions
-                        if not final_predictions and predictions_list:
-                            # Take the highest confidence prediction regardless of threshold
-                            final_predictions.append(predictions_list[0])
+                        # Only add the percussion label if it's not already in the list
+                        if best_percussion not in final_predictions:
+                            final_predictions.append(best_percussion)
                             
-                            # Add a few more varied predictions to increase diversity
-                            for pred in predictions_list[1:5]:
-                                if pred[0].lower() not in [p[0].lower() for p in final_predictions]:
-                                    # Boost confidence slightly for UI presentation
-                                    boosted_score = min(0.7, pred[1] * 1.2)
-                                    final_predictions.append((pred[0], boosted_score))
+                    # If everything is low confidence but we have some predictions
+                    if not final_predictions and predictions_list:
+                        # Take the highest confidence prediction regardless of threshold
+                        final_predictions.append(predictions_list[0])
                     
                     print(f"Final predictions: {final_predictions}")
                     emit_prediction(final_predictions, db_level, timestamp)
