@@ -652,7 +652,7 @@ class PANNsModelInference:
             # Return an empty spectrogram in case of error
             return np.zeros((128, 64), dtype=np.float32)
     
-    def predict(self, audio_data, top_k=5, threshold=0.2, boost_other_categories=True):
+    def predict(self, audio_data, top_k=5, threshold=0.2, boost_other_categories=False):
         """
         Predict sound classes from audio data.
         The CNN13 model requires audio to be properly formatted as a 
@@ -880,6 +880,16 @@ class PANNsModelInference:
             "Ding-dong": "household-doorbell",
             "Beep, bleep": "hazard-alarm",
             
+            # Knocking sounds
+            "Knock": "household-knock",
+            "Door knock": "household-knock",
+            "Knocking": "household-knock",
+            "Tap": "household-knock",
+            "Tapping": "household-knock",
+            "Knock (door)": "household-knock",
+            "Percussion": "household-knock",
+            "Drum": "household-knock",
+            
             # Household sounds
             "Water tap, faucet": "household-water",
             "Sink (filling or washing)": "household-water",
@@ -904,7 +914,6 @@ class PANNsModelInference:
             "Motorcycle": "vehicle",
             
             # Other common mappings
-            "Knock": "household-knock",
             "Telephone": "household-phone",
             "Telephone bell ringing": "household-phone",
             "Cell phone": "household-phone",
@@ -919,10 +928,7 @@ class PANNsModelInference:
             "Dishes, pots, and pans": "household-dishes",
             "Cutlery, silverware": "household-dishes",
             "Frying (food)": "household-cooking",
-            "Microwave oven": "household-microwave",
-            "Blender": "household-blender",
             "Toilet flush": "household-toilet",
-            "Door": "household-door",
             "Drawer open or close": "household-door",
             "Cupboard open or close": "household-door",
         }
@@ -1031,7 +1037,7 @@ def load_panns_model():
     """Initialize the PANNs model"""
     panns_inference.initialize()
 
-def predict_with_panns(audio_data, top_k=5, threshold=0.2, map_to_homesounds_format=False, boost_other_categories=True):
+def predict_with_panns(audio_data, top_k=5, threshold=0.2, map_to_homesounds_format=False, boost_other_categories=False):
     """
     Predict audio categories using PANNs model
     
@@ -1043,12 +1049,8 @@ def predict_with_panns(audio_data, top_k=5, threshold=0.2, map_to_homesounds_for
         boost_other_categories: Whether to boost non-speech/music categories
         
     Returns:
-        If map_to_homesounds_format is True: Dictionary with homesounds format
-        Otherwise: List of (label, confidence) tuples
+        List of (label, confidence) tuples
     """
-    print(f"DEBUG: predict_with_panns called with top_k={top_k}, threshold={threshold}")
-    print(f"DEBUG: audio_data shape: {audio_data.shape if hasattr(audio_data, 'shape') else 'Not a numpy array'}")
-    print(f"DEBUG: audio_data type: {type(audio_data)}")
     try:
         # Check if model is initialized
         if not hasattr(panns_inference, '_initialized') or not panns_inference._initialized:
@@ -1056,34 +1058,28 @@ def predict_with_panns(audio_data, top_k=5, threshold=0.2, map_to_homesounds_for
             panns_inference.initialize()
             if not hasattr(panns_inference, '_initialized') or not panns_inference._initialized:
                 print("ERROR: Failed to initialize PANNs model")
-                return [{"label": "Model Error", "score": 1.0}]
+                return []
         
-        # Call the predict method with detailed error handling
+        # Simple prediction with error handling
         try:
-            results = panns_inference.predict(audio_data, top_k=top_k, threshold=threshold, boost_other_categories=boost_other_categories)
-            print(f"DEBUG: PANNs raw prediction results: {results}")
+            # Get predictions directly from the model
+            results = panns_inference.predict(
+                audio_data, 
+                top_k=top_k, 
+                threshold=threshold,
+                boost_other_categories=boost_other_categories
+            )
+            
+            # Just return the raw predictions - no special processing
+            print(f"PANNs model predictions: {results}")
+            return results
+            
         except Exception as e:
             print(f"ERROR in panns_inference.predict: {e}")
-            import traceback
             traceback.print_exc()
-            return [{"label": "Prediction Error", "score": 1.0}]
+            return []
         
-        # Map results to homesounds format if requested
-        if map_to_homesounds_format:
-            try:
-                mapped_results = panns_inference.map_to_homesounds(results, threshold=threshold)
-                print(f"DEBUG: Mapped to homesounds format: {mapped_results}")
-                return mapped_results
-            except Exception as e:
-                print(f"ERROR in mapping to homesounds format: {e}")
-                import traceback
-                traceback.print_exc()
-                # Fall back to returning raw results
-                return [{"label": result[0], "score": float(result[1])} for result in results] if results else [{"label": "Mapping Error", "score": 1.0}]
-        
-        return results 
     except Exception as e:
         print(f"ERROR in predict_with_panns: {e}")
-        import traceback
         traceback.print_exc()
-        return [{"label": "Function Error", "score": 1.0}]
+        return []

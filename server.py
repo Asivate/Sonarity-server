@@ -649,7 +649,6 @@ def process_audio_with_panns(audio_data, db_level=None, timestamp=None, config=N
             audio_data = audio_data.astype(np.float32)
         
         # Log detailed audio statistics
-        # Create a stats dictionary for log_audio_stats
         audio_stats = {
             'length': len(audio_data),
             'min': float(np.min(audio_data)),
@@ -683,11 +682,9 @@ def process_audio_with_panns(audio_data, db_level=None, timestamp=None, config=N
             return
         
         # Sound level is good, proceed with PANNs model
-        log_status(f"Sound level ({db_level:.2f} dB) within processing range ({silence_threshold} to {db_level_threshold} dB)", "success")
+        log_status(f"Sound level ({db_level:.2f} dB) within processing range", "success")
         
-        log_status("Processing audio with PANNS model (threshold: {:.1f})".format(prediction_threshold), "info")
-        
-        # Handle audio buffer size - PANNs expects 32000 samples
+        # Handle audio buffer size - PANNs expects 32000 samples (1 second @ 32kHz)
         audio_length = len(audio_data)
         if audio_length < MINIMUM_AUDIO_LENGTH:
             # Pad with zeros if too short
@@ -699,39 +696,41 @@ def process_audio_with_panns(audio_data, db_level=None, timestamp=None, config=N
             log_status(f"Trimming long audio: {audio_length} → {MINIMUM_AUDIO_LENGTH} samples", "info")
             audio_data = audio_data[-MINIMUM_AUDIO_LENGTH:]
         
-        # Boost quiet sounds to improve detection
-        if db_level < -30 and db_level > -60:
-            boost_factor = max(1.0, min(5.0, (-30 - db_level) / 10))
-            log_status(f"Boosting quiet audio by factor of {boost_factor:.2f}", "info")
-            audio_data = audio_data * boost_factor
+        # Normalize audio to [-1.0, 1.0] range if needed
+        if np.max(np.abs(audio_data)) > 1.0:
+            audio_data = audio_data / np.max(np.abs(audio_data))
+            log_status("Normalized audio to [-1.0, 1.0] range", "info")
         
-        # Run prediction with PANNs model
-        log_status("Running PANNs prediction...", "info")
-        
-        # Debug logs before prediction
-        print("\nDEBUG: Before calling predict_with_panns")
-        print(f"Audio data shape: {audio_data.shape}")
-        print(f"Audio data type: {type(audio_data)}")
-        print(f"Audio data min/max: {np.min(audio_data)}/{np.max(audio_data)}")
-        print(f"Prediction threshold: {prediction_threshold}")
+        # Simple prediction approach - directly get results from PANNs model
+        log_status("Running PANNs prediction with threshold: {:.2f}".format(prediction_threshold), "info")
         
         try:
             with panns_model_lock:
+                # Get direct predictions without homesounds mapping
                 predictions = panns_model.predict_with_panns(
                     audio_data, 
                     top_k=10, 
                     threshold=prediction_threshold,
-                    map_to_homesounds_format=False, 
-                    boost_other_categories=config.get('boost_factor', 1.2) > 1.0
+                    map_to_homesounds_format=False,  # Important: Use raw AudioSet labels 
+                    boost_other_categories=False     # No need for category-specific boosts
                 )
                 
-                # Debug logs after prediction
-                print("\nDEBUG: After calling predict_with_panns")
-                print(f"Predictions type: {type(predictions)}")
-                print(f"Predictions: {predictions}")
+                print(f"Raw predictions: {predictions}")
                 
-                # Emit results to clients
+                # If no predictions, try with a lower threshold
+                if not predictions or len(predictions) == 0:
+                    log_status("No predictions at default threshold, trying lower threshold", "warning")
+                    predictions = panns_model.predict_with_panns(
+                        audio_data, 
+                        top_k=10, 
+                        threshold=prediction_threshold * 0.5,
+                        map_to_homesounds_format=False,
+                        boost_other_categories=False
+                    )
+                
+                # Emit results to clients - just pass the raw results
                 emit_prediction(predictions, db_level, timestamp)
+                
         except Exception as e:
             log_status(f"Error in PANNs prediction: {str(e)}", "error")
             traceback.print_exc()
@@ -747,8 +746,7 @@ def emit_prediction(predictions, db_level, timestamp=None):
     Emit prediction results via socketio.
     
     Args:
-        predictions: List of predictions, either as dictionaries with 'label' and 'score' keys,
-                    or as tuples of (label, score)
+        predictions: List of predictions as tuples of (label, score)
         db_level: Audio decibel level or None
         timestamp: Timestamp of the audio data or None
         
@@ -765,22 +763,14 @@ def emit_prediction(predictions, db_level, timestamp=None):
     # Format the predictions for emission
     formatted_predictions = []
     
-    for pred in predictions:
-        if isinstance(pred, dict) and 'label' in pred and 'score' in pred:
-            # Handle dictionary format
-            formatted_predictions.append({
-                'label': pred['label'],
-                'score': str(round(pred['score'], 4)) if isinstance(pred['score'], (int, float)) else pred['score']
-            })
-        elif isinstance(pred, tuple) and len(pred) == 2:
-            # Handle tuple format (label, score) returned when map_to_homesounds_format=False
-            label, score = pred
+    if predictions:
+        for label, score in predictions:
             formatted_predictions.append({
                 'label': label,
-                'score': str(round(score, 4)) if isinstance(score, (int, float)) else score
+                'score': str(round(float(score), 4))
             })
     
-    # Create message with both formats for compatibility
+    # Create message with predictions
     message = {
         'predictions': formatted_predictions,
         'db': str(db_level),
