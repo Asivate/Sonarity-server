@@ -101,6 +101,12 @@ if not os.path.exists(DOMESTIC_CSV_FNAME) and os.path.exists(os.path.join(MODEL_
 # Additional path for CSV files
 CSV_FILES_FNAME = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'csv_files', 'validate_meta.csv')
 
+# Initialize global variables for model management
+is_panns_loaded = False
+panns_model = None
+classmap = {}
+labels = []
+
 # Default audio parameters
 SAMPLE_RATE = 32000
 N_FFT = 1024
