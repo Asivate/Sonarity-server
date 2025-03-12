@@ -762,25 +762,67 @@ def process_audio_with_panns(audio_data, db_level=None, timestamp=None, config=N
                 prominence=0.1*np.max(smoothed)  # Ensure peaks stand out
             )
             
-            # Check if this looks like a knocking pattern
-            if len(peaks) >= 2 and len(peaks) <= 10:
-                peak_spacing = np.diff(peaks) / 32000  # Convert to seconds
-                avg_spacing = np.mean(peak_spacing)
-                
-                # Calculate consistency of spacing
-                std_spacing = np.std(peak_spacing)
-                spacing_consistency = std_spacing / avg_spacing if avg_spacing > 0 else 999
-                
-                print(f"TIME DOMAIN ANALYSIS: {len(peaks)} peaks detected, spacing={avg_spacing:.2f}s, consistency={spacing_consistency:.2f}")
-                
-                # Check if this looks like knocking
-                if (0.05 < avg_spacing < 0.5) and spacing_consistency < 0.5:
-                    has_knocking_pattern = True
-                    print("KNOCKING PATTERN DETECTED in time domain!")
+            # Calculate peak decay rate (important for percussive sounds)
+            peak_decay = 0.0
+            if len(peaks) > 0:
+                peak_heights = smoothed[peaks]
+                if len(peaks) > 1:
+                    peak_spacing = np.diff(peaks) / 32000  # Convert to seconds
+                    avg_spacing = np.mean(peak_spacing)
                     
-                # If we have a clear knocking pattern, we can use this to override model predictions
-                if has_knocking_pattern and len(peaks) >= 3 and spacing_consistency < 0.3:
-                    print("STRONG KNOCKING PATTERN - will override model if needed")
+                    # Calculate consistency of spacing
+                    std_spacing = np.std(peak_spacing)
+                    spacing_consistency = std_spacing / avg_spacing if avg_spacing > 0 else 999
+                    
+                    # Calculate decay rate (how quickly sound fades after peaks)
+                    if len(peaks) >= 2:
+                        decay_windows = []
+                        for i in range(len(peaks)-1):
+                            start_idx = peaks[i]
+                            end_idx = min(peaks[i+1], start_idx + 3200)  # Look at 100ms after peak
+                            if start_idx < end_idx:
+                                segment = smoothed[start_idx:end_idx]
+                                if len(segment) > 0 and segment[0] > 0:
+                                    decay_rate = 1.0 - (segment[-1] / segment[0])
+                                    decay_windows.append(decay_rate)
+                        
+                        peak_decay = np.mean(decay_windows) if decay_windows else 0.0
+                    
+                    print(f"Percussion details: peaks={len(peaks)}, spacing={avg_spacing:.2f}s, consistency={spacing_consistency:.2f}, decay={peak_decay:.2f}")
+                    
+                    # Check if this looks like knocking
+                    if ((0.03 < avg_spacing < 0.5) and spacing_consistency < 0.6 and peak_decay > 0.4) or \
+                       ((0.03 < avg_spacing < 0.2) and len(peaks) >= 3) or \
+                       (len(peaks) >= 2 and peak_decay > 0.7):
+                        has_knocking_pattern = True
+                        print("PERCUSSION DETECTED: Strong evidence of knock/tap sound in time domain analysis")
+                elif len(peaks) == 1:
+                    # Single peak analysis
+                    start_idx = peaks[0]
+                    end_idx = min(start_idx + 3200, len(smoothed) - 1)
+                    if start_idx < end_idx:
+                        segment = smoothed[start_idx:end_idx]
+                        if len(segment) > 0 and segment[0] > 0:
+                            peak_decay = 1.0 - (segment[-1] / segment[0])
+                    
+                    print(f"Single peak percussion analysis: decay={peak_decay:.2f}, height={peak_heights[0]}")
+                    if peak_decay > 0.8 or peak_heights[0] > 0.3:
+                        has_knocking_pattern = True
+                        print("PERCUSSION DETECTED: Strong evidence of knock/tap sound in time domain analysis")
+                
+            if has_knocking_pattern:
+                # Search for available percussion-related labels
+                available_labels = []
+                try:
+                    available_labels = panns_model.get_labels()
+                    if available_labels:
+                        knock_labels = [(i, label) for i, label in enumerate(available_labels) 
+                                     if any(keyword in label.lower() for keyword in 
+                                           ['knock', 'tap', 'thump', 'bang', 'drum', 'percussion'])]
+                        print(f"Total available labels: {len(available_labels)}")
+                        print(f"Found {len(knock_labels)} knock-related labels: {knock_labels}")
+                except Exception as e:
+                    print(f"Error getting available labels: {e}")
         except Exception as e:
             print(f"Error in time domain knocking detection: {e}")
         
@@ -789,47 +831,95 @@ def process_audio_with_panns(audio_data, db_level=None, timestamp=None, config=N
         
         try:
             with panns_model_lock:
-                # Get direct predictions from the PANNs model
+                # Get detailed stats about the audio for debugging
+                audio_std = np.std(audio_data)
+                audio_abs_max = np.max(np.abs(audio_data))
+                print(f"Audio stats - Mean: {np.mean(audio_data):.6f}, Std: {audio_std:.6f}, Min: {np.min(audio_data):.6f}, Max: {np.max(audio_data):.6f}, Abs Max: {audio_abs_max:.6f}")
+                
+                # Lower the threshold for percussion sounds to improve detection
+                effective_threshold = prediction_threshold * 0.5 if has_knocking_pattern else prediction_threshold
+                
+                # Get raw predictions from the PANNs model
                 predictions = panns_model.predict_with_panns(
                     audio_data, 
-                    top_k=10, 
-                    threshold=prediction_threshold,
-                    map_to_homesounds_format=False,  # Use raw AudioSet labels 
-                    boost_other_categories=True      # Enable boosting of non-speech categories
+                    top_k=20,  # Get more predictions to have a wider selection
+                    threshold=effective_threshold,
+                    map_to_homesounds_format=False  # Use raw AudioSet labels
                 )
                 
-                # Check if model found any predictions
-                if not predictions or len(predictions) == 0:
-                    log_status("No predictions found, trying with lower threshold", "warning")
-                    # Try again with lower threshold
-                    predictions = panns_model.predict_with_panns(
-                        audio_data, 
-                        top_k=10, 
-                        threshold=prediction_threshold * 0.5,  # Half the threshold
-                        boost_other_categories=True
-                    )
-                
-                # If we detected a strong knocking pattern but model didn't find it, override
-                if has_knocking_pattern:
-                    # Check if any knock/percussion labels in predictions
-                    has_knock_in_predictions = False
-                    for pred in predictions:
-                        if isinstance(pred, tuple) and len(pred) == 2:
-                            label = pred[0].lower()
-                            if any(k in label for k in ['knock', 'tap', 'thump', 'percussion']):
-                                has_knock_in_predictions = True
-                                break
+                # Log the raw model output
+                if predictions and "output" in predictions:
+                    print(f"Raw model predictions: {predictions['output'][:5]}")
+                    predictions_list = [(pred['label'], float(pred['score'])) for pred in predictions['output']]
+                    print(f"PANNs prediction results: {predictions_list[:5]}")
                     
-                    # If no knock found but we detected knocking, add it
-                    if not has_knock_in_predictions:
-                        print("Adding KNOCK label based on time domain analysis")
-                        predictions.insert(0, ("Knock", 0.95))
-                
-                # Log the raw predictions for debugging
-                print(f"Final predictions: {predictions}")
-                
-                # Emit results to clients
-                emit_prediction(predictions, db_level, timestamp)
+                    # Check if there are any percussion-related labels
+                    percussion_labels = [pred for pred in predictions_list 
+                                       if any(keyword in pred[0].lower() for keyword in 
+                                           ['knock', 'tap', 'thump', 'bang', 'drum', 'percussion'])]
+                    
+                    if has_knocking_pattern and not percussion_labels:
+                        print("Percussive sound detected, using lower threshold for percussion sounds")
+                        # Try again with much lower threshold to catch percussion sounds
+                        retry_predictions = panns_model.predict_with_panns(
+                            audio_data, 
+                            top_k=40,  # Try more predictions
+                            threshold=0.01,  # Much lower threshold
+                            map_to_homesounds_format=False
+                        )
+                        
+                        if retry_predictions and "output" in retry_predictions:
+                            retry_list = [(pred['label'], float(pred['score'])) for pred in retry_predictions['output']]
+                            print(f"Preliminary predictions with low threshold: {retry_list[:5]}")
+                            
+                            # Look for percussion labels in retried predictions
+                            percussion_labels = [pred for pred in retry_list 
+                                             if any(keyword in pred[0].lower() for keyword in 
+                                                ['knock', 'tap', 'thump', 'bang', 'drum', 'percussion'])]
+                    
+                    # If we have strong time-domain evidence of knocking but no percussion labels found
+                    # Override with a generic "Knock" label
+                    final_predictions = []
+                    if has_knocking_pattern:
+                        if percussion_labels:
+                            # Use the highest confidence percussion label
+                            percussion_labels.sort(key=lambda x: x[1], reverse=True)
+                            final_predictions.append(percussion_labels[0])
+                            print(f"Using percussion label from model: {percussion_labels[0]}")
+                        else:
+                            # Force a knock label with high confidence
+                            print("No percussion labels in model predictions, using generic knock label")
+                            final_predictions.append(("Knock", 0.9))
+                            
+                        # Add other high-confidence predictions that aren't speech/music
+                        for pred in predictions_list:
+                            if pred[0].lower() not in ["speech", "music"] and pred[1] > prediction_threshold * 1.5:
+                                if pred not in final_predictions:
+                                    final_predictions.append(pred)
+                    else:
+                        # No knocking pattern - use standard predictions but boost other categories
+                        print(f"PANNs model predictions: {predictions_list[:5]}")
+                        
+                        # Filter out low confidence predictions
+                        final_predictions = [pred for pred in predictions_list if pred[1] > prediction_threshold]
+                        
+                        # If everything is low confidence but we have some predictions
+                        if not final_predictions and predictions_list:
+                            # Take the highest confidence prediction regardless of threshold
+                            final_predictions.append(predictions_list[0])
+                            
+                            # Add a few more varied predictions to increase diversity
+                            for pred in predictions_list[1:5]:
+                                if pred[0].lower() not in [p[0].lower() for p in final_predictions]:
+                                    # Boost confidence slightly for UI presentation
+                                    boosted_score = min(0.7, pred[1] * 1.2)
+                                    final_predictions.append((pred[0], boosted_score))
+                    
+                    print(f"Final predictions: {final_predictions}")
+                    emit_prediction(final_predictions, db_level, timestamp)
+                else:
+                    log_status("No predictions returned from model", "warning")
+                    emit_prediction([("No Sound Detected", 0.8)], db_level, timestamp)
                 
         except Exception as e:
             log_status(f"Error in PANNs prediction: {str(e)}", "error")
