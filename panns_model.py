@@ -626,18 +626,18 @@ class PANNsModelInference:
             
             # Calculate the energy of the audio
             rms = np.sqrt(np.mean(np.square(audio_data)))
-            if rms < 0.002:  # Very quiet audio
+            if rms < 0.003:  # Increased threshold for very quiet audio
                 print("Audio too quiet for percussion detection")
                 return False
             
             # Find peaks in the envelope
             from scipy.signal import find_peaks
-            # More sensitive peak detection with lower height threshold
+            # More strict peak detection with higher thresholds
             peaks, peak_props = find_peaks(
                 smoothed, 
-                height=0.05*np.max(smoothed),  # Lower threshold to detect softer knocks
+                height=0.15*np.max(smoothed),  # Increased threshold to detect only stronger knocks
                 distance=500,  # Minimum distance between peaks (~15ms at 32kHz)
-                prominence=0.1*np.max(smoothed)  # Ensure peaks stand out from background
+                prominence=0.2*np.max(smoothed)  # Increased to ensure peaks stand out more
             )
             
             # Print detailed information about detected peaks
@@ -674,20 +674,16 @@ class PANNsModelInference:
                 # Print detailed percussion characteristics for debugging
                 print(f"Percussion details: peaks={len(peaks)}, spacing={avg_spacing:.2f}s, consistency={spacing_consistency:.2f}, decay={avg_decay:.2f}")
                 
-                # Knocking typically has:
-                # - 2-15 peaks
-                # - Average spacing of 0.05-0.5s between peaks
-                # - Consistent spacing (lower std/mean ratio)
-                # - Fast decay (>0.5 relative decay)
+                # Make knocking criteria more strict
                 is_percussion = (
-                    (0.05 < avg_spacing < 0.5) and  # Typical knocking timing
-                    (spacing_consistency < 0.7) and  # Relatively consistent spacing
-                    (avg_decay > 0.5) and  # Fast decay characteristic of impact sounds
-                    (len(peaks) >= 2 and len(peaks) <= 15)  # Multiple distinct impacts
+                    (0.05 < avg_spacing < 0.3) and  # More narrow range for knocking timing
+                    (spacing_consistency < 0.4) and  # Require more consistent spacing
+                    (avg_decay > 0.6) and  # Require faster decay
+                    (len(peaks) >= 2 and len(peaks) <= 10)  # More limited range of peaks
                 )
                 
-                # Stronger evidence of knocking if we have 3-8 evenly spaced peaks
-                if (3 <= len(peaks) <= 8) and spacing_consistency < 0.3 and avg_decay > 0.7:
+                # Stronger evidence of knocking if we have 3-6 evenly spaced peaks
+                if (3 <= len(peaks) <= 6) and spacing_consistency < 0.25 and avg_decay > 0.7:
                     print("STRONG EVIDENCE of knocking pattern detected!")
                     return True
                 
@@ -704,8 +700,8 @@ class PANNsModelInference:
                         
                         print(f"Single peak percussion analysis: decay={decay_rate:.2f}, height={peak_heights[0]}")
                         
-                        # Fast decay indicates percussion
-                        return decay_rate > 0.7 and peak_heights[0] > 0.1*np.max(smoothed)
+                        # Make threshold more strict
+                        return decay_rate > 0.85 and peak_heights[0] > 0.4*np.max(smoothed)
             
             return False
                 

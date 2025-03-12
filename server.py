@@ -757,9 +757,9 @@ def process_audio_with_panns(audio_data, db_level=None, timestamp=None, config=N
             # Find peaks in the envelope
             peaks, peak_props = find_peaks(
                 smoothed, 
-                height=0.05*np.max(smoothed),  # Low threshold to detect softer knocks
+                height=0.15*np.max(smoothed),  # Increased threshold to detect only stronger knocks
                 distance=500,  # Minimum distance between peaks
-                prominence=0.1*np.max(smoothed)  # Ensure peaks stand out
+                prominence=0.2*np.max(smoothed)  # Increased prominence to ensure peaks stand out more
             )
             
             # Calculate peak decay rate (important for percussive sounds)
@@ -790,14 +790,13 @@ def process_audio_with_panns(audio_data, db_level=None, timestamp=None, config=N
                     
                     print(f"Percussion details: peaks={len(peaks)}, spacing={avg_spacing:.2f}s, consistency={spacing_consistency:.2f}, decay={peak_decay:.2f}")
                     
-                    # Check if this looks like knocking
-                    if ((0.03 < avg_spacing < 0.5) and spacing_consistency < 0.6 and peak_decay > 0.4) or \
-                       ((0.03 < avg_spacing < 0.2) and len(peaks) >= 3) or \
-                       (len(peaks) >= 2 and peak_decay > 0.7):
+                    # Make the knocking pattern detection more strict
+                    if ((0.05 < avg_spacing < 0.3) and spacing_consistency < 0.4 and peak_decay > 0.6) or \
+                       ((0.05 < avg_spacing < 0.2) and len(peaks) >= 3 and spacing_consistency < 0.3 and peak_decay > 0.5):
                         has_knocking_pattern = True
                         print("PERCUSSION DETECTED: Strong evidence of knock/tap sound in time domain analysis")
                 elif len(peaks) == 1:
-                    # Single peak analysis
+                    # Single peak analysis - make more strict
                     start_idx = peaks[0]
                     end_idx = min(start_idx + 3200, len(smoothed) - 1)
                     if start_idx < end_idx:
@@ -806,7 +805,8 @@ def process_audio_with_panns(audio_data, db_level=None, timestamp=None, config=N
                             peak_decay = 1.0 - (segment[-1] / segment[0])
                     
                     print(f"Single peak percussion analysis: decay={peak_decay:.2f}, height={peak_heights[0]}")
-                    if peak_decay > 0.8 or peak_heights[0] > 0.3:
+                    # More strict threshold for single peaks
+                    if peak_decay > 0.85 and peak_heights[0] > 0.4*np.max(smoothed):
                         has_knocking_pattern = True
                         print("PERCUSSION DETECTED: Strong evidence of knock/tap sound in time domain analysis")
                 
@@ -878,23 +878,28 @@ def process_audio_with_panns(audio_data, db_level=None, timestamp=None, config=N
                                                 ['knock', 'tap', 'thump', 'bang', 'drum', 'percussion'])]
                     
                     # MODIFIED: Use the highest confidence predictions, regardless of whether they're percussion
-                    # Still note when percussion is detected, but don't force it to be the only prediction
                     final_predictions = []
                     
                     # Filter out low confidence predictions
                     final_predictions = [pred for pred in predictions_list if pred[1] > prediction_threshold]
                     
+                    # Only include percussion labels if they have a reasonable confidence level
+                    MIN_PERCUSSION_CONFIDENCE = 0.08  # Set a minimum threshold for percussion sounds
+                    
                     # If we have strong time-domain evidence of knocking and found percussion labels
-                    # add the highest confidence percussion label if it's not already in the list
+                    # add the highest confidence percussion label if it's not already in the list and meets the minimum confidence
                     if has_knocking_pattern and percussion_labels:
                         percussion_labels.sort(key=lambda x: x[1], reverse=True)
                         best_percussion = percussion_labels[0]
-                        print(f"Using percussion label from model: {best_percussion}")
+                        print(f"Best percussion label from model: {best_percussion}")
                         
-                        # Only add the percussion label if it's not already in the list
-                        if best_percussion not in final_predictions:
+                        # Only add the percussion label if it's not already in the list AND has reasonable confidence
+                        if best_percussion not in final_predictions and best_percussion[1] >= MIN_PERCUSSION_CONFIDENCE:
+                            print(f"Adding percussion label to final predictions: {best_percussion}")
                             final_predictions.append(best_percussion)
-                            
+                        elif best_percussion[1] < MIN_PERCUSSION_CONFIDENCE:
+                            print(f"Ignoring low confidence percussion label: {best_percussion}")
+                    
                     # If everything is low confidence but we have some predictions
                     if not final_predictions and predictions_list:
                         # Take the highest confidence prediction regardless of threshold
