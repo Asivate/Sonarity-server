@@ -706,29 +706,20 @@ def process_audio_with_panns(audio_data, db_level=None, timestamp=None, config=N
         
         try:
             with panns_model_lock:
-                # Get direct predictions without homesounds mapping
+                # Get direct predictions from the PANNs model 
+                # The model will handle percussion detection internally
                 predictions = panns_model.predict_with_panns(
                     audio_data, 
                     top_k=10, 
                     threshold=prediction_threshold,
-                    map_to_homesounds_format=False,  # Important: Use raw AudioSet labels 
-                    boost_other_categories=False     # No need for category-specific boosts
+                    map_to_homesounds_format=False,  # Use raw AudioSet labels 
+                    boost_other_categories=True      # Enable boosting of non-speech categories
                 )
                 
+                # Log the raw predictions for debugging
                 print(f"Raw predictions: {predictions}")
                 
-                # If no predictions, try with a lower threshold
-                if not predictions or len(predictions) == 0:
-                    log_status("No predictions at default threshold, trying lower threshold", "warning")
-                    predictions = panns_model.predict_with_panns(
-                        audio_data, 
-                        top_k=10, 
-                        threshold=prediction_threshold * 0.5,
-                        map_to_homesounds_format=False,
-                        boost_other_categories=False
-                    )
-                
-                # Emit results to clients - just pass the raw results
+                # Emit results to clients
                 emit_prediction(predictions, db_level, timestamp)
                 
         except Exception as e:
@@ -765,19 +756,21 @@ def emit_prediction(predictions, db_level, timestamp=None):
     formatted_predictions = []
     
     for pred in predictions:
-        if isinstance(pred, dict) and 'label' in pred and 'score' in pred:
-            # Handle dictionary format
-            formatted_predictions.append({
-                'label': pred['label'],
-                'score': str(round(float(pred['score']), 4))
-            })
-        elif isinstance(pred, tuple) and len(pred) == 2:
+        if isinstance(pred, tuple) and len(pred) == 2:
             # Handle tuple format (label, score)
             label, score = pred
             formatted_predictions.append({
                 'label': label,
                 'score': str(round(float(score), 4))
             })
+        elif isinstance(pred, dict) and 'label' in pred and 'score' in pred:
+            # Handle dictionary format
+            formatted_predictions.append({
+                'label': pred['label'],
+                'score': str(round(float(pred['score']), 4))
+            })
+        else:
+            print(f"Warning: Skipping prediction in unknown format: {pred}")
     
     # Create message with predictions
     message = {

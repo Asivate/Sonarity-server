@@ -779,6 +779,31 @@ class PANNsModelInference:
                 # Get probabilities
                 probs = prediction.squeeze().cpu().numpy()
             
+            # Apply different strategies based on audio characteristics
+            # First, check for percussive sounds - they have characteristic time-domain patterns
+            is_percussive = self._is_percussive_sound(audio_data)
+            
+            # Check for percussive (knocking) sounds with a lower threshold
+            if is_percussive:
+                print("Percussive sound detected, using lower threshold for percussion sounds")
+                # Get indices of percussion-related categories
+                percussion_indices = self._get_percussion_indices()
+                
+                # Apply a lower threshold for percussion sounds (0.05 instead of 0.2)
+                percussion_threshold = threshold * 0.25  # Much lower threshold for percussion
+                
+                # Look specifically for percussion sounds
+                percussion_probs = probs[percussion_indices]
+                if len(percussion_probs) > 0:
+                    best_percussion_idx = percussion_indices[np.argmax(percussion_probs)]
+                    best_percussion_prob = probs[best_percussion_idx]
+                    
+                    if best_percussion_prob > percussion_threshold:
+                        print(f"Found percussion sound: {self.labels[best_percussion_idx]} with confidence {best_percussion_prob}")
+                        # Return just this one prediction if it's strong enough
+                        if best_percussion_prob > threshold:
+                            return [(self.labels[best_percussion_idx], float(best_percussion_prob))]
+                
             # Get top-k indices and their probabilities
             indices = np.argsort(probs)[-top_k:][::-1]
             selected_probs = probs[indices]
@@ -795,8 +820,23 @@ class PANNsModelInference:
             
             # Boost non-speech categories if requested
             if boost_other_categories:
-                # This will be handled later in process_audio_with_panns
-                pass
+                # Get indices of speech and music categories
+                speech_music_indices = self._get_speech_music_indices()
+                
+                # Check if our top prediction is speech or music
+                if len(indices) > 0 and indices[0] in speech_music_indices:
+                    # Check for percussive sounds again but with even lower threshold
+                    percussion_indices = self._get_percussion_indices()
+                    percussion_probs = probs[percussion_indices]
+                    
+                    if len(percussion_probs) > 0:
+                        best_percussion_idx = percussion_indices[np.argmax(percussion_probs)]
+                        best_percussion_prob = probs[best_percussion_idx]
+                        
+                        # If the percussion sound has even a small probability, prefer it over speech/music
+                        if best_percussion_prob > threshold * 0.1:  # Super low threshold
+                            print(f"Boosting percussion sound: {self.labels[best_percussion_idx]}")
+                            return [(self.labels[best_percussion_idx], float(best_percussion_prob * 2.0))]  # Double the confidence
             
             # Convert to labels
             result = []
@@ -818,6 +858,120 @@ class PANNsModelInference:
             traceback.print_exc()
             return []
     
+    def _is_percussive_sound(self, audio_data):
+        """
+        Analyzes the audio to determine if it's likely a percussive sound like knocking.
+        Percussive sounds have characteristic shapes in the time domain:
+        - Sharp onsets (sudden increases in amplitude)
+        - Quick decay
+        - Often multiple peaks in quick succession (for knocking)
+        
+        Args:
+            audio_data: numpy array of audio samples
+            
+        Returns:
+            bool: True if the audio is likely percussive
+        """
+        try:
+            # Get the envelope of the audio signal
+            envelope = np.abs(audio_data)
+            
+            # Smooth the envelope
+            window_size = 512  # About 16ms at 32kHz
+            smoothed = np.convolve(envelope, np.ones(window_size)/window_size, mode='same')
+            
+            # Find peaks in the envelope
+            from scipy.signal import find_peaks
+            peaks, _ = find_peaks(smoothed, height=0.1*np.max(smoothed), distance=1000)
+            
+            # Characteristics of percussion:
+            # 1. Number of prominent peaks
+            # 2. Decay rate after peaks
+            # 3. Spacing between peaks
+            
+            # Calculate peak spacing and decay rates
+            if len(peaks) >= 2 and len(peaks) <= 10:  # Multiple distinct peaks
+                # Check peak spacing - knocking typically has peaks spaced 0.1-0.5s apart
+                peak_spacing = np.diff(peaks) / 32000  # Convert to seconds
+                avg_spacing = np.mean(peak_spacing)
+                
+                # Check decay rates - percussion has fast decay
+                decay_rates = []
+                for peak in peaks:
+                    if peak + 3000 < len(smoothed):  # Ensure we can look 100ms ahead
+                        decay_window = smoothed[peak:peak+3000]
+                        if len(decay_window) > 0 and decay_window[0] > 0:
+                            decay_rate = (decay_window[0] - min(decay_window)) / decay_window[0]
+                            decay_rates.append(decay_rate)
+                
+                avg_decay = np.mean(decay_rates) if decay_rates else 0
+                
+                # Knocking typically has:
+                # - 2-8 peaks
+                # - Average spacing of 0.1-0.5s
+                # - Fast decay (>0.7 relative decay)
+                is_percussion = (
+                    (0.1 < avg_spacing < 0.5) and 
+                    (avg_decay > 0.5) and
+                    (len(peaks) >= 2 and len(peaks) <= 8)
+                )
+                
+                print(f"Percussion analysis: peaks={len(peaks)}, spacing={avg_spacing:.2f}s, decay={avg_decay:.2f}")
+                
+                return is_percussion
+                
+            # Single sharp impact could also be percussion
+            elif len(peaks) == 1:
+                # Check for fast decay after the peak
+                peak = peaks[0]
+                if peak + 3000 < len(smoothed):
+                    decay_window = smoothed[peak:peak+3000]
+                    if len(decay_window) > 0 and decay_window[0] > 0:
+                        decay_rate = (decay_window[0] - min(decay_window)) / decay_window[0]
+                        
+                        print(f"Single peak percussion analysis: decay={decay_rate:.2f}")
+                        
+                        # Fast decay indicates percussion
+                        return decay_rate > 0.7
+            
+            return False
+            
+        except Exception as e:
+            print(f"Error in percussion detection: {e}")
+            return False
+    
+    def _get_percussion_indices(self):
+        """
+        Returns indices of percussion-related categories in the label list.
+        Percussion sounds include knocking, tapping, and similar impact sounds.
+        """
+        percussion_keywords = [
+            'knock', 'tap', 'drum', 'percussion', 'thump', 'impact', 'bang',
+            'hit', 'pound', 'slam', 'clap', 'strike', 'beat'
+        ]
+        
+        indices = []
+        
+        for i, label in enumerate(self.labels):
+            label_lower = label.lower()
+            if any(keyword in label_lower for keyword in percussion_keywords):
+                indices.append(i)
+        
+        return indices
+    
+    def _get_speech_music_indices(self):
+        """Returns indices of speech and music categories in the label list."""
+        speech_music_keywords = ['speech', 'speak', 'voice', 'talk', 'music', 'singing']
+        
+        indices = []
+        
+        for i, label in enumerate(self.labels):
+            label_lower = label.lower()
+            if any(keyword in label_lower for keyword in speech_music_keywords):
+                indices.append(i)
+        
+        return indices
+
     def map_to_homesounds(self, results, threshold=0.2):
         """
         Map PANNs AudioSet labels to homesounds categories.
@@ -1049,7 +1203,7 @@ def predict_with_panns(audio_data, top_k=5, threshold=0.2, map_to_homesounds_for
         boost_other_categories: Whether to boost non-speech/music categories
         
     Returns:
-        List of (label, confidence) tuples
+        List of (label, confidence) tuples or formatted predictions based on map_to_homesounds_format
     """
     try:
         # Check if model is initialized
@@ -1060,25 +1214,28 @@ def predict_with_panns(audio_data, top_k=5, threshold=0.2, map_to_homesounds_for
                 print("ERROR: Failed to initialize PANNs model")
                 return []
         
-        # Simple prediction with error handling
-        try:
-            # Get predictions directly from the model
+        # Get predictions directly from the model with enhanced percussion detection
+        results = panns_inference.predict(
+            audio_data, 
+            top_k=top_k, 
+            threshold=threshold,
+            boost_other_categories=boost_other_categories
+        )
+        
+        # If no results were found, try again with a lower threshold specifically for knocking sounds
+        if not results or len(results) == 0:
+            print("No results found, trying again with lower threshold for percussion sounds")
             results = panns_inference.predict(
                 audio_data, 
                 top_k=top_k, 
-                threshold=threshold,
-                boost_other_categories=boost_other_categories
+                threshold=threshold * 0.5,  # Half the threshold
+                boost_other_categories=True  # Always boost other categories for this retry
             )
-            
-            # Just return the raw predictions - no special processing
-            print(f"PANNs model predictions: {results}")
-            return results
-            
-        except Exception as e:
-            print(f"ERROR in panns_inference.predict: {e}")
-            traceback.print_exc()
-            return []
         
+        print(f"PANNs model predictions: {results}")
+        
+        return results
+            
     except Exception as e:
         print(f"ERROR in predict_with_panns: {e}")
         traceback.print_exc()
