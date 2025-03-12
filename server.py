@@ -149,6 +149,22 @@ def get_ip_addresses():
     
     return ip_list
 
+# Background Thread Function
+def background_thread():
+    """
+    Background thread for handling periodic tasks and keeping the server alive.
+    This is started by socketio and runs continuously in the background.
+    """
+    print("Background thread started")
+    count = 0
+    while True:
+        socketio.sleep(10)  # Sleep for 10 seconds
+        count += 1
+        if count % 6 == 0:  # Every minute
+            # Ping clients to keep connections alive
+            socketio.emit('server_status', {'status': 'alive', 'timestamp': time.time()})
+            print(f"Server heartbeat ping sent (iteration {count})")
+
 # Flask and SocketIO Setup
 async_mode = None
 app = Flask(__name__)
