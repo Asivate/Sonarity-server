@@ -188,56 +188,63 @@ class OnnxModelInference:
         Preprocess audio data for ONNX model inference.
         This function replicates the preprocessing done in PANNsModelInference.
         """
-        # Copy preprocessing steps from PANNsModelInference
-        # Log audio statistics for debugging
-        audio_mean = np.mean(audio_data)
-        audio_std = np.std(audio_data)
-        audio_min = np.min(audio_data)
-        audio_max = np.max(audio_data)
-        audio_abs_max = np.max(np.abs(audio_data))
-        
-        logger.info(f"Audio stats - Mean: {audio_mean:.6f}, Std: {audio_std:.6f}, Min: {audio_min:.6f}, Max: {audio_max:.6f}, Abs Max: {audio_abs_max:.6f}")
+        # Cache audio statistics for debugging once
+        if not hasattr(self, '_log_stats_once'):
+            # Log audio statistics for debugging
+            audio_mean = np.mean(audio_data)
+            audio_std = np.std(audio_data)
+            audio_min = np.min(audio_data)
+            audio_max = np.max(audio_data)
+            audio_abs_max = np.max(np.abs(audio_data))
+            
+            logger.info(f"Audio stats - Mean: {audio_mean:.6f}, Std: {audio_std:.6f}, Min: {audio_min:.6f}, Max: {audio_max:.6f}, Abs Max: {audio_abs_max:.6f}")
+            self._log_stats_once = True
         
         # Check for valid audio data
         if audio_data is None or len(audio_data) == 0:
             logger.error("Empty audio data received")
             raise ValueError("Empty audio data received")
     
-        # Check for non-finite values
+        # Check for non-finite values - use fast numpy operations
         if not np.all(np.isfinite(audio_data)):
             logger.warning("Audio contains non-finite values, fixing...")
             audio_data = np.nan_to_num(audio_data)
         
-        # Normalize audio if needed
-        if np.max(np.abs(audio_data)) > 1.0:
-            logger.info("Normalizing audio...")
-            audio_data = audio_data / np.max(np.abs(audio_data))
+        # Normalize audio efficiently if needed
+        abs_max = np.max(np.abs(audio_data))
+        if abs_max > 1.0:
+            logger.info(f"Normalizing audio (max value: {abs_max:.4f})...")
+            audio_data = audio_data / abs_max
         
         # Make sure audio is long enough (at least 1 second at 32kHz = 32000 samples)
         original_length = len(audio_data)
         if original_length < 32000:
-            logger.warning(f"Audio too short ({original_length} samples), padding to 32000 samples")
-            # If it's very short, repeat the audio to reach minimum length
+            # For very short audio (rare case), use efficient padding
             if original_length < 16000:
-                # Repeat the audio multiple times to reach 32000 samples
+                # Use numpy's repeat function instead of tile for better performance
                 repeat_count = int(np.ceil(32000 / original_length))
-                audio_data = np.tile(audio_data, repeat_count)[:32000]
+                audio_data = np.repeat(audio_data, repeat_count)[:32000]
+                logger.info(f"Padded audio from {original_length} to 32000 samples with repetition")
             else:
-                # Pad with zeros to reach 32000 samples
-                padding = np.zeros(32000 - original_length)
-                audio_data = np.concatenate([audio_data, padding])
+                # Just use zeros padding for longer segments (more common)
+                padded = np.zeros(32000, dtype=np.float32)
+                padded[:original_length] = audio_data
+                audio_data = padded
+                logger.info(f"Padded audio from {original_length} to 32000 samples with zeros")
         
-        # Extract log mel spectrogram features - replicate the logic from PANNsModelInference
-        from panns_model import PANNsModelInference
+        # Extract log mel spectrogram features efficiently
+        # Use cached preprocessor if available
         if not hasattr(self, 'panns_preprocess'):
+            from panns_model import PANNsModelInference
             self.panns_preprocess = PANNsModelInference()
         
         log_mel_spec = self.panns_preprocess.logmel_extract(audio_data)
         
-        # Verify that we have the correct shape for the CNN13 model
+        # Verify and fix shape if needed - create properly sized spectrogram once
         if log_mel_spec.shape != (128, 64):
             logger.warning(f"Fixing spectrogram shape from {log_mel_spec.shape} to (128, 64)")
-            # Create a properly sized spectrogram
+            
+            # Pre-allocate the fixed-size spectrogram
             fixed_spec = np.zeros((128, 64), dtype=np.float32)
             
             # Copy what we can from the original spectrogram
@@ -250,7 +257,6 @@ class OnnxModelInference:
         # Add batch dimension: (time_steps, freq_bins) -> (1, time_steps, freq_bins)
         # ONNX models often expect a specific input shape
         x = np.expand_dims(log_mel_spec, axis=0)
-        logger.info(f"Input array shape: {x.shape}")
         
         return x
     
