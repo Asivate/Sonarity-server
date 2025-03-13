@@ -348,9 +348,9 @@ class PANNsModelInference:
         """
         Initialize the model - load weights, setup device, etc.
         """
-            if self._initialized:
+        if self._initialized:
             print("Model already initialized")
-                return True
+            return True
             
         try:
             print("Initializing PANNs model for inference")
@@ -359,7 +359,7 @@ class PANNsModelInference:
             if torch.cuda.is_available():
                 print("CUDA available - using GPU for inference")
                 self.device = torch.device('cuda')
-                    else:
+            else:
                 print("CUDA not available - using CPU for inference")
                 self.device = torch.device('cpu')
             
@@ -464,7 +464,7 @@ class PANNsModelInference:
             log_mel_spec = librosa.power_to_db(mel_spec, ref=1.0, amin=1e-10, top_db=None)
             
             # Transpose to get (time_steps, n_mels) shape
-                log_mel_spec = log_mel_spec.T
+            log_mel_spec = log_mel_spec.T
             
             # Normalize the spectrogram
             if self.scalar is not None:
@@ -967,9 +967,9 @@ def get_available_labels():
             labels = panns_inference.get_available_labels()
             print(f"Got {len(labels)} labels from panns_inference object")
             if labels and len(labels) > 0:
-            print(f"Sample labels: {labels[:10]}...")
+                print(f"Sample labels: {labels[:10]}...")
                 available_labels = labels
-            return labels
+                return labels
             else:
                 print("No labels returned from panns_inference object")
         
@@ -1188,20 +1188,20 @@ def load_panns_model():
                 checkpoint = torch.load(checkpoint_path, map_location=lambda storage, loc: storage)
                 
                 # Check if it's a dict containing the model state
-            if isinstance(checkpoint, dict):
-                if 'model' in checkpoint:
-                    print("Loading from 'model' key in checkpoint")
-                    panns_model.load_state_dict(checkpoint['model'])
-                elif 'state_dict' in checkpoint:
-                    print("Loading from 'state_dict' key in checkpoint")
-                    panns_model.load_state_dict(checkpoint['state_dict'])
-                else:
+                if isinstance(checkpoint, dict):
+                    if 'model' in checkpoint:
+                        print("Loading from 'model' key in checkpoint")
+                        panns_model.load_state_dict(checkpoint['model'])
+                    elif 'state_dict' in checkpoint:
+                        print("Loading from 'state_dict' key in checkpoint")
+                        panns_model.load_state_dict(checkpoint['state_dict'])
+                    else:
                         print("Using checkpoint directly as state dictionary")
+                        panns_model.load_state_dict(checkpoint)
+                else:
+                    print("Loading direct model weights")
                     panns_model.load_state_dict(checkpoint)
             else:
-                    print("Loading direct model weights")
-                panns_model.load_state_dict(checkpoint)
-                else:
                 # For h5 files
                 print("Loading h5 model file - this may require conversion")
                 
@@ -1214,9 +1214,9 @@ def load_panns_model():
             
             panns_model.eval()
             print("PANNs Cnn13_GMP_64x64 model loaded successfully")
-        is_panns_loaded = True
-        return True
-    except Exception as e:
+            is_panns_loaded = True
+            return True
+        except Exception as e:
             print(f"Error loading PANNs model: {str(e)}")
             traceback.print_exc()
             return False
@@ -1243,8 +1243,8 @@ def predict_with_panns(audio_data, top_k=5, threshold=0.1, map_to_homesounds_for
         # Load the model if it hasn't been loaded yet
         global panns_model, panns_inference
         if panns_model is None or panns_inference is None:
-        success = load_panns_model()
-        if not success:
+            success = load_panns_model()
+            if not success:
                 print("Failed to load PANNs model")
                 return [("Error loading model", 1.0)]
         
@@ -1320,23 +1320,23 @@ def predict_with_panns(audio_data, top_k=5, threshold=0.1, map_to_homesounds_for
                     
                     # Add prediction if score is above threshold or we haven't collected enough
                     if score >= threshold or predictions_collected < top_k:
-                output_dict["output"].append({
+                        output_dict["output"].append({
                             "label": label_name,
-                    "score": score
-                })
+                            "score": score
+                        })
                         predictions_collected += 1
                 
                         # Stop if we have enough predictions above threshold
                         if predictions_collected >= top_k and score < threshold:
-                    break
+                            break
                 else:
                     # Handle the case where idx is out of range
                     if predictions_collected < top_k:
                         label_name = f"Unknown_{idx}"
-            output_dict["output"].append({
+                        output_dict["output"].append({
                             "label": label_name,
-                "score": score
-            })
+                            "score": score
+                        })
                         predictions_collected += 1
             
             # Convert to list of tuples for consistency with other models
