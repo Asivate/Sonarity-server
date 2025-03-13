@@ -37,9 +37,9 @@ try:
     import panns_model_onnx
     OPTIMIZED_MODELS_AVAILABLE = True
     logger.info("Optimized model support is available")
-except ImportError:
+except (ImportError, SyntaxError) as e:
     OPTIMIZED_MODELS_AVAILABLE = False
-    logger.info("Optimized model support is not available")
+    logger.warning(f"Optimized model support is not available: {e}")
 
 # Logging Configuration
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')

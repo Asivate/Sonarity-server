@@ -141,6 +141,17 @@ def prepare_optimized_model(use_onnx=False, use_quantized=False, use_tensorrt=Fa
             logger.error("Cannot use optimization options without model_optimizer.py")
             return model_type, model_path
     
+    # First, ensure dependencies are installed for optimizations
+    if use_onnx or use_quantized or use_tensorrt:
+        try:
+            # Install ONNX and onnxruntime if we're using ONNX models
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "onnx", "onnxruntime", "--no-cache-dir", "--quiet"])
+            logger.info("ONNX dependencies installed successfully")
+        except Exception as e:
+            logger.error(f"Failed to install optimization dependencies: {e}")
+            logger.warning("Falling back to PyTorch model")
+            return model_type, model_path
+    
     # Handle TensorRT
     if use_tensorrt:
         tensorrt_path = os.path.join(MODEL_PATH, TENSORRT_ENGINE)
@@ -153,14 +164,51 @@ def prepare_optimized_model(use_onnx=False, use_quantized=False, use_tensorrt=Fa
             if not os.path.exists(onnx_path):
                 logger.info("ONNX model not found. Creating it...")
                 try:
-                    subprocess.check_call([sys.executable, optimizer_script, "--export-onnx"])
+                    # Run with explicit Python path to ensure proper environment
+                    result = subprocess.run(
+                        [sys.executable, optimizer_script, "--export-onnx"],
+                        capture_output=True,
+                        text=True
+                    )
+                    
+                    # Log the output for debugging
+                    if result.stdout:
+                        logger.info(f"ONNX export output: {result.stdout}")
+                    if result.stderr:
+                        logger.warning(f"ONNX export errors: {result.stderr}")
+                    
+                    # Verify ONNX model was created
+                    if os.path.exists(onnx_path):
+                        logger.info(f"ONNX model created successfully at {onnx_path}")
+                    else:
+                        logger.error("ONNX model creation failed - file not found after export")
+                        return model_type, model_path
+                        
                 except Exception as e:
                     logger.error(f"Failed to create ONNX model: {e}")
                     return model_type, model_path
             
             # Now create TensorRT engine
             try:
-                subprocess.check_call([sys.executable, optimizer_script, "--create-tensorrt"])
+                # Run with explicit Python path to ensure proper environment
+                result = subprocess.run(
+                    [sys.executable, optimizer_script, "--create-tensorrt"],
+                    capture_output=True,
+                    text=True
+                )
+                
+                # Log the output for debugging
+                if result.stdout:
+                    logger.info(f"TensorRT engine creation output: {result.stdout}")
+                if result.stderr:
+                    logger.warning(f"TensorRT engine creation errors: {result.stderr}")
+                    
+                # Verify TensorRT engine was created
+                if os.path.exists(tensorrt_path):
+                    logger.info(f"TensorRT engine created successfully at {tensorrt_path}")
+                else:
+                    logger.error("TensorRT engine creation failed - file not found after creation")
+                    return model_type, model_path
             except Exception as e:
                 logger.error(f"Failed to create TensorRT engine: {e}")
                 return model_type, model_path
@@ -184,14 +232,51 @@ def prepare_optimized_model(use_onnx=False, use_quantized=False, use_tensorrt=Fa
             if not os.path.exists(onnx_path):
                 logger.info("ONNX model not found. Creating it...")
                 try:
-                    subprocess.check_call([sys.executable, optimizer_script, "--export-onnx"])
+                    # Run with explicit Python path to ensure proper environment
+                    result = subprocess.run(
+                        [sys.executable, optimizer_script, "--export-onnx"],
+                        capture_output=True,
+                        text=True
+                    )
+                    
+                    # Log the output for debugging
+                    if result.stdout:
+                        logger.info(f"ONNX export output: {result.stdout}")
+                    if result.stderr:
+                        logger.warning(f"ONNX export errors: {result.stderr}")
+                    
+                    # Verify ONNX model was created
+                    if os.path.exists(onnx_path):
+                        logger.info(f"ONNX model created successfully at {onnx_path}")
+                    else:
+                        logger.error("ONNX model creation failed - file not found after export")
+                        return model_type, model_path
+                        
                 except Exception as e:
                     logger.error(f"Failed to create ONNX model: {e}")
                     return model_type, model_path
             
             # Now create quantized model
             try:
-                subprocess.check_call([sys.executable, optimizer_script, "--quantize"])
+                # Run with explicit Python path to ensure proper environment
+                result = subprocess.run(
+                    [sys.executable, optimizer_script, "--quantize"],
+                    capture_output=True,
+                    text=True
+                )
+                
+                # Log the output for debugging
+                if result.stdout:
+                    logger.info(f"Quantized model creation output: {result.stdout}")
+                if result.stderr:
+                    logger.warning(f"Quantized model creation errors: {result.stderr}")
+                
+                # Verify quantized model was created
+                if os.path.exists(quantized_path):
+                    logger.info(f"Quantized ONNX model created successfully at {quantized_path}")
+                else:
+                    logger.error("Quantized ONNX model creation failed - file not found after creation")
+                    return model_type, model_path
             except Exception as e:
                 logger.error(f"Failed to create quantized model: {e}")
                 return model_type, model_path
@@ -210,7 +295,26 @@ def prepare_optimized_model(use_onnx=False, use_quantized=False, use_tensorrt=Fa
         if not os.path.exists(onnx_path):
             logger.info("ONNX model not found. Creating it...")
             try:
-                subprocess.check_call([sys.executable, optimizer_script, "--export-onnx"])
+                # Run with explicit Python path to ensure proper environment
+                result = subprocess.run(
+                    [sys.executable, optimizer_script, "--export-onnx"],
+                    capture_output=True,
+                    text=True
+                )
+                
+                # Log the output for debugging
+                if result.stdout:
+                    logger.info(f"ONNX export output: {result.stdout}")
+                if result.stderr:
+                    logger.warning(f"ONNX export errors: {result.stderr}")
+                
+                # Verify ONNX model was created
+                if os.path.exists(onnx_path):
+                    logger.info(f"ONNX model created successfully at {onnx_path}")
+                else:
+                    logger.error("ONNX model creation failed - file not found after export")
+                    return model_type, model_path
+                    
             except Exception as e:
                 logger.error(f"Failed to create ONNX model: {e}")
                 return model_type, model_path

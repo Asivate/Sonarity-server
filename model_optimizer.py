@@ -27,6 +27,7 @@ import numpy as np
 import torch
 import traceback
 from pathlib import Path
+import subprocess
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -46,14 +47,24 @@ except ImportError:
     MODEL_FN = "Cnn13_GMP_64x64_520000_iterations_mAP=0.42.pth"
     SAMPLE_RATE = 32000
 
-# Check for ONNX
+# Check for ONNX - try to install if not available
 try:
     import onnx
     import onnxruntime as ort
+    logger.info(f"ONNX version: {onnx.__version__}, ONNX Runtime version: {ort.__version__}")
     ONNX_AVAILABLE = True
 except ImportError:
+    logger.warning("ONNX or ONNX Runtime not found. Attempting to install...")
     ONNX_AVAILABLE = False
-    logger.warning("ONNX Runtime not available. Install with: pip install onnx onnxruntime")
+    try:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "onnx", "onnxruntime"])
+        import onnx
+        import onnxruntime as ort
+        logger.info(f"Successfully installed ONNX (version: {onnx.__version__}) and ONNX Runtime (version: {ort.__version__})")
+        ONNX_AVAILABLE = True
+    except Exception as e:
+        logger.error(f"Failed to install ONNX and ONNX Runtime: {e}")
+        logger.error("You can manually install them with: pip install onnx onnxruntime")
 
 # Check for TensorRT 
 try:

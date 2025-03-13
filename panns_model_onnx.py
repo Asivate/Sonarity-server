@@ -504,13 +504,19 @@ def create_inference_engine(model_type=None, model_path=None):
     else:
         # Fall back to PyTorch inference
         logger.info(f"Creating PyTorch inference engine with model: {model_path}")
-        from panns_model import panns_inference, load_panns_model
+        from panns_model import panns_inference, load_panns_model, MODEL_FN as PYTORCH_MODEL_FN
         
         # Set custom model path if provided
-        if model_path and model_path != MODEL_FN:
+        if model_path:
+            # Use the provided model path
+            logger.info(f"Using custom model path: {model_path}")
             # Update model path in panns_model
             global MODEL_FN
             MODEL_FN = model_path
+        else:
+            # Use the default model path from panns_model
+            MODEL_FN = PYTORCH_MODEL_FN
+            logger.info(f"Using default model path: {MODEL_FN}")
         
         # Load the model
         if not load_panns_model():
