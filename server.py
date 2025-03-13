@@ -508,7 +508,11 @@ def handle_audio(data):
             if 'format' in data:
                 audio_format = data['format']
             if 'db' in data:
-                db_level = data['db']
+                try:
+                    db_level = float(data['db'])
+                except (ValueError, TypeError):
+                    log_status(f"Warning: Could not convert db value '{data['db']}' to float", "warning")
+                    db_level = None
             if 'timestamp' in data:
                 timestamp = data['timestamp']
             elif 'time' in data:
@@ -690,6 +694,14 @@ def process_audio_with_panns(audio_data, timestamp=None, db_level=None, config=N
     db_level_threshold = config.get('db_level_threshold', DBLEVEL_THRES)
     prediction_threshold = config.get('prediction_threshold', 0.01)  # Lowered to 0.01
     
+    # Convert db_level to float if it's a string or any other type
+    if db_level is not None:
+        try:
+            db_level = float(db_level)
+        except (ValueError, TypeError):
+            print(f"Warning: Could not convert db_level '{db_level}' to float")
+            db_level = 0.0
+    
     # Check for silence
     if db_level is not None and db_level < silence_threshold:
         print(f"Audio level ({db_level}) below silence threshold ({silence_threshold})")
@@ -736,7 +748,14 @@ def emit_prediction(predictions, db_level, timestamp=None):
     """
     # Set default values if None is provided
     if db_level is None:
-        db_level = -100  # Default low dB level
+        db_level = -100.0  # Default low dB level
+    else:
+        # Ensure db_level is a float
+        try:
+            db_level = float(db_level)
+        except (ValueError, TypeError):
+            print(f"Warning: Could not convert db_level '{db_level}' to float in emit_prediction")
+            db_level = -100.0
     
     if timestamp is None:
         timestamp = time.time() * 1000  # Current time in milliseconds
