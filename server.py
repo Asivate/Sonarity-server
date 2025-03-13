@@ -32,6 +32,15 @@ from sentiment_analyzer import analyze_sentiment
 from speech_to_text import transcribe_audio, SpeechToText
 from google_speech import transcribe_with_google, GoogleSpeechToText
 
+# Try to import optimized model support
+try:
+    import panns_model_onnx
+    OPTIMIZED_MODELS_AVAILABLE = True
+    logger.info("Optimized model support is available")
+except ImportError:
+    OPTIMIZED_MODELS_AVAILABLE = False
+    logger.info("Optimized model support is not available")
+
 # Logging Configuration
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -242,11 +251,14 @@ EMOTION_GROUPS = {
 speech_processor = SpeechToText()
 google_speech_processor = None
 
-def load_models():
-    """Load all required models for sound recognition and speech processing."""
-    global models, USE_PANNS_MODEL
-    
-    models = {"panns": None}
+def initialize_models():
+    """Initialize all enabled models."""
+    models = {
+        "panns": False,
+        "whisper": False,
+        "google_speech": False,
+        "sentiment": False
+    }
     
     USE_PANNS_MODEL = os.environ.get('USE_PANNS_MODEL', '1') == '1'
     
@@ -258,9 +270,30 @@ def load_models():
 
     if USE_PANNS_MODEL:
         print("Loading PANNs model...")
-        panns_model.load_panns_model()
-        models["panns"] = True
-        print("PANNs model loaded successfully")
+        
+        # Check if we should use optimized models
+        model_type = os.environ.get('PANNS_MODEL_TYPE', 'pytorch').lower()
+        model_path = os.environ.get('PANNS_MODEL_PATH', None)
+        
+        if model_type != 'pytorch' and OPTIMIZED_MODELS_AVAILABLE:
+            # Use optimized model
+            print(f"Using optimized model type: {model_type}")
+            inference_engine = panns_model_onnx.create_inference_engine(model_type, model_path)
+            if inference_engine is not None:
+                # Replace the global panns_inference with our optimized version
+                panns_model.panns_inference = inference_engine
+                models["panns"] = True
+                print(f"Optimized {model_type} model loaded successfully")
+            else:
+                # Fall back to PyTorch model
+                print(f"Failed to load optimized {model_type} model, falling back to PyTorch")
+                panns_model.load_panns_model()
+                models["panns"] = True
+        else:
+            # Use standard PyTorch model
+            panns_model.load_panns_model()
+            models["panns"] = True
+            print("PANNs model loaded successfully")
 
 # Audio Processing Functions
 def audio_samples(in_data, frame_count, time_info, status_flags):
@@ -698,228 +731,59 @@ def process_audio_with_panns(audio_data, db_level=None, timestamp=None, config=N
         }
         log_audio_stats(audio_stats)
         
-        # Fix NaN or Inf values if present
-        if np.any(np.isnan(audio_data)) or np.any(np.isinf(audio_data)):
-            log_status("Audio contains NaN or Inf values, fixing...", "warning")
+        # Check for NaN or Inf values
+        if np.isnan(audio_data).any():
+            audio_stats['has_nan'] = True
+            log_status("Warning: Audio contains NaN values, fixing...", "warning")
+            audio_data = np.nan_to_num(audio_data)
+        
+        if np.isinf(audio_data).any():
+            audio_stats['has_inf'] = True
+            log_status("Warning: Audio contains Inf values, fixing...", "warning")
             audio_data = np.nan_to_num(audio_data)
         
         # Calculate dB level if not provided
         if db_level is None:
-            rms = np.sqrt(np.mean(np.square(audio_data)))
-            db_level = dbFS(rms)
-            log_status(f"Calculated dB level: {db_level:.2f}", "info")
+            db_level = dbFS(audio_data)
         
-        # Check for silence
-        if db_level < silence_threshold:
-            log_status(f"Sound is silence (dB: {db_level:.2f}, threshold: {silence_threshold})", "info")
-            emit_prediction([("Silence", 0.95)], db_level, timestamp)
-            return
-            
-        # Check if sound is too quiet
+        # Check if audio is too quiet
         if db_level < db_level_threshold:
-            log_status(f"Sound too quiet (dB: {db_level:.2f}, threshold: {db_level_threshold})", "info")
-            emit_prediction([("Too Quiet", 0.90)], db_level, timestamp)
+            log_status(f"Audio too quiet: {db_level:.2f} dB < {db_level_threshold} dB threshold", "warning")
+            emit_prediction([("Silence", 1.0)], db_level, timestamp)
             return
         
-        # Sound level is good, proceed with PANNs model
-        log_status(f"Sound level ({db_level:.2f} dB) within processing range", "success")
-        
-        # Handle audio buffer size - PANNs expects 32000 samples (1 second @ 32kHz)
-        audio_length = len(audio_data)
-        if audio_length < MINIMUM_AUDIO_LENGTH:
-            # Pad with zeros if too short
-            log_status(f"Padding short audio: {audio_length} → {MINIMUM_AUDIO_LENGTH} samples", "info")
-            padding = np.zeros(MINIMUM_AUDIO_LENGTH - audio_length, dtype=np.float32)
-            audio_data = np.concatenate([audio_data, padding])
-        elif audio_length > MINIMUM_AUDIO_LENGTH:
-            # Trim if too long - use most recent samples
-            log_status(f"Trimming long audio: {audio_length} → {MINIMUM_AUDIO_LENGTH} samples", "info")
-            audio_data = audio_data[-MINIMUM_AUDIO_LENGTH:]
-        
-        # Normalize audio to [-1.0, 1.0] range if needed
-        if np.max(np.abs(audio_data)) > 1.0:
-            audio_data = audio_data / np.max(np.abs(audio_data))
-            log_status("Normalized audio to [-1.0, 1.0] range", "info")
-        
-        # Add preprocessing step to detect knocking sounds in the time domain
-        # This can be more reliable than spectral analysis for percussive sounds
-        has_knocking_pattern = False
-        try:
-            from scipy.signal import find_peaks
-            
-            # Get the envelope of the audio signal
-            envelope = np.abs(audio_data)
-            
-            # Smooth the envelope to reduce noise
-            window_size = 320  # About 10ms at 32kHz
-            smoothed = np.convolve(envelope, np.ones(window_size)/window_size, mode='same')
-            
-            # Find peaks in the envelope
-            peaks, peak_props = find_peaks(
-                smoothed, 
-                height=0.15*np.max(smoothed),  # Increased threshold to detect only stronger knocks
-                distance=500,  # Minimum distance between peaks
-                prominence=0.2*np.max(smoothed)  # Increased prominence to ensure peaks stand out more
+        # Check if we're using the optimized model
+        model_type = os.environ.get('PANNS_MODEL_TYPE', 'pytorch').lower()
+        if model_type != 'pytorch' and OPTIMIZED_MODELS_AVAILABLE:
+            # Use optimized prediction function
+            predictions = panns_model_onnx.predict_with_optimized_model(
+                audio_data, 
+                top_k=10, 
+                threshold=silence_threshold,
+                boost_other_categories=True
             )
-            
-            # Calculate peak decay rate (important for percussive sounds)
-            peak_decay = 0.0
-            if len(peaks) > 0:
-                peak_heights = smoothed[peaks]
-                if len(peaks) > 1:
-                    peak_spacing = np.diff(peaks) / 32000  # Convert to seconds
-                    avg_spacing = np.mean(peak_spacing)
-                    
-                    # Calculate consistency of spacing
-                    std_spacing = np.std(peak_spacing)
-                    spacing_consistency = std_spacing / avg_spacing if avg_spacing > 0 else 999
-                    
-                    # Calculate decay rate (how quickly sound fades after peaks)
-                    if len(peaks) >= 2:
-                        decay_windows = []
-                        for i in range(len(peaks)-1):
-                            start_idx = peaks[i]
-                            end_idx = min(peaks[i+1], start_idx + 3200)  # Look at 100ms after peak
-                            if start_idx < end_idx:
-                                segment = smoothed[start_idx:end_idx]
-                                if len(segment) > 0 and segment[0] > 0:
-                                    decay_rate = 1.0 - (segment[-1] / segment[0])
-                                    decay_windows.append(decay_rate)
-                        
-                        peak_decay = np.mean(decay_windows) if decay_windows else 0.0
-                    
-                    print(f"Percussion details: peaks={len(peaks)}, spacing={avg_spacing:.2f}s, consistency={spacing_consistency:.2f}, decay={peak_decay:.2f}")
-                    
-                    # Make the knocking pattern detection more strict
-                    if ((0.05 < avg_spacing < 0.3) and spacing_consistency < 0.4 and peak_decay > 0.6) or \
-                       ((0.05 < avg_spacing < 0.2) and len(peaks) >= 3 and spacing_consistency < 0.3 and peak_decay > 0.5):
-                        has_knocking_pattern = True
-                        print("PERCUSSION DETECTED: Strong evidence of knock/tap sound in time domain analysis")
-                elif len(peaks) == 1:
-                    # Single peak analysis - make more strict
-                    start_idx = peaks[0]
-                    end_idx = min(start_idx + 3200, len(smoothed) - 1)
-                    if start_idx < end_idx:
-                        segment = smoothed[start_idx:end_idx]
-                        if len(segment) > 0 and segment[0] > 0:
-                            peak_decay = 1.0 - (segment[-1] / segment[0])
-                    
-                    print(f"Single peak percussion analysis: decay={peak_decay:.2f}, height={peak_heights[0]}")
-                    # More strict threshold for single peaks
-                    if peak_decay > 0.85 and peak_heights[0] > 0.4*np.max(smoothed):
-                        has_knocking_pattern = True
-                        print("PERCUSSION DETECTED: Strong evidence of knock/tap sound in time domain analysis")
-                
-            if has_knocking_pattern:
-                # Search for available percussion-related labels
-                available_labels = []
-                try:
-                    available_labels = panns_model.get_labels()
-                    if available_labels:
-                        knock_labels = [(i, label) for i, label in enumerate(available_labels) 
-                                     if any(keyword in label.lower() for keyword in 
-                                           ['knock', 'tap', 'thump', 'bang', 'drum', 'percussion'])]
-                        print(f"Total available labels: {len(available_labels)}")
-                        print(f"Found {len(knock_labels)} knock-related labels: {knock_labels}")
-                except Exception as e:
-                    print(f"Error getting available labels: {e}")
-        except Exception as e:
-            print(f"Error in time domain knocking detection: {e}")
+        else:
+            # Use standard prediction function
+            predictions = panns_model.predict_with_panns(
+                audio_data, 
+                top_k=10, 
+                threshold=silence_threshold,
+                boost_other_categories=True
+            )
         
-        # Run prediction with PANNs model
-        log_status(f"Running PANNs prediction with threshold: {prediction_threshold:.2f}", "info")
+        # Log the predictions
+        log_prediction(predictions, db_level)
         
-        try:
-            with panns_model_lock:
-                # Get detailed stats about the audio for debugging
-                audio_std = np.std(audio_data)
-                audio_abs_max = np.max(np.abs(audio_data))
-                print(f"Audio stats - Mean: {np.mean(audio_data):.6f}, Std: {audio_std:.6f}, Min: {np.min(audio_data):.6f}, Max: {np.max(audio_data):.6f}, Abs Max: {audio_abs_max:.6f}")
-                
-                # Lower the threshold for percussion sounds to improve detection
-                effective_threshold = prediction_threshold * 0.5 if has_knocking_pattern else prediction_threshold
-                
-                # Get raw predictions from the PANNs model
-                predictions = panns_model.predict_with_panns(
-                    audio_data, 
-                    top_k=20,  # Get more predictions to have a wider selection
-                    threshold=effective_threshold,
-                    map_to_homesounds_format=False  # Use raw AudioSet labels
-                )
-                
-                # Log the raw model output
-                if predictions and isinstance(predictions, list):
-                    # Already have a list of tuples (label, score)
-                    predictions_list = predictions
-                    print(f"PANNs prediction results: {predictions_list[:5]}")
-                    
-                    # Check if there are any percussion-related labels
-                    percussion_labels = [pred for pred in predictions_list 
-                                       if any(keyword in pred[0].lower() for keyword in 
-                                           ['knock', 'tap', 'thump', 'bang', 'drum', 'percussion'])]
-                    
-                    if has_knocking_pattern and not percussion_labels:
-                        print("Percussive sound detected, using lower threshold for percussion sounds")
-                        # Try again with much lower threshold to catch percussion sounds
-                        retry_predictions = panns_model.predict_with_panns(
-                            audio_data, 
-                            top_k=40,  # Try more predictions
-                            threshold=0.01,  # Much lower threshold
-                            map_to_homesounds_format=False
-                        )
-                        
-                        if retry_predictions and isinstance(retry_predictions, list):
-                            retry_list = retry_predictions
-                            print(f"Preliminary predictions with low threshold: {retry_list[:5]}")
-                            
-                            # Look for percussion labels in retried predictions
-                            percussion_labels = [pred for pred in retry_list 
-                                             if any(keyword in pred[0].lower() for keyword in 
-                                                ['knock', 'tap', 'thump', 'bang', 'drum', 'percussion'])]
-                    
-                    # MODIFIED: Use the highest confidence predictions, regardless of whether they're percussion
-                    final_predictions = []
-                    
-                    # Filter out low confidence predictions
-                    final_predictions = [pred for pred in predictions_list if pred[1] > prediction_threshold]
-                    
-                    # Only include percussion labels if they have a reasonable confidence level
-                    MIN_PERCUSSION_CONFIDENCE = 0.08  # Set a minimum threshold for percussion sounds
-                    
-                    # If we have strong time-domain evidence of knocking and found percussion labels
-                    # add the highest confidence percussion label if it's not already in the list and meets the minimum confidence
-                    if has_knocking_pattern and percussion_labels:
-                        percussion_labels.sort(key=lambda x: x[1], reverse=True)
-                        best_percussion = percussion_labels[0]
-                        print(f"Best percussion label from model: {best_percussion}")
-                        
-                        # Only add the percussion label if it's not already in the list AND has reasonable confidence
-                        if best_percussion not in final_predictions and best_percussion[1] >= MIN_PERCUSSION_CONFIDENCE:
-                            print(f"Adding percussion label to final predictions: {best_percussion}")
-                            final_predictions.append(best_percussion)
-                        elif best_percussion[1] < MIN_PERCUSSION_CONFIDENCE:
-                            print(f"Ignoring low confidence percussion label: {best_percussion}")
-                    
-                    # If everything is low confidence but we have some predictions
-                    if not final_predictions and predictions_list:
-                        # Take the highest confidence prediction regardless of threshold
-                        final_predictions.append(predictions_list[0])
-                    
-                    print(f"Final predictions: {final_predictions}")
-                    emit_prediction(final_predictions, db_level, timestamp)
-                else:
-                    log_status("No predictions returned from model", "warning")
-                    emit_prediction([("No Sound Detected", 0.8)], db_level, timestamp)
-                
-        except Exception as e:
-            log_status(f"Error in PANNs prediction: {str(e)}", "error")
-            traceback.print_exc()
-            emit_prediction([("Prediction Error", 1.0)], db_level, timestamp)
-            
+        # Emit the prediction
+        emit_prediction(predictions, db_level, timestamp)
+        
+        # Clean up memory
+        cleanup_memory()
+        
     except Exception as e:
-        log_status(f"Error processing audio: {str(e)}", "error")
+        log_status(f"Error processing audio with PANNs: {e}", "error")
         traceback.print_exc()
-        emit_prediction([("Processing Error", 1.0)], db_level, timestamp)
+        emit_prediction([("Error Processing Audio", 0.0)], db_level, timestamp)
 
 def emit_prediction(predictions, db_level, timestamp=None):
     """
@@ -1247,7 +1111,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
     
     print("=====\nSetting up sound recognition models...")
-    load_models()
+    initialize_models()
     
     with thread_lock:
         if thread is None:
