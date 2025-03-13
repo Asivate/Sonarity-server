@@ -561,6 +561,13 @@ def handle_audio(data):
         if db_level is None:
             rms = np.sqrt(np.mean(np.square(audio_data)))
             db_level = dbFS(rms)
+        else:
+            # Ensure db_level is a float
+            try:
+                db_level = float(db_level)
+            except (ValueError, TypeError):
+                print(f"Warning: Could not convert db_level '{db_level}' to float in handle_audio")
+                db_level = -100.0
         
         # Log audio statistics for debugging
         print("\nAUDIO STATS:")
@@ -576,7 +583,11 @@ def handle_audio(data):
         
         # Process the audio with our model directly without buffering 
         # (since the client now sends the correct size)
-        process_audio_with_panns(audio_data, db_level, timestamp)
+        result = process_audio_with_panns(audio_data, timestamp, db_level)
+        
+        # Emit the prediction result to all connected clients
+        print(f"Emitting prediction from handle_audio: {result}")
+        socketio.emit('prediction', result, broadcast=True)
         
     except Exception as e:
         log_status(f"Error in handle_audio: {str(e)}", "error")
