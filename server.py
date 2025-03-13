@@ -26,6 +26,10 @@ from transformers import pipeline
 import logging
 import json
 
+# Logging Configuration
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
 # Custom Imports
 import panns_model
 from sentiment_analyzer import analyze_sentiment
@@ -40,10 +44,6 @@ try:
 except (ImportError, SyntaxError) as e:
     OPTIMIZED_MODELS_AVAILABLE = False
     logger.warning(f"Optimized model support is not available: {e}")
-
-# Logging Configuration
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
 
 # Terminal Color Definitions
 class TermColors:

@@ -94,7 +94,20 @@ def load_model(model_path=None):
     try:
         # Import PANNs inference code here to avoid circular imports
         import torch
-        from panns_inference.models import Cnn14, Cnn10, Cnn14_DecisionLevelMax
+        # Try to import models with error handling for missing classes
+        try:
+            from panns_inference.models import Cnn14, Cnn14_DecisionLevelMax
+            # Check if Cnn10 is available
+            try:
+                from panns_inference.models import Cnn10
+                have_cnn10 = True
+            except ImportError:
+                have_cnn10 = False
+                logger.warning("Cnn10 model is not available in panns_inference.models, will use Cnn14 instead")
+        except ImportError as e:
+            logger.error(f"Failed to import from panns_inference.models: {e}")
+            logger.info("Will use a built-in CNN model implementation")
+            return None
         
         # Detect device
         device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
@@ -120,7 +133,7 @@ def load_model(model_path=None):
                            classes_num=527)
                 model.load_state_dict(checkpoint)
                 logger.info("Created CNN13/14 model and loaded state dict")
-            elif 'cnn10' in model_path.lower():
+            elif 'cnn10' in model_path.lower() and have_cnn10:
                 model = Cnn10(sample_rate=SAMPLE_RATE, 
                            window_size=1024, 
                            hop_size=320, 
