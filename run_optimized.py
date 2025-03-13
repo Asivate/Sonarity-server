@@ -364,9 +364,6 @@ def main():
     parser.add_argument("--tensorrt", action="store_true", help="Use TensorRT engine for inference")
     parser.add_argument("--benchmark", action="store_true", help="Run a benchmark before starting the server")
     parser.add_argument("--cleanup", action="store_true", help="Remove temporary files after server exits")
-    parser.add_argument("--memory-optimization", type=int, choices=[0, 1, 2], default=1, 
-                        help="Memory optimization level (0=None, 1=Moderate, 2=Aggressive)")
-    parser.add_argument("--port", type=int, default=8080, help="Port to run the server on")
     
     args = parser.parse_args()
     
@@ -378,10 +375,6 @@ def main():
     # Log system information
     logger.info(f"Python version: {sys.version}")
     logger.info(f"Operating system: {platform.system()} {platform.version()}")
-    
-    # Set memory optimization
-    os.environ["MEMORY_OPTIMIZATION"] = str(args.memory_optimization)
-    logger.info(f"Memory optimization level: {args.memory_optimization}")
     
     # Check if the directory structure is correct
     if not os.path.exists(SCRIPT_DIR):
@@ -410,18 +403,12 @@ def main():
         return 1
     
     # Prepare optimized model
-    try:
-        model_type, model_path = prepare_optimized_model(
-            use_onnx=args.onnx,
-            use_quantized=args.quantized,
-            use_tensorrt=args.tensorrt,
-            run_benchmark=args.benchmark
-        )
-    except Exception as e:
-        logger.error(f"Error preparing optimized model: {e}")
-        logger.info("Falling back to PyTorch model")
-        model_type = "pytorch"
-        model_path = os.path.join(MODEL_PATH, PYTORCH_MODEL)
+    model_type, model_path = prepare_optimized_model(
+        use_onnx=args.onnx,
+        use_quantized=args.quantized,
+        use_tensorrt=args.tensorrt,
+        run_benchmark=args.benchmark
+    )
     
     # Set environment variables
     os.environ["USE_PANNS_MODEL"] = "1"
@@ -430,13 +417,6 @@ def main():
     
     logger.info(f"Using model type: {model_type}")
     logger.info(f"Model path: {model_path}")
-    
-    # Create a health check file to indicate server is starting
-    health_file = os.path.join(SCRIPT_DIR, ".server_starting")
-    with open(health_file, "w") as f:
-        f.write(f"Starting server at {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
-        f.write(f"Model type: {model_type}\n")
-        f.write(f"Model path: {model_path}\n")
     
     # Countdown to server start
     logger.info("Starting SoundWatch server in:")
@@ -451,19 +431,8 @@ def main():
         # Change to the server directory
         os.chdir(SCRIPT_DIR)
         
-        # Remove health check file
-        if os.path.exists(health_file):
-            os.remove(health_file)
-            
-        # Create a health check file to indicate server is running
-        with open(os.path.join(SCRIPT_DIR, ".server_running"), "w") as f:
-            f.write(f"Server started at {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
-            f.write(f"Model type: {model_type}\n")
-            f.write(f"Model path: {model_path}\n")
-        
-        # Run the server with port
-        server_cmd = [sys.executable, "server.py", "--port", str(args.port)]
-        subprocess.check_call(server_cmd)
+        # Run the server
+        subprocess.check_call([sys.executable, "server.py"])
         
     except KeyboardInterrupt:
         logger.info("Server stopped by user")
@@ -471,10 +440,6 @@ def main():
         logger.error(f"Error running server: {e}")
         return 1
     finally:
-        # Remove health check file
-        if os.path.exists(os.path.join(SCRIPT_DIR, ".server_running")):
-            os.remove(os.path.join(SCRIPT_DIR, ".server_running"))
-            
         # Clean up if requested
         if args.cleanup:
             logger.info("Cleaning up temporary files...")

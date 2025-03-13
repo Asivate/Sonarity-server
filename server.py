@@ -56,7 +56,6 @@ class TermColors:
     ENDC = '\033[0m'
     BOLD = '\033[1m'
     UNDERLINE = '\033[4m'
-    PURPLE = '\033[95m'
 
 # Logging Functions
 def log_audio_receive(data_type, length, timestamp, db):
@@ -78,28 +77,8 @@ def log_audio_stats(stats):
         print(f"  {TermColors.RED}WARNING:{TermColors.ENDC} Contains NaN: {stats.get('has_nan', False)}, Inf: {stats.get('has_inf', False)}")
 
 def log_prediction(prediction, db_level):
-    """Format log for prediction results with categorization"""
-    try:
-        from soundwatch_config import get_label_categories, PREDICTION_THRES, SILENCE_THRES
-    except ImportError:
-        # Fallback if config module not available
-        PREDICTION_THRES = 0.10
-        SILENCE_THRES = -60
-        def get_label_categories():
-            return {
-                "Percussion": ['knock', 'tap', 'thump', 'bang', 'drum', 'percussion'],
-                "Speech": ['speech', 'voice', 'talking', 'spoken'],
-                "Music": ['music', 'song', 'singing', 'musical'],
-                "Animal": ['animal', 'dog', 'cat', 'bird', 'bark'],
-                "Alert": ['alarm', 'siren', 'alert', 'beep', 'horn'],
-                "Mechanical": ['engine', 'motor', 'machine', 'mechanical'],
-                "Household": ['kitchen', 'vacuum', 'microwave', 'door', 'bell']
-            }
-    
+    """Format log for prediction results"""
     print(f"\n{TermColors.GREEN}PREDICTION RESULT:{TermColors.ENDC}")
-    
-    # Normalize prediction to standard format
-    predictions_list = []
     
     # Check if prediction is already a dictionary with 'predictions' key
     if isinstance(prediction, dict) and 'predictions' in prediction:
@@ -110,79 +89,22 @@ def log_prediction(prediction, db_level):
     # Check if prediction is a list of tuples (label, score)
     elif isinstance(prediction, list) and all(isinstance(p, tuple) and len(p) == 2 for p in prediction):
         # Convert tuples to dictionaries
-        predictions_list = [{'label': p[0], 'score': float(p[1])} for p in prediction]
+        predictions_list = [{'label': p[0], 'score': p[1]} for p in prediction]
     else:
         # Fallback for unknown format
         print(f"  {TermColors.RED}WARNING:{TermColors.ENDC} Unknown prediction format: {prediction}")
         return
     
-    # Filter predictions below threshold
-    valid_predictions = [
-        p for p in predictions_list
-        if (isinstance(p, dict) and float(p.get('score', 0)) >= PREDICTION_THRES)
-    ]
-    
-    # Exit early if we have no predictions above threshold
-    if not valid_predictions:
-        print(f"  {TermColors.BLUE}No predictions above threshold ({PREDICTION_THRES}){TermColors.ENDC}")
-        print(f"  {TermColors.BLUE}dB Level:{TermColors.ENDC} {db_level:.2f} {'(silence)' if db_level < SILENCE_THRES else ''}")
-        print(f"{TermColors.HEADER}{'-'*80}{TermColors.ENDC}\n")
-        return
-    
-    # Organize predictions by category
-    categories = get_label_categories()
-    categorized_preds = {}
-    uncategorized_preds = []
-    
-    # Populate categories with matching predictions
-    for pred in valid_predictions:
-        pred_label = pred['label'].lower()
-        pred_score = float(pred['score'])
-        
-        # Find matching category
-        category_found = False
-        for category, keywords in categories.items():
-            if any(keyword in pred_label for keyword in keywords):
-                if category not in categorized_preds:
-                    categorized_preds[category] = []
-                categorized_preds[category].append((pred_label, pred_score))
-                category_found = True
-                break
-        
-        # If no category matches, add to uncategorized
-        if not category_found:
-            uncategorized_preds.append((pred_label, pred_score))
-    
-    # Print top 3 predictions regardless of category
-    top_preds = sorted(valid_predictions, key=lambda p: float(p['score']), reverse=True)[:3]
-    if top_preds:
-        print(f"  {TermColors.BOLD}{TermColors.PURPLE}TOP PREDICTIONS:{TermColors.ENDC}")
-        for pred in top_preds:
+    # Now log each prediction
+    for pred in predictions_list:
+        if isinstance(pred, dict):
             label = pred.get('label', 'Unknown')
             score = float(pred.get('score', 0))
             print(f"  {TermColors.BOLD}{label}:{TermColors.ENDC} {score:.2f}")
+        else:
+            print(f"  {TermColors.BOLD}Unknown format:{TermColors.ENDC} {pred}")
     
-    # Print categorized predictions
-    for category, preds in categorized_preds.items():
-        if preds:
-            # Sort by confidence
-            sorted_preds = sorted(preds, key=lambda p: p[1], reverse=True)
-            print(f"\n  {TermColors.YELLOW}{category.upper()} DETECTED:{TermColors.ENDC}")
-            for label, score in sorted_preds[:3]:  # Print top 3 per category
-                print(f"  {TermColors.BOLD}{label}:{TermColors.ENDC} {score:.2f}")
-    
-    # Print uncategorized predictions (if any and not already in top 3)
-    top_pred_labels = {p['label'].lower() for p in top_preds}
-    remaining_uncategorized = [(l, s) for l, s in uncategorized_preds if l not in top_pred_labels]
-    
-    if remaining_uncategorized:
-        print(f"\n  {TermColors.BLUE}OTHER SOUNDS:{TermColors.ENDC}")
-        sorted_uncategorized = sorted(remaining_uncategorized, key=lambda p: p[1], reverse=True)
-        for label, score in sorted_uncategorized[:3]:  # Print top 3 uncategorized
-            print(f"  {TermColors.BOLD}{label}:{TermColors.ENDC} {score:.2f}")
-    
-    # Always print dB level
-    print(f"\n  {TermColors.BLUE}dB Level:{TermColors.ENDC} {db_level:.2f} {'(silence)' if db_level < SILENCE_THRES else ''}")
+    print(f"  {TermColors.BLUE}dB Level:{TermColors.ENDC} {db_level:.2f}")
     print(f"{TermColors.HEADER}{'-'*80}{TermColors.ENDC}\n")
 
 def log_status(message, status="info"):
@@ -331,25 +253,6 @@ google_speech_processor = None
 
 def initialize_models():
     """Initialize all enabled models."""
-    try:
-        # Try to import from centralized config
-        from soundwatch_config import (
-            ENV_USE_PANNS_MODEL, ENV_PANNS_MODEL_TYPE, ENV_PANNS_MODEL_PATH,
-            get_model_type, get_model_path, print_config_summary
-        )
-        # Print configuration summary
-        print_config_summary()
-    except ImportError:
-        # Fallback if config module not found
-        ENV_USE_PANNS_MODEL = "USE_PANNS_MODEL"
-        ENV_PANNS_MODEL_TYPE = "PANNS_MODEL_TYPE"
-        ENV_PANNS_MODEL_PATH = "PANNS_MODEL_PATH"
-        def get_model_type():
-            return os.environ.get(ENV_PANNS_MODEL_TYPE, 'pytorch').lower()
-        def get_model_path():
-            return os.environ.get(ENV_PANNS_MODEL_PATH, None)
-        print("Using fallback configuration (soundwatch_config not found)")
-    
     models = {
         "panns": False,
         "whisper": False,
@@ -357,7 +260,7 @@ def initialize_models():
         "sentiment": False
     }
     
-    USE_PANNS_MODEL = os.environ.get(ENV_USE_PANNS_MODEL, '1') == '1'
+    USE_PANNS_MODEL = os.environ.get('USE_PANNS_MODEL', '1') == '1'
     
     print(f"PANNs model {'enabled' if USE_PANNS_MODEL else 'disabled'} based on environment settings")
     
@@ -369,10 +272,10 @@ def initialize_models():
         print("Loading PANNs model...")
         
         # Check if we should use optimized models
-        model_type = get_model_type()
-        model_path = get_model_path()
+        model_type = os.environ.get('PANNS_MODEL_TYPE', 'pytorch').lower()
+        model_path = os.environ.get('PANNS_MODEL_PATH', None)
         
-        if model_type != 'pytorch' and 'OPTIMIZED_MODELS_AVAILABLE' in globals() and OPTIMIZED_MODELS_AVAILABLE:
+        if model_type != 'pytorch' and OPTIMIZED_MODELS_AVAILABLE:
             # Use optimized model
             print(f"Using optimized model type: {model_type}")
             inference_engine = panns_model_onnx.create_inference_engine(model_type, model_path)
@@ -391,8 +294,6 @@ def initialize_models():
             panns_model.load_panns_model()
             models["panns"] = True
             print("PANNs model loaded successfully")
-    
-    return models
 
 # Audio Processing Functions
 def audio_samples(in_data, frame_count, time_info, status_flags):
@@ -791,27 +692,8 @@ def process_audio_with_panns(audio_data, db_level=None, timestamp=None, config=N
     Returns:
         None - results are emitted via socketio
     """
-    # Try to import config from soundwatch_config
-    try:
-        from soundwatch_config import (
-            SILENCE_THRES, DBLEVEL_THRES, PREDICTION_THRES, 
-            SAMPLE_RATE, get_model_type, ENV_PANNS_MODEL_TYPE
-        )
-        log_status("Using centralized configuration from soundwatch_config", "info")
-    except ImportError:
-        # Fallback to default values if import fails
-        SILENCE_THRES = -60
-        DBLEVEL_THRES = 30
-        PREDICTION_THRES = 0.10
-        SAMPLE_RATE = 32000
-        def get_model_type():
-            return os.environ.get(ENV_PANNS_MODEL_TYPE, "pytorch").lower()
-        ENV_PANNS_MODEL_TYPE = "PANNS_MODEL_TYPE"
-        log_status("Using fallback configuration (soundwatch_config not found)", "warning")
-
     log_status("Processing audio with PANNs model", "info")
     
-    # Use provided config or create default from our imports
     if config is None:
         config = {
             'silence_threshold': SILENCE_THRES,
@@ -845,8 +727,7 @@ def process_audio_with_panns(audio_data, db_level=None, timestamp=None, config=N
             'min': float(np.min(audio_data)),
             'max': float(np.max(audio_data)),
             'mean': float(np.mean(audio_data)),
-            'rms': float(np.sqrt(np.mean(audio_data**2))),
-            'sample_rate': SAMPLE_RATE
+            'rms': float(np.sqrt(np.mean(audio_data**2)))
         }
         log_audio_stats(audio_stats)
         
@@ -864,7 +745,6 @@ def process_audio_with_panns(audio_data, db_level=None, timestamp=None, config=N
         # Calculate dB level if not provided
         if db_level is None:
             db_level = dbFS(audio_data)
-            log_status(f"Calculated dB level: {db_level:.2f}", "info")
         
         # Check if audio is too quiet
         if db_level < db_level_threshold:
@@ -873,23 +753,21 @@ def process_audio_with_panns(audio_data, db_level=None, timestamp=None, config=N
             return
         
         # Check if we're using the optimized model
-        model_type = get_model_type()
-        if model_type != 'pytorch' and 'OPTIMIZED_MODELS_AVAILABLE' in globals() and OPTIMIZED_MODELS_AVAILABLE:
+        model_type = os.environ.get('PANNS_MODEL_TYPE', 'pytorch').lower()
+        if model_type != 'pytorch' and OPTIMIZED_MODELS_AVAILABLE:
             # Use optimized prediction function
-            log_status(f"Using optimized model type: {model_type}", "info")
             predictions = panns_model_onnx.predict_with_optimized_model(
                 audio_data, 
                 top_k=10, 
-                threshold=prediction_threshold,
+                threshold=silence_threshold,
                 boost_other_categories=True
             )
         else:
             # Use standard prediction function
-            log_status(f"Using standard PyTorch model", "info")
             predictions = panns_model.predict_with_panns(
                 audio_data, 
                 top_k=10, 
-                threshold=prediction_threshold,
+                threshold=silence_threshold,
                 boost_other_categories=True
             )
         
@@ -926,6 +804,11 @@ def emit_prediction(predictions, db_level, timestamp=None):
     
     if timestamp is None:
         timestamp = time.time() * 1000  # Current time in milliseconds
+    
+    # Print detailed debugging information
+    print(f"EMITTING PREDICTION: {predictions}")
+    print(f"  dB Level: {db_level}")
+    print(f"  Timestamp: {timestamp}")
     
     # Format the predictions for emission
     formatted_predictions = []
