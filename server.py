@@ -212,9 +212,9 @@ prediction_lock = Lock()
 RATE = 32000
 CHUNK = 1024
 CHANNELS = 1
-SILENCE_THRES = -60
-DBLEVEL_THRES = 30
-PREDICTION_THRES = 0.10
+SILENCE_THRES = -75
+DBLEVEL_THRES = -60
+PREDICTION_THRES = 0.05
 MINIMUM_AUDIO_LENGTH = 32000
 SENTIMENT_THRES = 0.5
 
@@ -678,112 +678,48 @@ def process_with_panns_model(np_wav, record_time=None, db=None):
 # Audio buffer for accumulating enough samples for PANNS model
 panns_audio_buffer = []
 
-def process_audio_with_panns(audio_data, db_level=None, timestamp=None, config=None):
-    """
-    Process audio with PANNs model for sound recognition.
-    This function expects audio data with 32000 samples (1 second at 32kHz).
+def process_audio_with_panns(audio_data, timestamp=None, db_level=None, config=None):
+    """Process audio data using the PANNs model."""
+    if panns_model is None:
+        print("PANNs model not initialized")
+        return {"predictions": [{"label": "Error", "score": "1.0"}], "db": "0"}
     
-    Args:
-        audio_data: numpy array of audio samples
-        db_level: pre-calculated dB level or None to calculate
-        timestamp: timestamp of the audio data
-        config: dictionary with configuration parameters
-        
-    Returns:
-        None - results are emitted via socketio
-    """
-    log_status("Processing audio with PANNs model", "info")
-    
-    if config is None:
-        config = {
-            'silence_threshold': SILENCE_THRES,
-            'db_level_threshold': DBLEVEL_THRES,
-            'prediction_threshold': PREDICTION_THRES,
-            'boost_factor': 1.2
-        }
-    
+    # Get configuration parameters or set defaults
+    config = config or {}
     silence_threshold = config.get('silence_threshold', SILENCE_THRES)
     db_level_threshold = config.get('db_level_threshold', DBLEVEL_THRES)
-    prediction_threshold = config.get('prediction_threshold', PREDICTION_THRES)
+    prediction_threshold = config.get('prediction_threshold', 0.01)  # Lowered to 0.01
     
+    # Check for silence
+    if db_level is not None and db_level < silence_threshold:
+        print(f"Audio level ({db_level}) below silence threshold ({silence_threshold})")
+        return {"predictions": [{"label": "Silent", "score": "1.0"}], "db": str(db_level)}
+    
+    # Make predictions with PANNs model
     try:
-        # Convert audio_data to numpy array if it's not already
-        if not isinstance(audio_data, np.ndarray):
-            try:
-                audio_data = np.array(audio_data, dtype=np.float32)
-                log_status("Converted audio to numpy array", "info")
-            except Exception as e:
-                log_status(f"Error converting audio_data to numpy array: {e}", "error")
-                emit_prediction([("Invalid Audio Format", 1.0)], db_level, timestamp)
-                return
+        predictions = panns_model.predict_with_panns(audio_data, threshold=prediction_threshold)
         
-        # Ensure we have float32 data
-        if audio_data.dtype != np.float32:
-            audio_data = audio_data.astype(np.float32)
-        
-        # Log detailed audio statistics
-        audio_stats = {
-            'length': len(audio_data),
-            'min': float(np.min(audio_data)),
-            'max': float(np.max(audio_data)),
-            'mean': float(np.mean(audio_data)),
-            'rms': float(np.sqrt(np.mean(audio_data**2)))
-        }
-        log_audio_stats(audio_stats)
-        
-        # Check for NaN or Inf values
-        if np.isnan(audio_data).any():
-            audio_stats['has_nan'] = True
-            log_status("Warning: Audio contains NaN values, fixing...", "warning")
-            audio_data = np.nan_to_num(audio_data)
-        
-        if np.isinf(audio_data).any():
-            audio_stats['has_inf'] = True
-            log_status("Warning: Audio contains Inf values, fixing...", "warning")
-            audio_data = np.nan_to_num(audio_data)
-        
-        # Calculate dB level if not provided
-        if db_level is None:
-            db_level = dbFS(audio_data)
-        
-        # Check if audio is too quiet
-        if db_level < db_level_threshold:
-            log_status(f"Audio too quiet: {db_level:.2f} dB < {db_level_threshold} dB threshold", "warning")
-            emit_prediction([("Silence", 1.0)], db_level, timestamp)
-            return
-        
-        # Check if we're using the optimized model
-        model_type = os.environ.get('PANNS_MODEL_TYPE', 'pytorch').lower()
-        if model_type != 'pytorch' and OPTIMIZED_MODELS_AVAILABLE:
-            # Use optimized prediction function
-            predictions = panns_model_onnx.predict_with_optimized_model(
-                audio_data, 
-                top_k=10, 
-                threshold=silence_threshold,
-                boost_other_categories=True
-            )
+        # Filter and process results
+        if predictions:
+            # Format results for the client
+            results = []
+            for label, score in predictions:
+                results.append({"label": label, "score": str(score)})
+            
+            # Return formatted results
+            return {
+                "predictions": results,
+                "db": str(db_level) if db_level is not None else "0"
+            }
         else:
-            # Use standard prediction function
-            predictions = panns_model.predict_with_panns(
-                audio_data, 
-                top_k=10, 
-                threshold=silence_threshold,
-                boost_other_categories=True
-            )
-        
-        # Log the predictions
-        log_prediction(predictions, db_level)
-        
-        # Emit the prediction
-        emit_prediction(predictions, db_level, timestamp)
-        
-        # Clean up memory
-        cleanup_memory()
-        
+            print("No predictions above threshold")
+            return {"predictions": [{"label": "Unknown", "score": "0.5"}], "db": str(db_level) if db_level is not None else "0"}
+    
     except Exception as e:
-        log_status(f"Error processing audio with PANNs: {e}", "error")
+        print(f"Error in PANNs prediction: {e}")
+        import traceback
         traceback.print_exc()
-        emit_prediction([("Error Processing Audio", 0.0)], db_level, timestamp)
+        return {"predictions": [{"label": "Error", "score": "1.0"}], "db": "0"}
 
 def emit_prediction(predictions, db_level, timestamp=None):
     """

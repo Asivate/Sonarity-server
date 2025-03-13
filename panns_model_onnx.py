@@ -592,4 +592,36 @@ def predict_with_optimized_model(audio_data, top_k=5, threshold=0.1, map_to_home
     except Exception as e:
         logger.error(f"Error in predict_with_optimized_model: {e}")
         traceback.print_exc()
-        return [("Error", 0.0)] 
+        return [("Error", 0.0)]
+
+def process_predictions(results, threshold=0.01):
+    """
+    Process the raw prediction results to return a more usable format.
+    
+    Args:
+        results: Raw prediction results array
+        threshold: Confidence threshold for including predictions
+        
+    Returns:
+        List of (label, score) tuples
+    """
+    # Lowered threshold to 0.01 from previous higher value
+    predictions = []
+    if isinstance(results, np.ndarray):
+        # Get top indices in descending order
+        sorted_indices = np.argsort(results)[::-1]
+        
+        # Get the audio labels if available
+        labels = get_audio_labels()
+            
+        # Create list of (label, score) tuples
+        for idx in sorted_indices:
+            score = float(results[idx])
+            if score >= threshold:  # Only include predictions above threshold
+                if labels and idx < len(labels):
+                    label = labels[idx]
+                else:
+                    label = f"class_{idx}"
+                    
+                predictions.append((label, score))
+    return predictions 
